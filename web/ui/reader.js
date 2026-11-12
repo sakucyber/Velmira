@@ -252,6 +252,7 @@ export async function mountReader({ bookId, params, debug }) {
   /* ================= 核心：章节加载 ================= */
   async function loadChapter(idx, target = {}, opts = {}) {
     if (idx < 0 || idx >= state.chapterCount) return;
+    if (annUI) annUI.hideAll();
     const token = ++loadToken;
     if (chapterAc) chapterAc.abort();
     if (segmentsAc) { segmentsAc.abort(); segmentsAc = null; }
@@ -341,6 +342,7 @@ export async function mountReader({ bookId, params, debug }) {
 
   /* ================= 分页回调 / 进度 / URL ================= */
   function onPagerChange(info) {
+    if (annUI) annUI.hideMenu();
     state.para = info.para;
     state.page = info.page;
     state.pages = info.pages;
@@ -559,6 +561,7 @@ export async function mountReader({ bookId, params, debug }) {
       bookId,
       column: dom.column,
       getAnnotations: () => state.annotations,
+      canActivate: () => Date.now() >= suppressClickUntil,
       onCreated: onAnnotationCreated,
       onUpdated: onAnnotationUpdated,
       onDeleted: onAnnotationDeleted,
@@ -590,6 +593,7 @@ export async function mountReader({ bookId, params, debug }) {
 
   /* ================= 主题 / 字号 ================= */
   async function openThemeMenu() {
+    if (annUI) annUI.hideMenu();
     const p = await ensurePanels();
     p.openTheme(dom.themeBtn, THEMES, theme, (next) => {
       theme = next;
@@ -676,6 +680,7 @@ export async function mountReader({ bookId, params, debug }) {
 
     // 翻页：点击左右 1/3 区域（事件委托；有选区或刚滑过时不误触）
     dom.viewport.addEventListener('click', (e) => {
+      if (e.target.closest && e.target.closest('mark.ann')) return;
       if (Date.now() < suppressClickUntil) return;
       const sel = window.getSelection();
       if (sel && String(sel).length > 0) return;
@@ -724,6 +729,7 @@ export async function mountReader({ bookId, params, debug }) {
 
   function onKeydown(e) {
     const t = e.target;
+    if (t && t.closest && t.closest('.ann-float') && e.key !== 'Escape') return;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (e.key === 'Escape') {
       if (panels && panels.isOpen()) panels.close();

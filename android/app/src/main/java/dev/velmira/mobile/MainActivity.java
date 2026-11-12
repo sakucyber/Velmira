@@ -8,6 +8,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -115,7 +116,7 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setUserAgentString(s.getUserAgentString() + " VelmiraAndroid/0.4.0");
-        if (getApplicationInfo().targetSdkVersion >= 26) {
+        if (Build.VERSION.SDK_INT >= 26) {
             s.setSafeBrowsingEnabled(false);
         }
         web.setBackgroundColor(Color.rgb(244, 241, 234));
@@ -165,7 +166,11 @@ public class MainActivity extends Activity {
                 }
                 fileCallback = callback;
                 try {
-                    Intent intent = params.createIntent();
+                    // WebView 会把 HTML 的 .txt/.epub/.cbz 扩展名原样作为 MIME 类型，
+                    // 部分系统文档选择器因此把所有文件隐藏。由后端按内容验证格式。
+                    Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("*/*");
                     if (params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE) {
                         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                     }
@@ -353,10 +358,7 @@ public class MainActivity extends Activity {
                 web.loadUrl(baseUrl + "/");
                 return;
             }
-            if (web.canGoBack()) {
-                web.goBack();
-                return;
-            }
+            // 书架直接返回设置，避免 WebView 历史把用户带回刚退出的阅读页。
             showSetup();
             return;
         }

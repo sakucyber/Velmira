@@ -18,18 +18,28 @@ const COLORS = [
   { id: 'pink', name: '粉色' },
 ];
 
-export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCreated, onUpdated, onDeleted }) {
+export function createAnnotationUI({ layer, bookId, column, getAnnotations, canActivate = () => true, onCreated, onUpdated, onDeleted }) {
   let menu = null;        // 当前浮动菜单
   let menuKind = null;    // 'selection' | 'mark'
   let pending = null;     // { chapter, para, start, end, text } 或已有 annotation 对象
   let modal = null;
   let hideTimer = 0;
+  let hoverTimer = 0;
+  let activeMark = null;
+  let pinned = false;
 
   function annPath(id) {
     return '/api/books/' + encodeURIComponent(bookId) + '/annotations' + (id ? '/' + encodeURIComponent(id) : '');
   }
 
   function hideMenu() {
+    clearTimeout(hoverTimer);
+    if (activeMark) {
+      activeMark.removeAttribute('aria-expanded');
+      activeMark.removeAttribute('aria-controls');
+    }
+    activeMark = null;
+    pinned = false;
     if (!menu) return;
     menu.remove();
     menu = null;
@@ -135,7 +145,7 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCr
     menuKind = 'selection';
     pending = { chapter, para: loc.para, start: loc.start, end: loc.end, text: loc.text };
     menu = el('div', 'ann-float ann-float-sel');
-    menu.setAttribute('role', 'menu');
+    menu.setAttribute('role', 'dialog');
     menu.setAttribute('aria-label', '注释操作');
     menu.appendChild(colorDots(null, (color) => createAnnotation(color, null)));
     menu.appendChild(el('span', 'ann-sep'));
@@ -187,14 +197,38 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCr
   }
 
   /* ---------------- 2) 点击高亮菜单 ---------------- */
-  function showMarkMenu(ann, markNode) {
+  function markRect(mark, point) {
+    // 多列/跨行文字的总包围盒可能跨越屏外列；以实际指向的可见行定位。
+    const viewport = column.parentElement.getBoundingClientRect();
+    const rects = [...mark.getClientRects()].filter((r) =>
+      r.right > viewport.left && r.left < viewport.right && r.bottom > viewport.top && r.top < viewport.bottom);
+    return rects.find((r) => point && point.clientX >= r.left && point.clientX <= r.right
+      && point.clientY >= r.top && point.clientY <= r.bottom) || rects[0] || mark.getBoundingClientRect();
+  }
+
+  function showMarkMenu(ann, markNode, point, pin = false) {
+    clearTimeout(hoverTimer);
+    if (menuKind === 'mark' && activeMark === markNode) {
+      pinned = pinned || pin;
+      return;
+    }
     hideMenu();
     menuKind = 'mark';
+    pinned = pin;
+    activeMark = markNode;
     pending = ann;
     menu = el('div', 'ann-float ann-float-mark');
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('aria-label', '高亮操作');
-    menu.appendChild(colorDots(ann.color, async (color) => {
+    menu.id = 'ann-popover';
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-label', ann.note ? '批注' : '高亮操作');
+    markNode.setAttribute('aria-expanded', 'true');
+    markNode.setAttribute('aria-controls', menu.id);
+    if (ann.note && ann.note.trim()) {
+      menu.appendChild(el('div', 'ann-note-heading', '批注'));
+      menu.appendChild(el('div', 'ann-note-content', ann.note));
+    }
+    const toolbar = el('div', 'ann-toolbar');
+    toolbar.appendChild(colorDots(ann.color, async (color) => {
       if (color === ann.color) { hideMenu(); return; }
       hideMenu();
       try {
@@ -203,10 +237,31 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCr
         toast('已改色');
       } catch (err) { toast('改色失败：' + (err.message || '未知错误')); }
     }));
-    menu.appendChild(el('span', 'ann-sep'));
-    menu.appendChild(actionBtn('笔记', '改笔记', () => openNoteEditor(ann)));
-    menu.appendChild(actionBtn('删除', '删除该高亮', () => removeAnnotation(ann), 'ann-act ann-act-danger'));
-    place(menu, markNode.getBoundingClientRect());
+    toolbar.appendChild(el('span', 'ann-sep'));
+    toolbar.appendChild(actionBtn(ann.note ? '编辑' : '笔记', '编辑批注', () => openNoteEditor(ann)));
+    toolbar.appendChild(actionBtn('删除', '删除该高亮及批注', () => removeAnnotation(ann), 'ann-act ann-act-danger'));
+    menu.appendChild(toolbar);
+    menu.addEventListener('pointerenter', () => clearTimeout(hoverTimer));
+    menu.addEventListener('pointerleave', scheduleHoverHide);
+    menu.addEventListener('focusin', () => { pinned = true; clearTimeout(hoverTimer); });
+    menu.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        markNode.focus({ preventScroll: true });
+        hideMenu();
+      }
+    });
+    place(menu, markRect(markNode, point));
+  }
+
+  function scheduleHoverHide() {
+    clearTimeout(hoverTimer);
+    if (!pinned) hoverTimer = setTimeout(hideMenu, 180);
+  }
+
+  function annotationFor(mark) {
+    return ((getAnnotations && getAnnotations()) || []).find((a) => String(a.id) === mark.dataset.ann);
   }
 
   async function removeAnnotation(ann) {
@@ -315,13 +370,35 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCr
       if (!mark) return;
       const sel = window.getSelection();
       if (sel && String(sel).length > 0) return;
-      const id = mark.getAttribute('data-ann');
-      const list = (getAnnotations && getAnnotations()) || [];
-      const ann = list.find((a) => String(a.id) === id);
-      if (!ann) return;
       e.stopPropagation();
-      showMarkMenu(ann, mark);
+      if (!canActivate() || modal) return;
+      const ann = annotationFor(mark);
+      if (!ann) return;
+      showMarkMenu(ann, mark, e, true);
     }, true);
+
+    column.addEventListener('pointerover', (e) => {
+      if (e.pointerType !== 'mouse' || modal || !canActivate()) return;
+      const mark = e.target.closest && e.target.closest('mark.ann-note');
+      if (!mark || mark.contains(e.relatedTarget)) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) return;
+      // 已固定的批注保留到用户点击另一条或点空白处。
+      if (pinned || menuKind === 'selection') return;
+      const ann = annotationFor(mark);
+      if (ann) showMarkMenu(ann, mark, e);
+    });
+    column.addEventListener('pointerout', (e) => {
+      if (activeMark && activeMark.contains(e.target) && !activeMark.contains(e.relatedTarget)) scheduleHoverHide();
+    });
+    column.addEventListener('keydown', (e) => {
+      const mark = e.target.closest && e.target.closest('mark.ann');
+      if (!mark || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const ann = annotationFor(mark);
+      if (ann) showMarkMenu(ann, mark, null, true);
+    });
 
     // 点空白处 / 滚动 / resize 收起菜单
     document.addEventListener('pointerdown', (e) => {
@@ -333,11 +410,18 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, onCr
       if (e.key === 'Escape') { hideMenu(); removeModal(); }
     });
     window.addEventListener('resize', hideMenu, { passive: true });
+    document.addEventListener('scroll', (e) => {
+      if (menu && menu.contains(e.target)) return;
+      hideMenu();
+    }, { capture: true, passive: true });
+    document.addEventListener('focusin', (e) => {
+      if (menu && !menu.contains(e.target) && e.target !== activeMark) hideMenu();
+    });
   }
 
   let chapterGetter = () => 0;
   function currentChapter() { return chapterGetter(); }
   function setChapterGetter(fn) { chapterGetter = fn; }
 
-  return { bind, hideAll, setChapterGetter, openNoteEditor };
+  return { bind, hideAll, hideMenu, setChapterGetter, openNoteEditor };
 }

@@ -304,7 +304,7 @@ export class Pager {
 
   /* ---------- 注释高亮（契约 7.5 / 7.6） ----------
      渲染规则：<mark class="ann ann-<color>" data-ann="<id>"> 只包裹原文文本节点，
-     不改文本内容；mark 只改背景色（无 padding/border），因此不影响分页测量。
+     不改文本内容；背景色与笔记双下划线不占布局空间，因此不影响分页测量。
      切章/换块/改字号/换主题后整章重建：先拆旧 mark 恢复纯文本，再按当前注释列表重包。 */
 
   setAnnotations(list) {
@@ -353,6 +353,7 @@ export class Pager {
       const item = {
         id: String(a.id || ''),
         color: a.color || 'yellow',
+        hasNote: typeof a.note === 'string' && a.note.trim().length > 0,
         s: Math.max(0, Number(a.start_offset) || 0),
         e: Math.min(len, Number(a.end_offset) || 0),
       };
@@ -367,8 +368,12 @@ export class Pager {
       if (it.s < cursor) it.s = cursor;  // 部分重叠：裁掉重叠部分，避免嵌套 mark
       if (it.s > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, it.s)));
       const mark = document.createElement('mark');
-      mark.className = 'ann ann-' + it.color;
+      mark.className = 'ann ann-' + it.color + (it.hasNote ? ' ann-note' : '');
       mark.setAttribute('data-ann', it.id);
+      mark.tabIndex = 0;
+      mark.setAttribute('role', 'button');
+      mark.setAttribute('aria-label', (it.hasNote ? '查看批注：' : '编辑高亮：') + text.slice(it.s, it.e));
+      mark.setAttribute('aria-haspopup', 'dialog');
       mark.textContent = text.slice(it.s, it.e);
       frag.appendChild(mark);
       cursor = it.e;

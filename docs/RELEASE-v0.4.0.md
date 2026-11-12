@@ -1,0 +1,15 @@
+# Velmira v0.4.0 本地交付说明
+
+本版本已完成本地构建与验证，尚未发布 GitHub Release。Git 仅保存源码、文档、测试和构建配置；APK 与 Windows 桌面包保留在本地 `dist/`，不纳入版本库。
+
+- 批注：写有笔记的文字显示双下划线；鼠标悬停、点击或手机轻触可直接查看，保留换行、编辑、改色和删除。支持键盘 Enter / 空格与 Escape。
+- Android：已在 Android 12 真机验证 TXT / EPUB / CBZ 导入和阅读、批注、漫画、进度、实时书库、返回导航与连接失败提示；修复文件选择器过滤和重复导入问题。
+- Windows：自包含桌面包包含 Go 窗口与 Python 后端，无需目标机器安装 Python。完整解压后运行 `Velmira.exe`，需要 WebView2 Runtime。
+- 版本：后端健康检查、前端标识、桌面分发和 APK 统一为 0.4.0。
+- CI：增加 Windows 上的单测、JS 语法检查、自包含包与 APK 构建、打包后端浏览器专项回归及产物上传。
+
+本地产物在 `dist/`：`Velmira-desktop-v0.4.0-win-x64.zip`、`Velmira-universal.apk`、`SHA256SUMS.txt`。APK 使用本机测试签名，适合侧载验证；正式商店分发需要配置正式签名。
+
+分发版书库位于 `%LOCALAPPDATA%\Velmira\data`；源码工作区仍使用项目 `data/`，可用 `DATA_DIR` 指定。Android 客户端需要电脑服务在线，填写 `http://<电脑局域网IP>:8765`；桌面端需以 `-bind 0.0.0.0` 启动以允许局域网连接。
+
+测试详情及尚未覆盖的环境见 [v0.4 验证记录](../tests/REPORT-v0.4.md)。后续 AI 漫改与阅读助手仍属于 M2。

@@ -1,8 +1,8 @@
-# API 契约 v0.3（Velmira · 前后端唯一真相）
+# API 契约 v0.4（Velmira · 前后端唯一真相）
 
 > 所有 Agent 动手前必须先读本文件。字段名、路径、状态码以本文为准，任何一方不得单方面改动。
 > **v0.2 = v0.1 + 第 7 节 M1 增量**（EPUB/CBZ 导入、漫画分页媒体、注释高亮、品牌/版本）。
-> **v0.3 = v0.2 + 第 8 节**（实时书库 SSE + 内容脱敏规则）。冲突时以第 8 节为准。
+> **v0.4 = v0.3 + 第 9 节**（批注预览与统一版本）。v0.3 = v0.2 + 第 8 节；冲突时以较新章节为准。
 > 端口：127.0.0.1:8765（测试用 8799 或 --port 随机，数据目录互相隔离）
 > 索引约定：章节 idx **0-based**（前端展示 +1）；段落下标 0-based。
 
@@ -287,10 +287,10 @@ curl.exe -X POST "http://127.0.0.1:8765/api/books?filename=book.txt" --data-bina
 ## 7.1 品牌与版本
 
 - 产品名：**Velmira**（UI 标题、document.title、README、健康检查统一）
-- `server/app/config.py: VERSION = "0.3.0"`
+- `server/app/config.py: VERSION = "0.4.0"`（当前版本，见第 9 节）
 - GET /api/health 变为：
 ~~~json
-{"ok": true, "name": "Velmira", "version": "0.3.0", "data_dir": "..."}
+{"ok": true, "name": "Velmira", "version": "0.4.0", "data_dir": "..."}
 ~~~
 - 前端不得再出现旧品牌名；浏览器标签页格式：`<书名> · Velmira`
 
@@ -424,3 +424,11 @@ data: {"revision": 7, "count": 3}
 
 - 仓库提供 `samples/demo-text.txt`：通用中文占位文本（≥2000 字，无具体小说内容），用于演示分页/高亮/注释。
 - 不提交 `data/` 运行数据；用户首次启动为**空书库**，由用户导入。
+
+# 9. v0.4 增量：批注预览与分发
+
+- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.4.0"`；书库标识为 v0.4，APK 版本为 0.4.0。
+- 注释 API 和数据库结构不变。`note` 为非空文字时，原文 `mark.ann` 额外带 `ann-note` 类，用双下划线标记；普通高亮维持四色背景。
+- 鼠标悬停批注文字直接展示笔记，点击可固定弹层；手机单击、键盘 Enter/空格也可查看。弹层保留改色、编辑、删除操作。
+- 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。
+- 桌面分发包包含 `backend/Velmira-backend.exe`（PyInstaller），优先启动内置后端，源代码模式仍可使用 Python。打包模式默认数据目录为 `%LOCALAPPDATA%\Velmira\data`，`DATA_DIR` 可覆盖。

@@ -93,7 +93,7 @@ async function main() {
   /* ---------- 书库品牌/徽标 ---------- */
   await nav(BASE + "/", 2600);
   const lib = JSON.parse(await cdp.eval("JSON.stringify({title:document.title,brand:(document.querySelector('.rail-brand')||{}).textContent,brandTag:(document.querySelector('.rail-ver')||{}).textContent,badges:[...document.querySelectorAll('.fmt-badge')].map(b=>b.textContent.trim()+'|'+b.className),cards:document.querySelectorAll('.book-card').length,docScroll:document.documentElement.scrollWidth,docClient:document.documentElement.clientWidth})"));
-  add("G1 书库 title/brand", /Velmira/.test(lib.title) && /Velmira/.test(lib.brand) && lib.brandTag === "v0.3" ? "PASS" : "FAIL", j(lib));
+  add("G1 书库 title/brand", /Velmira/.test(lib.title) && /Velmira/.test(lib.brand) && lib.brandTag === "v0.4" ? "PASS" : "FAIL", j(lib));
   add("G2 书库 3 种格式徽标", lib.badges.length >= 3 && ["TXT", "EPUB", "CBZ"].every((x) => lib.badges.some((b) => b.startsWith(x))) ? "PASS" : "FAIL", j(lib.badges));
 
   /* ---------- 准备数据：txt/cbz + 第 5 章 4 条注释 ---------- */

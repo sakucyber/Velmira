@@ -688,6 +688,14 @@ mark.ann-yellow { background: var(--ann-yellow); }
 mark.ann-green { background: var(--ann-green); }
 mark.ann-blue { background: var(--ann-blue); }
 mark.ann-pink { background: var(--ann-pink); }
+mark.ann-note {
+  text-decoration-line: underline;
+  text-decoration-style: double;
+  text-decoration-thickness: 1px;
+  text-underline-offset: .2em;
+  text-decoration-skip-ink: none;
+}
+mark.ann:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 mark.ann.ann-flash { animation: annFlash .55s ease-in-out 4; }
 @keyframes annFlash {
   0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); }
@@ -702,6 +710,15 @@ mark.ann.ann-flash { animation: annFlash .55s ease-in-out 4; }
   background: var(--surface); border: 1px solid var(--line);
   box-shadow: var(--shadow);
   animation: menuIn .18s var(--ease-out) both;
+}
+.ann-float-mark { display: block; max-width: calc(100vw - 16px); color: var(--text); }
+.ann-toolbar { display: flex; align-items: center; gap: 2px; }
+.ann-note-heading { margin: 7px 7px 5px; font-size: 12px; color: var(--muted); }
+.ann-note-content {
+  width: 290px; max-width: calc(100vw - 46px);
+  max-height: min(260px, calc(100dvh - 130px)); overflow-y: auto;
+  margin: 0 7px 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line);
+  font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 @keyframes menuIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
 .ann-color {

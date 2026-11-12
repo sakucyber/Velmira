@@ -386,6 +386,8 @@ export async function mountLibrary() {
   window.addEventListener('pageshow', (e) => {
     if (!e.persisted || !destroyed) return;
     destroyed = false;
+    importing = false;
+    setImporting(-1);
     setLiveState('connecting');
     refreshBooks({ force: true });
     openEventSource();
@@ -417,7 +419,12 @@ export async function mountLibrary() {
       store.set({ book: res.book.id, chapter: 0, para: 0, offset: 0 });
       toast(res.deduped ? '这本书已在书架中' : '导入成功 · ' + res.book.chapter_count + ' 章');
       setImporting(1, file.name);
-      setTimeout(() => { location.href = '/?book=' + encodeURIComponent(res.book.id); }, 320);
+      setTimeout(() => {
+        // 返回书架时页面可能由 bfcache 恢复，不能残留“正在导入”锁。
+        importing = false;
+        setImporting(-1);
+        location.href = '/?book=' + encodeURIComponent(res.book.id);
+      }, 320);
     } catch (err) {
       importing = false;
       setImporting(-1);

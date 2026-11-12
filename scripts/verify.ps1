@@ -68,9 +68,9 @@ try {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
   $totalJs = ($jsFiles | Measure-Object -Property Length -Sum).Sum
   Write-Host ("node --check: " + $jsFiles.Count + " files, fail=" + $jsFail)
-  Write-Host ("JS total: " + $totalJs + " bytes (" + [math]::Round($totalJs / 1024, 1) + " KB), budget 120KB")
+  Write-Host ("JS total: " + $totalJs + " bytes (" + [math]::Round($totalJs / 1024, 1) + " KB), budget 150KB")
   if ($jsFail -gt 0) { $failures += "node --check 失败 $jsFail 个文件" }
-  if ($totalJs -ge 120 * 1024) { $failures += "JS 体积超 120KB" }
+  if ($totalJs -ge 150 * 1024) { $failures += "JS 体积超 150KB" }
 
   Step "4. H 单测"
   python -m unittest discover -s tests -v

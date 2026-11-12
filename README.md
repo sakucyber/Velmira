@@ -2,7 +2,7 @@
 
 本地优先的小说 / 漫画阅读器。导入 TXT、EPUB、CBZ 即读：分页阅读、书签、注释高亮、全文检索、分段选片，书库实时同步。
 
-> 版本 v0.3.0 · 纯本地运行 · 无需联网 · 零第三方前端依赖
+> 版本 v0.4.0 · 纯本地运行 · 无需联网 · 零第三方前端依赖
 > 仓库：https://github.com/sakucyber/Velmira
 
 ## 基于 foliate-js
@@ -26,7 +26,8 @@
 ## 快速开始
 
 ~~~powershell
-# 1) 起服务（Windows；Python 3.11 + 已装 fastapi/uvicorn/Pillow，无需 npm/pip 安装）
+# 1) 安装后端依赖并起服务（Windows；Python 3.11+；无需 npm）
+python -m pip install -r server/requirements.txt
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run.ps1
 # → http://127.0.0.1:8765/
 
@@ -49,6 +50,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop.ps1
 
 # 运行
 desktop\Velmira.exe
+
+# 自包含分发包（目标机无需安装 Python）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-bundle.ps1
 ~~~
 
 - 启动时自动在空闲端口拉起后端，健康检查通过后导航到界面；退出时结束后端进程树；
@@ -79,7 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 | CBZ 漫画导入 | 自然排序解压、按页阅读、/media immutable 缓存 |
 | 分页阅读 | 键盘 / 点击区 / 触摸滑动；目录过滤；3 套主题、4 档字号；进度精确恢复 |
 | 书签 | 当前段一键加书签、抽屉列表、跳转、去重 |
-| 注释高亮 | 选中文字 → 4 色高亮 / 写笔记 / 复制；点击可改色、改笔记、删除；切章 / 改字号后自动重建 |
+| 注释高亮 | 选中文字 → 4 色高亮 / 写笔记 / 复制；笔记文字显示双下划线，鼠标悬停或电脑/手机点击直接查看批注；支持编辑、删除与切章 / 改字号后重建 |
 | 全文检索 | FTS5 trigram（≥3 字 bm25 / 2 字 LIKE / 1 字兜底），命中可跳转并高亮 |
 | 分段选片 | 段落窗口 + 7 特征打分 + 语料百分位，每章选 1 个高分片段（为后续漫改准备） |
 | 书库实时同步 | SSE 推送 + 5 秒轮询兜底；导入新书后书架自动出现，保留滚动位置、不整页刷新 |
@@ -135,7 +139,7 @@ docs/                   架构、计划、契约、截图
 | --- | --- |
 | TXT 导入（234 章 / 51.6 万字） | 27ms |
 | EPUB 导入（234 章） | ~140ms |
-| 前端 JS 总量 | 约 119.5KB（预算 150KB） |
+| 前端 JS 总量 | 约 123.8KB（预算 150KB，v0.4.0 实测） |
 | 首屏请求 | 文本 9 / 漫画 10–11 |
 | 单章 DOM | 不超过 256（含高亮）；漫画模式 94 |
 | 翻页 | 0.075ms / 次（只改 transform）；漫画翻页 0–4ms |
@@ -145,7 +149,7 @@ docs/                   架构、计划、契约、截图
 ## 已知限制
 
 - EPUB 只取文本（不渲染内嵌图片 / 样式）；CBZ 不解析 ComicInfo.xml，标题用文件名
-- 双页模式未做；触摸滑动仅在 Chromium 无头环境用合成事件验证
+- 双页模式未做；触摸滑动已在 Android 12 真机与 Chromium 合成事件中验证
 - SSE 为单进程内广播（uvicorn 单 worker 假设）；多 worker 部署时自动退化为轮询
 - 无鉴权、无多用户，定位单机 / 局域网自用
 
@@ -157,6 +161,7 @@ docs/                   架构、计划、契约、截图
 
 ## 文档与证据
 
-- docs/M0-PLAN.md · docs/M1-PLAN.md · docs/API-CONTRACT.md（v0.3）
-- tests/REPORT.md · tests/REPORT-M1.md
+- docs/M0-PLAN.md · docs/M1-PLAN.md · docs/API-CONTRACT.md（v0.4）
+- tests/REPORT.md · tests/REPORT-M1.md · [v0.4 验证记录](tests/REPORT-v0.4.md)
+- [v0.4.0 本地交付说明](docs/RELEASE-v0.4.0.md)
 - 截图：阅读器 · 笔记 · 目录 · 搜索 · 漫画 · 书库 · 移动端（docs/screenshots/）

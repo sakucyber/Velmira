@@ -1,0 +1,19 @@
+Velmira v0.4.0（Windows 自包含版）
+
+1. 完整解压文件夹，然后双击 Velmira.exe。
+2. 请保留旁边的 backend 文件夹；无需另装 Python。
+3. 导入 TXT、EPUB 或 CBZ 开始阅读。
+4. 选中文字，点“笔记”可写批注。有批注的文字带双下划线，
+   鼠标悬停或电脑/手机单击即可查看；点空白或按 Esc 收起。
+
+系统要求：Windows 10/11、Microsoft Edge WebView2 Runtime。
+书库数据：%LOCALAPPDATA%\Velmira\data
+后端日志：%LOCALAPPDATA%\Velmira\backend.log
+更新应用时保留上述数据目录即可；不要把个人书库放进发布压缩包。
+第三方依赖的许可文件随包放在 licenses 文件夹。
+
+Android 客户端需要电脑端在线。允许局域网连接时运行：
+Velmira.exe -bind 0.0.0.0
+手机填 http://电脑的局域网IP:8765。
+
+源代码、许可与使用文档：https://github.com/sakucyber/Velmira

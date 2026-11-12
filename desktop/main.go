@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -106,10 +107,13 @@ func findRoot() (string, error) {
 		dirs = append(dirs, wd)
 	}
 	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Dir(exe))
+		dirs = append([]string{filepath.Dir(exe)}, dirs...)
 	}
 	for _, d := range dirs {
 		for i := 0; i < 6; i++ {
+			if _, err := os.Stat(sidecarPath(d)); err == nil {
+				return d, nil
+			}
 			if _, err := os.Stat(filepath.Join(d, "server", "app", "main.py")); err == nil {
 				return d, nil
 			}
@@ -120,7 +124,15 @@ func findRoot() (string, error) {
 			d = parent
 		}
 	}
-	return "", fmt.Errorf("找不到 Velmira 项目根目录（未找到 server/app/main.py）；用 -root 指定")
+	return "", fmt.Errorf("找不到 Velmira 后端（backend/Velmira-backend.exe 或 server/app/main.py）；用 -root 指定")
+}
+
+func sidecarPath(root string) string {
+	name := "Velmira-backend"
+	if os.PathSeparator == '\\' {
+		name += ".exe"
+	}
+	return filepath.Join(root, "backend", name)
 }
 
 func backendPort() int {
@@ -163,27 +175,20 @@ func freePort() int {
 
 func ensureBackend(root string, port int) (baseURL string, stop func(), err error) {
 	// Reuse a server that is already running (dev convenience).
-	if h, ok := healthAt(port); ok && strings.Contains(strings.ToLower(h.Name), "velmira") {
+	if h, ok := healthAt(port); ok && h.Name == "Velmira" {
 		return fmt.Sprintf("http://127.0.0.1:%d", port), func() {}, nil
 	}
 	// Pick a free port when the preferred one is taken by something else.
-	if _, ok := healthAt(port); ok {
+	listener, listenErr := net.Listen("tcp", net.JoinHostPort(*flagBind, strconv.Itoa(port)))
+	if listenErr != nil {
 		port = freePort()
+	} else {
+		listener.Close()
 	}
 
-	py := *flagPython
-	if py == "" {
-		py = os.Getenv("VELMIRA_PYTHON")
-	}
-	if py == "" {
-		py = "python"
-	}
-	if _, err := exec.LookPath(py); err != nil {
-		if p, e := exec.LookPath("py"); e == nil {
-			py = p
-		} else {
-			return "", nil, fmt.Errorf("找不到 Python（尝试 %q）：请安装 Python 3.11+ 并加入 PATH，或用 -python 指定", py)
-		}
+	cmd, err := backendCommand(root, port)
+	if err != nil {
+		return "", nil, err
 	}
 
 	logPath := backendLogPath()
@@ -191,10 +196,11 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 	if logFile != nil {
 		fmt.Fprintf(logFile, "\n=== %s velmira backend :%d ===\n", time.Now().Format(time.RFC3339), port)
 	}
-
-	cmd := exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port))
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
+	if os.Getenv("DATA_DIR") == "" {
+		cmd.Env = append(cmd.Env, "DATA_DIR="+dataDir(root))
+	}
 	if logFile != nil {
 		cmd.Stdout, cmd.Stderr = logFile, logFile
 	}
@@ -209,23 +215,21 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	stopped := false
+	var stopOnce sync.Once
 	stopFn := func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		if cmd.Process != nil {
-			killProcessTree(cmd.Process.Pid)
-		}
-		if logFile != nil {
-			logFile.Close()
-		}
+		stopOnce.Do(func() {
+			if cmd.Process != nil {
+				killProcessTree(cmd.Process.Pid)
+			}
+			if logFile != nil {
+				logFile.Close()
+			}
+		})
 	}
 
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		if h, ok := healthAt(port); ok && h.OK {
+		if h, ok := healthAt(port); ok && h.OK && h.Name == "Velmira" {
 			return fmt.Sprintf("http://127.0.0.1:%d", port), stopFn, nil
 		}
 		select {
@@ -238,6 +242,31 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 	}
 	stopFn()
 	return "", nil, fmt.Errorf("后台服务启动超时（60s），见日志：%s", logPath)
+}
+
+func backendCommand(root string, port int) (*exec.Cmd, error) {
+	// 显式 Python 参数仍可用于开发；普通分发包优先使用内置边车。
+	if *flagPython == "" && os.Getenv("VELMIRA_PYTHON") == "" {
+		if info, err := os.Stat(sidecarPath(root)); err == nil && !info.IsDir() {
+			return exec.Command(sidecarPath(root), "--host", *flagBind, "--port", strconv.Itoa(port)), nil
+		}
+	}
+	py := *flagPython
+	if py == "" {
+		py = os.Getenv("VELMIRA_PYTHON")
+	}
+	if py == "" {
+		py = "python"
+	}
+	if _, err := exec.LookPath(py); err != nil {
+		if p, e := exec.LookPath("py"); e == nil {
+			py = p
+		} else {
+			return nil, fmt.Errorf("找不到内置后端或 Python（尝试 %q）：请使用完整桌面分发包，或用 -python 指定", py)
+		}
+	}
+
+	return exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port)), nil
 }
 
 func backendLogPath() string {
@@ -255,6 +284,14 @@ func backendLogPath() string {
 func dataDir(root string) string {
 	if v := os.Getenv("DATA_DIR"); v != "" {
 		return v
+	}
+	if _, err := os.Stat(filepath.Join(root, "server", "app", "main.py")); err == nil {
+		return filepath.Join(root, "data")
+	}
+	if _, err := os.Stat(sidecarPath(root)); err == nil {
+		if cache, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(cache, "Velmira", "data")
+		}
 	}
 	return filepath.Join(root, "data")
 }
@@ -304,7 +341,7 @@ func showFatal(err error) {
 		p{color:#b9ae9d}code{background:#26302b;padding:2px 6px;border-radius:4px;color:#d8c7a8}
 		</style></head><body><main><h1>Velmira 无法启动</h1>
 		<p>%s</p>
-		<p>常见原因：未安装 Python 3.11+、项目文件不完整，或后台服务端口被占用。启动日志在 <code>%%LOCALAPPDATA%%\Velmira\backend.log</code>。</p>
+		<p>请确认桌面分发包已完整解压、内置 backend 文件夹存在，且后台端口可用。源码运行需要 Python 3.11+。启动日志在 <code>%%LOCALAPPDATA%%\Velmira\backend.log</code>。</p>
 		</main></body></html>`, htmlEscape(err.Error()))
 		win.Page().LoadHTML(html, "")
 	})

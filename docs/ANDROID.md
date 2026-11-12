@@ -23,18 +23,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 
 ## 安装与使用
 
-1. 电脑端启动 Velmira：`powershell -File scripts/run.ps1`（或桌面端 Velmira.exe）；
+1. 电脑端启动局域网服务：`powershell -File scripts/run.ps1 -BindAddress 0.0.0.0`（或 `desktop\Velmira.exe -bind 0.0.0.0`）；
 2. 查电脑局域网 IP：`ipconfig` 里的 IPv4 地址，确认 8765 端口可访问（Windows 防火墙放行 Python/端口）；
 3. 手机安装 APK（允许「安装未知来源应用」），打开 Velmira，输入 `http://<电脑IP>:8765`，点「连接」；
 4. 连接成功后进入书架。返回键：阅读页 → 回书架；书架 → 服务器设置；设置页 → 退出。
 
 支持的手机端交互：书架/阅读/书签/注释/搜索/目录/漫画翻页，主题与字号；导入文件走系统文件选择器（TXT/EPUB/CBZ），上传到桌面服务。
 
+USB 调试时也可用 `adb reverse tcp:8765 tcp:8765`，手机填写 `http://127.0.0.1:8765`，无需更改防火墙或局域网监听。
+
+2026-11-12 验证状态：APK 构建及 v2/v3 签名校验通过，并已在 OPPO PECM30（Android 12、WebView 151）上通过无线 ADB 安装和实测。覆盖连接、书库实时同步、TXT 阅读、双下划线批注点击、滑动翻页、进度、书签、返回导航，以及系统文件选择器导入 TXT / EPUB / CBZ、漫画翻页和连接失败提示。另通过 390×844 浏览器触摸专项回归。验证记录见 [REPORT-v0.4.md](../tests/REPORT-v0.4.md)。
+
+本轮修复了系统选择器隐藏可导入文件、导入成功后返回书架无法再次导入、书架返回键回跳阅读页的问题。Android 7 的 Safe Browsing API 判断已按系统版本修正；Android 7 兼容性尚未在对应设备上实测。
+
 ## 已知限制
 
 - 依赖桌面端服务在线；手机与电脑必须同一网络（或可路由的局域网/VPN）。
 - 首次连接使用明文 HTTP（局域网），未做 TLS；不要在公网暴露 8765。
-- 未在真机/模拟器上跑过的状态（构建环境没有加速模拟器）：UI 与 API 已与桌面 Web 版共用，Android 壳只负责连接、WebView 与文件选择器。
+- 真机覆盖 Android 12 的上述机型；其他 Android / WebView 版本尚未实测。
 - 桌面端服务默认绑定 127.0.0.1：要在手机上访问，需要监听局域网地址：
   - Web 版：`powershell -File scripts/run.ps1 -BindAddress 0.0.0.0`
   - 桌面端：`desktop\Velmira.exe -bind 0.0.0.0`

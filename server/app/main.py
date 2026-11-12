@@ -1,6 +1,6 @@
 """FastAPI 应用入口：建库 → 挂载业务路由 → 可选挂载扩展路由 → 最后挂静态目录。
 
-项目：Velmira v0.3.0；v0.3 增量：实时书库 SSE（/api/events）。
+项目：Velmira v0.4.0；实时书库 SSE（/api/events）。
 启动：python -m uvicorn server.app.main:app --host 127.0.0.1 --port 8765
 数据目录：环境变量 DATA_DIR 优先，默认 项目根/data。
 """
@@ -43,7 +43,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        # 契约 7.1：健康检查暴露 Velmira 品牌名与 0.3.0 版本
+        # 健康检查暴露 Velmira 品牌名与当前版本
         return {
             "ok": True,
             "name": config.APP_NAME,
