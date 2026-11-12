@@ -165,3 +165,11 @@ def make_provider(config: dict[str, Any], requested: str | None = None) -> TextP
             raise ValueError("openai-compatible provider 需要 base_url 和 model")
         return OpenAICompatProvider(base_url=base_url, model=model, api_key_env=str(config.get("api_key_env") or ""))
     raise ValueError(f"不支持的文本 provider: {provider}")
+
+
+# 架构文档中的简短 provider 名称，便于外部集成保持稳定导入路径。
+OpenAICompat = OpenAICompatProvider
+Ollama = OpenAICompatProvider
+LlamaCpp = OpenAICompatProvider
+Mock = MockTextProvider
+

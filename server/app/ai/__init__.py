@@ -7,6 +7,7 @@ from .models import (
     render_identity,
     identity_hash,
 )
+from .providers import LlamaCpp, Mock, Ollama, OpenAICompat, TextProvider
 
 __all__ = [
     "CARD_FIELDS",
@@ -14,4 +15,9 @@ __all__ = [
     "normalize_scene",
     "render_identity",
     "identity_hash",
+    "TextProvider",
+    "OpenAICompat",
+    "Ollama",
+    "LlamaCpp",
+    "Mock",
 ]
