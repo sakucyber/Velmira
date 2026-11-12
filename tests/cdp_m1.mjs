@@ -92,7 +92,7 @@ async function main() {
 
   /* ---------- 书库品牌/徽标 ---------- */
   await nav(BASE + "/", 2600);
-  const lib = JSON.parse(await cdp.eval("JSON.stringify({title:document.title,brand:(document.querySelector('.brand')||{}).textContent,brandTag:(document.querySelector('.brand-tag')||{}).textContent,badges:[...document.querySelectorAll('.fmt-badge')].map(b=>b.textContent.trim()+'|'+b.className),cards:document.querySelectorAll('.book-card').length,docScroll:document.documentElement.scrollWidth,docClient:document.documentElement.clientWidth})"));
+  const lib = JSON.parse(await cdp.eval("JSON.stringify({title:document.title,brand:(document.querySelector('.rail-brand')||{}).textContent,brandTag:(document.querySelector('.rail-ver')||{}).textContent,badges:[...document.querySelectorAll('.fmt-badge')].map(b=>b.textContent.trim()+'|'+b.className),cards:document.querySelectorAll('.book-card').length,docScroll:document.documentElement.scrollWidth,docClient:document.documentElement.clientWidth})"));
   add("G1 书库 title/brand", /Velmira/.test(lib.title) && /Velmira/.test(lib.brand) && lib.brandTag === "v0.3" ? "PASS" : "FAIL", j(lib));
   add("G2 书库 3 种格式徽标", lib.badges.length >= 3 && ["TXT", "EPUB", "CBZ"].every((x) => lib.badges.some((b) => b.startsWith(x))) ? "PASS" : "FAIL", j(lib.badges));
 
@@ -153,7 +153,7 @@ async function main() {
   await sleep(500);
   await cdp.eval("document.querySelector('#btn-bookmark').click()");
   await sleep(900);
-  const bmOn = JSON.parse(await cdp.eval("JSON.stringify({pressed:document.querySelector('#btn-bookmark').getAttribute('aria-pressed'),ico:document.querySelector('#btn-bookmark .ico').textContent})"));
+  const bmOn = JSON.parse(await cdp.eval("JSON.stringify({pressed:document.querySelector('#btn-bookmark').getAttribute('aria-pressed'),active:document.querySelector('#btn-bookmark').classList.contains('active'),fill:getComputedStyle(document.querySelector('#btn-bookmark .star-fill')).opacity})"));
   await cdp.eval("document.querySelector('#btn-bookmark').click()");
   await sleep(900);
   const bmOff = await cdp.eval("document.querySelector('#btn-bookmark').getAttribute('aria-pressed')");
@@ -165,7 +165,7 @@ async function main() {
   await cdp.eval("var b=document.querySelector('.bm-jump'); if(b) b.click();");
   await sleep(900);
   const afterJump = JSON.parse(await cdp.eval("JSON.stringify({drawer:document.querySelectorAll('.drawer-bookmarks').length,ch:window.__velmira.state.chapter,para:window.__velmira.state.para})"));
-  add("G9 书签加/删/抽屉跳转", bmOn.pressed === "true" && bmOn.ico === "★" && bmOff === "false" && drawer.items >= 1 && afterJump.drawer === 0 ? "PASS" : "FAIL", "on=" + j(bmOn) + " off=" + bmOff + " drawer=" + j(drawer) + " jump=" + j(afterJump));
+  add("G9 书签加/删/抽屉跳转", bmOn.pressed === "true" && bmOn.active === true && bmOff === "false" && drawer.items >= 1 && afterJump.drawer === 0 ? "PASS" : "FAIL", "on=" + j(bmOn) + " off=" + bmOff + " drawer=" + j(drawer) + " jump=" + j(afterJump));
 
   await cdp.eval("document.querySelector('#btn-toc').click()");
   await sleep(1600);

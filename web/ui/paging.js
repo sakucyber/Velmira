@@ -54,6 +54,7 @@ export class Pager {
 
     this._raf = 0;
     this._scrollTimer = 0;
+    this._turnTimer = 0;
     this._busy = false;
     this.annotations = null;  // 当前章注释（只驻留当前章，切章由 reader 清空）
     this._onScroll = () => {
@@ -79,6 +80,7 @@ export class Pager {
   /* 销毁旧章 DOM 与引用（切章前必须先调用，保证内存里不残留两章正文） */
   clear() {
     if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+    this._clearTurn();
     this.paragraphs = null;
     this.chunks = null;
     this.paraPage = null;
@@ -162,13 +164,29 @@ export class Pager {
     });
   }
 
-  /* ---------- 翻页（只改 transform） ---------- */
-  applyTransform() {
+  /* ---------- 翻页（只改 transform；按钮/键盘翻页带 180ms 过渡） ---------- */
+  _clearTurn() {
+    if (this._turnTimer) { clearTimeout(this._turnTimer); this._turnTimer = 0; }
+    if (this.column) this.column.classList.remove('is-turning');
+  }
+
+  applyTransform(animate) {
     if (this.vertical) return;
+    if (animate) {
+      this.column.classList.add('is-turning');
+      if (this._turnTimer) clearTimeout(this._turnTimer);
+      this._turnTimer = setTimeout(() => {
+        this._turnTimer = 0;
+        this.column.classList.remove('is-turning');
+      }, 220);
+    } else {
+      this._clearTurn();
+    }
     this.column.style.transform = 'translateX(' + (-this.page * this.stride) + 'px)';
   }
 
-  async next() {
+  async next(opts) {
+    const animate = !!(opts && opts.animate);
     if (!this.paragraphs || !this.chunks) return false;
     if (this.vertical) {
       const vp = this.viewport;
@@ -187,7 +205,7 @@ export class Pager {
     }
     if (this.page < this.pages - 1) {
       this.page += 1;
-      this.applyTransform();
+      this.applyTransform(animate);
       this.emit();
       return true;
     }
@@ -199,7 +217,8 @@ export class Pager {
     return false;
   }
 
-  async prev() {
+  async prev(opts) {
+    const animate = !!(opts && opts.animate);
     if (!this.paragraphs || !this.chunks) return false;
     if (this.vertical) {
       const vp = this.viewport;
@@ -218,7 +237,7 @@ export class Pager {
     }
     if (this.page > 0) {
       this.page -= 1;
-      this.applyTransform();
+      this.applyTransform(animate);
       this.emit();
       return true;
     }
@@ -363,6 +382,7 @@ export class Pager {
   async _renderChunk(ci, focusPara, landAt) {
     this.ci = ci;
     this._busy = true;
+    this._clearTurn();
     this.column.replaceChildren();
     const chunk = this.chunks[ci];
     const frag = document.createDocumentFragment();

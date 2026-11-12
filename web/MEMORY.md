@@ -247,3 +247,75 @@ painting 前 JS 资源总量：app 1,626 + reader 28,126 + core 6,541 + paging 1
 4. `samples/demo-text.txt` 不在 web/ 所有权内，本次未创建；前端对其无硬依赖（用 %TEMP% 中性文本测）。
 5. bfcache 恢复逻辑已加（pageshow persisted），headless 未实测 bfcache 场景。
 6. 本次测试服务 8792、Edge 9434、DATA_DIR=data/_v3_fe、%TEMP%\velmira_v3 已全部清理。
+
+## 14. v0.4 Velmira 桌面化润色（task-12）
+
+> 2026-11-12 · 仅视觉/结构与动效，零依赖零构建；全部现有 DOM id 与功能保留。
+> 证据：.oil-ui/velmira-polish/shots/after/（library / reader / notes / toc / comic / mobile-library / library-empty）
+
+### 14.1 结构
+- 桌面壳 ≥1024：左侧 .app-rail 232px（Velmira wordmark + v0.3 / 书架·继续阅读导航 / 底部导入主按钮 + N 本 + 实时点 + 版本），右侧 .app-main 独立滚动。
+- 书库：header（书架 20px + 副标 + 书名过滤 240px + 刷新）、紧凑导入条（106px 虚线 1px、选择文件；空态时右侧 CTA 降为 ghost）、封面网格 auto-fill minmax(176px,1fr) gap 20、骨架 3 卡、空态/无匹配/行内错误条；空态引导块在导入条以下区域垂直居中（1280×860 组中心实测 ≈545，390×844 亦居中且不出现滚动条）；内容区默认不显示「全部书目 + 计数」，仅在继续阅读/过滤时显示标题与匹配计数。
+- 封面：3:4 纸感底（TXT #efe6d6 / EPUB #e3e8dc / CBZ #232833）+ 44px 标题首字 + 11px 格式徽标 + 已读 3px 底色进度条 + 右上「继续/开始」；标题 14/600 两行截断 + 12px 元信息。
+- 阅读器：顶栏主组（☆ 星标 icon-only + 小分隔线 + 书签/笔记/目录/搜索/片段，统一 16px 内联 SVG 1.5px 描边 + 单标签，36px 高）｜分隔线｜从组（主题/字号 32px icon-only）；正文 measure 760px（含左右 24 padding → 712 内容宽，19px 下实测 37 字/行），章题 22/600、正文 19px/1.9、段距 18px；主行标题「第 N 章 · 章名」（总章数只在目录），底部状态条「1 / 3 页 · 第 1 章｜快捷键｜0.0%」，对比度使用 --muted #6b6257。
+- 抽屉：目录/搜索/片段/书签/笔记统一 420px（<640 全宽底部），头 52px、body padding 16、条目 radius 10 / padding 12 / hover surface-2 / focus ring，滑入 260ms cubic-bezier(.2,.8,.2,1)。
+- 漫画：舞台 #0f1116 + 径向暗角；页面图 radius 6 + shadow 0 24px 60px；圆形半透明箭头 38px；顶栏返回/书名页码/44px 页码+跳+适页；底栏 4px 进度 + 左页码 + 右百分比。
+- 移动端 <1024：侧栏收顶部条（brand+导入+实时点）；<640：2 列书架、阅读器顶栏两行（标题上下文 + 工具行）、抽屉底部滑入。
+
+### 14.2 三处基本动效
+1. 主操作反馈：.btn:active scale(.96) 120ms；封面 hover translateY(-3px)+shadow-lift、按下 scale(.99)；导入成功/实时新增卡片 .is-new 淡入 + translateY(8px) 260ms（最多 3 张 stagger 40ms）。
+2. 状态切换来路：抽屉滑入/滑出 260ms（遮罩 200ms）；翻页 180ms transform 过渡（仅按钮/键盘/点击区触发 .reader-column.is-turning，滑动翻页不加）；章节内容淡入 240ms；浮动菜单/主题 popover scale .96→1 180ms；漫画页切换 160ms 淡入+上移 6px。
+3. 首次进入：书库 header + 书架卡片按阅读顺序 stagger 40ms 淡入（仅首次；prefers-reduced-motion 时全部直接到位）。
+
+### 14.3 实测（Edge headless + CDP，8793 / DATA_DIR=data/_velmira_ui 隔离；除注明外 0 JS 报错）
+| 项 | 结果 |
+| --- | --- |
+| 空书库 | 0 卡、无预置书、中性引导「书架还是空的」+ 选择文件；骨架加载后隐藏；引导块中心 y≈545（1280×860） |
+| 实时（SSE） | 另一路 POST 导入 → 新卡 129ms 出现（<1s），window 标记未变（未 reload），.is-new=1，状态「实时」 |
+| 原地更新 | 滚动到 260 → 导入第 16 本：132ms 更新、scrollTop 仍 260、卡片节点复用 |
+| 书名过滤 | 「sample」→ 15 / 16 本（shelfCount「15 / 16 本」），清空恢复 16 |
+| 继续阅读 | PUT 进度后点导航 → 只显示 1 本阅读中，标题「继续阅读」、aria-current=page；回书架恢复 16 |
+| 阅读器 | 19px、paraWidth 760（内容 712）、37 字/行、3 页、标题「第 1 章 · 借阅室的早晨」、页脚「1 / 3 页 · 第 1 章」；章节淡入 class 实测出现 |
+| 翻页 | ←/→ 键盘：page 0→1，.is-turning 出现后清除，label 更新；滑动翻页 page 1→2 且 .is-turning=false |
+| 主题/字号 | night 生效（body #14161b）；字号 22px 后页数 3→4、阅读位置保持 |
+| 目录过滤 | 8 项输入「18」→ 可见 1 项「匹配 1 / 8 章」；搜索抽屉可打开 |
+| 书签 | 加：API 1 条 ★；再点：0；注释 API 预造 1 条 → mark 1 个；点击高亮菜单出现（animationName=menuIn） |
+| 进度 | 翻页/滑动后 1.2s PUT 生效（chapter=0,para=8,percent=0.2315） |
+| 漫画 | comic-mode、1 个 img、顶/底栏、2 个圆形箭头、右上百分比；点下一页 160ms 淡入 class 出现，页码 1/6→2/6、17%→33% |
+| 移动端 390×844 | 书库无横向溢出（scrollWidth=clientWidth=390）、2 列、顶部条 56px；阅读器无溢出、顶栏 84.5px 两行、工具行 374px 全部可点 |
+| 减少动态效果 | prefers-reduced-motion: reduce → 卡片 animationDuration=1e-06s，内容直接可读 |
+| 200% 缩放 | CSS zoom 2× 下无横向溢出、正文可读、分页仍正常 |
+| 首屏 | 阅读器 8 个资源 + index.html = 9（契约口径不变） |
+
+### 14.4 体积 / 规范
+- JS 总量 122,365 B ≈ 119.5 KB（9 个 .js，含 comic.js 15,654 B）< 150KB；CSS 51,209 B；HTML 10,842 B。
+- node --check 全部 9 个 JS 通过；web/ 无 .oil-ui 路径引用；UI 文件无旧品牌字符串；零依赖零构建。
+
+### 14.5 已知缺口
+1. 原生文件选择框无法在 headless 中确认（按钮 → input.click 逻辑保留；导入路径由 API/CDP 实测）。
+2. hover / focus / active 只做了样式与 lint 检查，未逐态截图。
+3. 200% 缩放用 CSS zoom 模拟，未在真实浏览器缩放菜单下逐屏检查。
+4. 旧验收脚本若引用被替换的结构类名（如 .book-bar-fill / .lib-list-head）需按新结构更新；DOM id 全部保留。
+5. 桌面 Go 窗口未在本次任务内启动（本次只改 web/ 静态资源），窗口内渲染以 1280×860 Edge 视口 JSON 证据为准。
+
+### 14.6 第二轮：独立视觉评审（review-1）修正
+
+> 依据 .oil-ui/velmira-polish/review-1.md 的 Top 4 + 次要项修改，保留上一轮全部成果与动效。
+
+1. 笔记抽屉 accent 收敛：非当前章分组「第 2 章」用 --muted 12px/600，当前章「第 1 章」保留 accent 12px/700；「笔记：…」正文由 accent 改为 --text 常规正文色；「删除」默认 --muted 12px，hover/focus-visible 才变 --danger。
+2. 阅读器顶栏图标体系：主组改为统一 16px 内联 SVG（1.5px 描边、圆头端点、24 viewBox）——星标、书签列表、笔记、目录、搜索、片段；标签只保留一次。星标 icon-only（34px 命中区，title/aria「书签当前段」）与小竖线分隔后是「书签」列表按钮（icon+label），两者视觉分组不再粘连；主题/字号从组保持 32px icon-only（字号用 Aa 文字，属排印控件不是假图标）。返回按钮改为标准 ← SVG，链接去除下划线。
+3. 空书库重心：app-main 改 flex column，空态 flex:1 在导入条以下区域垂直居中（1280×860 组中心 y≈545，±40 内；390×844 同样居中、无滚动条、无横向溢出）；空态下导入条右侧「选择文件」降为 ghost 次按钮，accent 只留中央主按钮与侧栏常驻导入按钮。
+4. 阅读器主行标题：改为「第 N 章 · 章名」，不再显示总章数、不重复「章」；页脚仍为「1 / 3 页 · 第 1 章」。
+5. 次要：导入条外高 106px（104–110 区间）；删除内容区「全部书目 + 静态计数」行（默认隐藏，仅继续阅读/搜索过滤时显示标题与「匹配 N / M 本」，静态计数只留 header 与侧栏两处）；阅读器正文列 max-width 760px（内容 712，19px 下 37 字/行）。
+6. 可选项：漫画模式顶部 3px 进度条已隐藏（comic-mode 下 display:none，只留底栏 4px 进度）；笔记删除默认 --muted / hover 变 danger；正文列 760px。
+
+复核（1280×860 / 390×844，CDP 实测）：空态中心 545、移动端无滚动条；导入条 106px；默认书库无内容区计数（「5 本」仅 header+侧栏 2 处）；阅读器标题「第 1 章 · 借阅室的早晨」、para 宽 760、7 个内联 SVG、星标 active 填充 opacity=1、aria-pressed=true；笔记非当前章分组 rgb(107,98,87)、当前章 rgb(176,82,42)、正文 rgb(39,34,28)、删除 rgb(107,98,87)；漫画 #progress-track display:none；全部 after 截图 lint 0、0 JS 报错。证据：.oil-ui/velmira-polish/shots/after/{library,reader,notes,toc,comic,library-empty,mobile-library}.png。
+
+### 14.7 第三轮：UX 走查修正（ux-review-1）
+
+1. 读完态（TXT）：新增 isAtBookEnd 判定（最后一章 + 最后一页/最后一块；垂直滚动模式滚到底）；到达时把 locator 落到末段末尾（para=末段下标，offset=该段长度）用 keepalive PUT 写入，服务端 percent=1.0；页脚右侧立即显示「已读完」小 chip 与 100.0%，顶部进度条满格；保留原「已经是最后一章了」toast；离开末页/切章时 chip 隐藏并允许再次触发。实测 API 返回 chapter=7、para=3、offset=57、percent=1；重新打开已读完的书仍显示 chip/100% 且 0 报错。
+2. 读完态（书架/漫画）：卡片 percent>=0.999 视为已读完 → 右上角文案由「继续」改为「已读完」、进度条强制 100%、加 is-finished 样式类；漫画到末页时服务端 percent=1，同样映射为已读完。未读完卡片不出现该状态（实测另一本 0% 仍为「开始」）。
+3. 章节双编号：reader.js 用 /^第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷]|^Chapter\s+\d+/i 判断源标题是否自带章节标记；自带则直接显示 title（不再拼「第 N 章 ·」），否则仍为「第 N 章 · title」。页脚只保留「1 / 1 页」/百分比，不再重复章节号。实测第 2 章顶栏与正文均为「第2章 书目与索引」，页脚「1 / 1 页」。
+4. TXT 可见翻页入口：≥1024px 在正文左右边缘加 38px 圆形半透明 ‹ › 按钮（aria-label 上一页/下一页），默认 opacity .26、到边界时 .12、hover/focus-visible 为 1；点击翻 1 页（stopPropagation 防止 1/3 热区二次翻页），首/末页点击仍给「已经是第一页/最后一章」toast；<1024px 隐藏；不遮挡中央 760px 正文。
+5. 复核：1280×860/390×844 无横向溢出；390 下箭头 display:none；0 JS 报错；node --check 9/9；JS 122,365 B、CSS 51,209 B、HTML 10,842 B；演示数据测试后已还原（demo-text 0%、demo-comic 16.7%）。
+6. 证据（.oil-ui/velmira-polish/shots/after/）：read-finished.png（末章 chip+100%）、library-finished.png（两本书「已读完」+满格进度）、reader.png（新标题格式+默认箭头）、reader-arrow-hover.png（悬停高亮箭头）、library.png / mobile-library.png / toc.png / comic.png / library-empty.png 同步更新。

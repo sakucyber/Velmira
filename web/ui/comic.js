@@ -125,8 +125,9 @@ export async function mountComic(opts = {}) {
   track.setAttribute('aria-valuemax', '100');
   track.appendChild(fill);
   const pageLabel = el('span', 'comic-page', '— / —');
+  const percentLabel = el('span', 'comic-percent', '0%');
   const foot = el('footer', 'comic-foot');
-  foot.append(track, pageLabel);
+  foot.append(track, pageLabel, percentLabel);
 
   root.append(top, stage, foot, prevBtn, nextBtn);
   main.replaceChildren(root);
@@ -180,11 +181,18 @@ export async function mountComic(opts = {}) {
     img.src = expectSrc;   /* 只改 src：不新建元素、不缓存二进制 */
   }
 
+  function playPageIn() {
+    img.classList.remove('is-page-in');
+    void img.offsetWidth;
+    img.classList.add('is-page-in');
+  }
+
   img.addEventListener('load', () => {
     if (img.src !== expectSrc) return;   /* 已被后一次换页取代 */
     if (loadStart) { lastLoadMs = performance.now() - loadStart; loadStart = 0; }
     setLoading(false);
     errorBox.hidden = true;
+    playPageIn();                        /* 页切换 160ms 淡入 + 上移 6px */
     if (debug) updateDebug();
   });
   img.addEventListener('error', () => {
@@ -212,6 +220,7 @@ export async function mountComic(opts = {}) {
     pageLabel.textContent = label;
     const pct = clamp(percent, 0, 1) * 100;
     fill.style.width = pct.toFixed(2) + '%';
+    percentLabel.textContent = Math.round(pct) + '%';
     track.setAttribute('aria-valuenow', String(Math.round(pct)));
     if (document.activeElement !== jumpInput) jumpInput.value = String(page + 1);
     document.title = (book.title || '漫画') + ' · Velmira';

@@ -24,3 +24,11 @@ tests/*.log
 .DS_Store
 Thumbs.db
 *.log.err
+# 桌面构建产物与本机工具链
+desktop/Velmira.exe
+desktop/build/
+.toolchains/
+mygo/
+# 验证运行时生成物（可重新生成）
+tests/m1_state.json
+tests/fixtures/

@@ -1,42 +1,60 @@
 /* ============================================================
-   ui/library.js —— 书库页（v0.3 实时刷新版）
+   ui/library.js —— 书库页（Velmira 桌面书架 · v0.3 实时刷新）
    ------------------------------------------------------------
    · 导入 TXT / EPUB / CBZ（拖拽/点选，raw octet-stream + XHR 进度）
-   · 书籍列表与进度、格式徽标（TXT/EPUB/CBZ）
-   · 实时：EventSource('/api/events') 收到 books_changed → 重新拉
-     GET /api/books → 原地 diff 更新（保留 scrollTop、不整页刷新、
-     不闪烁，新增卡片淡入高亮一次）
-   · 兜底：EventSource 不可用/报错 → 5s 轮询比对；断线自动重连；
-     离开书库（pagehide/beforeunload）→ 关闭 EventSource 与定时器
-   · 状态点：连接中 / 实时 / 轮询 / 离线
+   · 书架封面网格（格式纸感封面 / 标题首字 / 进度 / 元信息）
+   · 书名过滤 + 「书架 / 继续阅读」视图切换（纯前端，不影响后端搜索）
+   · 实时：EventSource('/api/events') 收到 books_changed → GET /api/books
+     → 原地 diff 更新（保留 scrollTop、不整页刷新、新增卡片入场一次）
+   · 兜底：SSE 不可用/报错 → 5s 轮询；断线自动重连；pagehide 清理
+   · 状态点：连接中 / 实时 / 轮询 / 离线；骨架屏 / 行内错误条
    ============================================================ */
 import {
   $, el, clear, store, toast, fmtChars, fmtPercent, apiGet, uploadBook,
 } from '../util/core.js';
 
-const EMPTY_TEXT = '书架还是空的 · 把 TXT / EPUB / CBZ 拖到上方导入区即可开始';
-const POLL_MS = 5000;          // 契约 8.3：5 秒轮询兜底（SSE 重连也复用该周期，不另开定时器）
+const EMPTY_TEXT = '拖入或选择 TXT / EPUB / CBZ 文件，导入后在这里开始阅读。';
+const POLL_MS = 5000;          // 契约 8.3：5 秒轮询兜底（SSE 重连也复用该周期）
 const LIVE_TEXT = { connecting: '连接中', live: '实时', polling: '轮询', offline: '离线' };
+const FORMAT_LABEL = { txt: 'TXT', epub: 'EPUB', cbz: 'CBZ' };
 
 export async function mountLibrary() {
   const listEl = $('#book-list');
   const emptyEl = $('#lib-empty');
+  const emptyTextEl = $('#lib-empty-text');
+  const noresultEl = $('#lib-noresult');
+  const skeletonEl = $('#lib-skeleton');
+  const errorEl = $('#lib-error');
+  const errorTextEl = $('#lib-error-text');
   const drop = $('#drop-zone');
   const input = $('#file-input');
   const status = $('#import-status');
   const liveEl = $('#lib-live');
   const libView = $('#library-view');
+  const appMain = $('.app-main');
+  const filterInput = $('#lib-filter');
+  const countEls = [$('#lib-count'), $('#lib-sub-count')];
+  const shelfCountEl = $('#shelf-count');
+  const shelfTitleEl = $('#shelf-title');
+  const shelfHeadEl = $('.shelf-head');
+  const headerEl = $('.lib-header');
+  const navLibrary = $('#nav-library');
+  const navContinue = $('#nav-continue');
   const debug = new URLSearchParams(location.search).get('debug') === '1';
 
   let importing = false;
-  let books = [];              // 最近一次渲染的书目快照
+  let books = [];              // 最近一次书目快照（全量）
   let fingerprint = '';        // 书目指纹（轮询比对用）
   let destroyed = false;
   let liveState = 'connecting';
+  let loadedOnce = false;
+  let firstEntryPlayed = false;
+  let viewMode = 'all';        // 'all' | 'reading'
+  let filterText = '';
 
   let es = null;               // 任意时刻最多 1 个 EventSource
-  let pollTimer = 0;           // 任意时刻最多 1 个轮询定时器（SSE 重连也复用它，不另开定时器）
-  let pollKick = 0;            // 进入轮询后尽快补拉一次的短定时器
+  let pollTimer = 0;           // 任意时刻最多 1 个轮询定时器
+  let pollKick = 0;
   let pollInFlight = false;
   let pollFailures = 0;
   let refreshTimer = 0;        // SSE 事件去抖
@@ -51,7 +69,7 @@ export async function mountLibrary() {
     liveEl.title = '书库更新：' + (LIVE_TEXT[state] || state);
   }
 
-  /* ---------------- 数据指纹 / 卡片 ---------------- */
+  /* ---------------- 数据指纹 / 元信息 ---------------- */
   function fingerprintOf(list) {
     return JSON.stringify(list.map((b) => [
       b.id, b.title, b.format, b.chapter_count, b.page_count, b.total_chars,
@@ -59,44 +77,61 @@ export async function mountLibrary() {
     ]));
   }
 
-  /* 格式徽标：TXT / EPUB / CBZ（契约 7.3；后端未返回 format 时按 txt 兼容） */
+  function fmtCount(n) {
+    n = Number(n) || 0;
+    return n >= 10000 ? fmtChars(n) : n.toLocaleString('en-US') + ' 字';
+  }
+
   function fmtInfo(book) {
     const format = String(book.format || 'txt').toLowerCase();
-    const label = format === 'epub' ? 'EPUB' : (format === 'cbz' ? 'CBZ' : 'TXT');
+    const label = FORMAT_LABEL[format] || 'TXT';
     let meta;
     if (format === 'cbz') {
       meta = Number(book.page_count || book.chapter_count || 0) + ' 页 · 漫画';
     } else if (format === 'epub') {
       meta = (book.chapter_count || 0) + ' 章 · EPUB 文本';
     } else {
-      meta = (book.chapter_count || 0) + ' 章 · ' + fmtChars(book.total_chars || 0);
+      meta = (book.chapter_count || 0) + ' 章 · ' + fmtCount(book.total_chars);
     }
     return { format, label, meta };
   }
 
+  function initialOf(title) {
+    const t = String(title || '').trim();
+    if (!t) return '书';
+    const ch = Array.from(t)[0];
+    if (/[a-z]/.test(ch)) return ch.toUpperCase();
+    return ch;
+  }
+
+  function visibleBooks() {
+    let list = books;
+    if (viewMode === 'reading') {
+      list = list.filter((b) => (Number(b.percent) || 0) > 0 || Number(b.last_chapter) > 0);
+    }
+    const q = filterText.trim().toLowerCase();
+    if (q) list = list.filter((b) => String(b.title || '').toLowerCase().indexOf(q) >= 0);
+    return list;
+  }
+
+  /* ---------------- 卡片 ---------------- */
   function createCard(book) {
     const card = el('a', 'book-card');
     card.dataset.id = book.id;
-    const main = el('div', 'book-main');
-    const titleRow = el('div', 'book-title-row');
+    const cover = el('div', 'book-cover');
     const badge = el('span', 'fmt-badge');
+    const initial = el('span', 'cover-initial');
+    const stateBadge = el('span', 'cover-state');
+    const progress = el('span', 'cover-progress');
+    const fill = el('i');
+    progress.appendChild(fill);
+    cover.append(badge, initial, stateBadge, progress);
+    const info = el('div', 'book-info');
     const title = el('div', 'book-title');
-    titleRow.appendChild(badge);
-    titleRow.appendChild(title);
     const meta = el('div', 'book-meta');
-    const bar = el('div', 'book-bar');
-    const fill = el('div', 'book-bar-fill');
-    bar.appendChild(fill);
-    main.appendChild(titleRow);
-    main.appendChild(meta);
-    main.appendChild(bar);
-    const side = el('div', 'book-side');
-    const state = el('span', 'book-state');
-    side.appendChild(state);
-    side.appendChild(el('span', 'book-arrow', '→'));
-    card.appendChild(main);
-    card.appendChild(side);
-    card._refs = { badge, title, meta, fill, state, href: '' };
+    info.append(title, meta);
+    card.append(cover, info);
+    card._refs = { cover, badge, initial, stateBadge, progress, fill, title, meta, href: '' };
     return card;
   }
 
@@ -106,57 +141,75 @@ export async function mountLibrary() {
     const href = '/?book=' + encodeURIComponent(book.id)
       + (Number(book.last_chapter) > 0 ? '&ch=' + book.last_chapter : '');
     if (refs.href !== href) { card.href = href; refs.href = href; }
-    const title = book.title || '未命名';
-    if (refs.title.textContent !== title) refs.title.textContent = title;
-    const badgeText = info.label;
-    if (refs.badge.textContent !== badgeText) refs.badge.textContent = badgeText;
-    const badgeCls = 'fmt-badge fmt-' + info.format;
-    if (refs.badge.className !== badgeCls) refs.badge.className = badgeCls;
-    const meta = info.meta + (book.percent > 0 ? ' · 已读 ' + fmtPercent(book.percent) : '');
-    if (refs.meta.textContent !== meta) refs.meta.textContent = meta;
-    const pct = (Math.max(0, Math.min(1, Number(book.percent) || 0)) * 100).toFixed(1) + '%';
-    if (refs.fill.style.width !== pct) refs.fill.style.width = pct;
-    const unit = info.format === 'cbz' ? ' 页' : ' 章';
-    const stateText = book.percent > 0
-      ? '继续阅读 · 第 ' + ((book.last_chapter || 0) + 1) + unit
-      : '开始阅读';
-    if (refs.state.textContent !== stateText) refs.state.textContent = stateText;
+    const titleText = book.title || '未命名';
+    if (refs.title.textContent !== titleText) {
+      refs.title.textContent = titleText;
+      refs.title.title = titleText;
+    }
+    const coverCls = 'book-cover cover-' + info.format;
+    if (refs.cover.className !== coverCls) refs.cover.className = coverCls;
+    if (refs.badge.textContent !== info.label) refs.badge.textContent = info.label;
+    const initial = initialOf(titleText);
+    if (refs.initial.textContent !== initial) refs.initial.textContent = initial;
+    if (refs.meta.textContent !== info.meta) refs.meta.textContent = info.meta;
+    const pct = Math.max(0, Math.min(1, Number(book.percent) || 0));
+    const finished = pct >= 0.999;      // 文本/漫画统一：进度 100% 视为已读完
+    refs.progress.hidden = pct <= 0;
+    const width = (finished ? 100 : pct * 100).toFixed(1) + '%';
+    if (refs.fill.style.width !== width) refs.fill.style.width = width;
+    const stateText = finished ? '已读完' : (pct > 0 ? '继续' : '开始');
+    if (refs.stateBadge.textContent !== stateText) refs.stateBadge.textContent = stateText;
+    card.classList.toggle('is-reading', pct > 0 && !finished);
+    card.classList.toggle('is-finished', finished);
+    card.setAttribute('aria-label', titleText + '，' + info.meta + (finished ? '，已读完' : (pct > 0 ? '，已读 ' + fmtPercent(pct) : '')));
   }
 
-  /* 原地 diff 渲染：复用已有节点，只增删/更新必要部分；保留滚动位置 */
-  function applyBooks(next, opts = {}) {
-    const list = Array.isArray(next) ? next : [];
-    const fp = fingerprintOf(list);
-    if (fp === fingerprint && !opts.force) return;
-    const wasFirst = !fingerprint;
-    fingerprint = fp;
-    const prevIds = new Set(books.map((b) => b.id));
-    books = list;
-
-    const scrollTop = libView ? libView.scrollTop : 0;
-    emptyEl.hidden = list.length > 0;
-    if (list.length) {
-      if (emptyEl.textContent !== EMPTY_TEXT) emptyEl.textContent = EMPTY_TEXT;
-    } else {
-      clear(listEl);
-      if (libView && scrollTop) libView.scrollTop = 0;
-      return;
+  function updateCounts(visible) {
+    const total = books.length + ' 本';
+    for (const node of countEls) if (node && node.textContent !== total) node.textContent = total;
+    const filtering = !!filterText.trim();
+    // 内容区标题只在「继续阅读」或搜索过滤时出现；默认不重复静态计数
+    const showHead = books.length > 0 && (viewMode === 'reading' || filtering);
+    if (shelfHeadEl) shelfHeadEl.hidden = !showHead;
+    if (appMain) appMain.classList.toggle('no-shelf-head', !showHead);
+    if (shelfTitleEl) {
+      shelfTitleEl.textContent = viewMode === 'reading' ? '继续阅读' : (filtering ? '匹配结果' : '全部书目');
     }
+    if (shelfCountEl) {
+      shelfCountEl.hidden = !showHead;
+      const meta = viewMode === 'reading'
+        ? visible.length + ' 本阅读中'
+        : (filtering ? visible.length + ' / ' + books.length + ' 本' : '');
+      if (meta && shelfCountEl.textContent !== meta) shelfCountEl.textContent = meta;
+    }
+  }
 
+  /* ---------------- 原地 diff 渲染 ---------------- */
+  function renderShelf() {
+    const visible = visibleBooks();
+    updateCounts(visible);
+    const hasBooks = books.length > 0;
+    if (libView) libView.classList.toggle('is-lib-empty', !hasBooks);
+    emptyEl.hidden = hasBooks || !loadedOnce;
+    if (emptyTextEl) emptyTextEl.textContent = EMPTY_TEXT;
+    noresultEl.hidden = !(hasBooks && visible.length === 0);
+
+    const prevIds = new Set((listEl._prevIds || []));
+    const scrollTop = appMain ? appMain.scrollTop : 0;
     const existing = new Map();
     for (const node of Array.from(listEl.children)) {
       const id = node.dataset && node.dataset.id;
       if (id) existing.set(id, node);
     }
-    const order = new Set(list.map((b) => b.id));
+    const order = new Set(visible.map((b) => b.id));
     const appeared = [];
     const frag = document.createDocumentFragment();
-    for (const book of list) {
+    for (const book of visible) {
       let card = existing.get(book.id);
       if (!card) {
         card = createCard(book);
         existing.set(book.id, card);
-        if (!wasFirst) appeared.push(card);   // 首次渲染不高亮，后续新增才高亮一次
+        if (loadedOnce && listEl._prevIds && !listEl._prevIds.has(book.id)) appeared.push(card);
       }
       updateCard(card, book);
       frag.appendChild(card);
@@ -164,41 +217,81 @@ export async function mountLibrary() {
     for (const [id, node] of existing) {
       if (!order.has(id)) node.remove();
     }
-    listEl.appendChild(frag);   // 按服务端顺序排列（移动已有节点，不重建）
-
-    // 恢复滚动位置：同步 + 下一帧各一次，避免 reflow 造成跳动
-    if (scrollTop) {
-      libView.scrollTop = scrollTop;
-      requestAnimationFrame(() => { if (!destroyed && libView) libView.scrollTop = scrollTop; });
+    listEl.appendChild(frag);
+    listEl._prevIds = new Set(visible.map((b) => b.id));
+    // 实时刷新保留阅读位置（顶部新增书时不跳走）
+    if (scrollTop && appMain) {
+      appMain.scrollTop = scrollTop;
+      requestAnimationFrame(() => { if (!destroyed && appMain) appMain.scrollTop = scrollTop; });
     }
 
-    // 新增书：淡入 + 高亮一次
-    for (const card of appeared) {
+    // 新增书入场（最多 3 张 stagger 40ms）
+    appeared.forEach((card, i) => {
+      card.style.animationDelay = Math.min(i, 2) * 40 + 'ms';
       card.classList.remove('is-new');
-      void card.offsetWidth;    // 强制重排以重启动画（只在新增时）
+      void card.offsetWidth;
       card.classList.add('is-new');
-      card.addEventListener('animationend', () => card.classList.remove('is-new'), { once: true });
+      card.addEventListener('animationend', () => {
+        card.classList.remove('is-new');
+        card.style.animationDelay = '';
+      }, { once: true });
+    });
+
+    // 首次进入：header + 卡片 stagger 淡入（仅一次）
+    if (loadedOnce && !firstEntryPlayed && visible.length) {
+      firstEntryPlayed = true;
+      if (headerEl) {
+        headerEl.classList.add('is-first');
+        headerEl.addEventListener('animationend', () => headerEl.classList.remove('is-first'), { once: true });
+      }
+      visible.forEach((book, i) => {
+        const card = listEl.querySelector('.book-card[data-id="' + book.id + '"]');
+        if (!card) return;
+        card.style.animationDelay = Math.min(i, 10) * 40 + 'ms';
+        card.classList.add('is-first');
+        card.addEventListener('animationend', () => {
+          card.classList.remove('is-first');
+          card.style.animationDelay = '';
+        }, { once: true });
+      });
     }
   }
+
+  function applyBooks(next, opts = {}) {
+    const list = Array.isArray(next) ? next : [];
+    const fp = fingerprintOf(list);
+    if (fp === fingerprint && !opts.force) return;
+    fingerprint = fp;
+    books = list;
+    renderShelf();
+  }
+
+  function showError(err) {
+    if (!errorEl) return;
+    errorEl.hidden = false;
+    if (errorTextEl) errorTextEl.textContent = '书架加载失败：' + ((err && err.message) || '未知错误');
+  }
+  function hideError() { if (errorEl && !errorEl.hidden) errorEl.hidden = true; }
 
   async function refreshBooks(opts = {}) {
     if (destroyed) return;
     try {
       const data = await apiGet('/api/books');
       if (destroyed) return;
+      hideError();
       applyBooks((data && data.books) || [], { force: !!opts.force });
+      loadedOnce = true;
       if (pollFailures) pollFailures = 0;
     } catch (err) {
       if (destroyed) return;
-      if (!books.length) {
-        emptyEl.hidden = false;
-        emptyEl.textContent = '书架加载失败：' + (err.message || '未知错误');
-      }
+      showError(err);
       if (opts.manual) toast('书架刷新失败：' + (err.message || '未知错误'));
       if (opts.poll) {
         pollFailures += 1;
         if (pollFailures >= 2) setLiveState('offline');
       }
+    } finally {
+      if (skeletonEl && !loadedOnce) skeletonEl.hidden = true;
     }
   }
 
@@ -208,14 +301,12 @@ export async function mountLibrary() {
     setLiveState('polling');
     pollTimer = setInterval(pollOnce, POLL_MS);
     if (pollKick) clearTimeout(pollKick);
-    pollKick = setTimeout(() => { pollKick = 0; if (!destroyed && pollTimer) pollOnce(); }, 300);  // 尽快补一次
+    pollKick = setTimeout(() => { pollKick = 0; if (!destroyed && pollTimer) pollOnce(); }, 300);
   }
-
   function stopPolling() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = 0; }
     if (pollKick) { clearTimeout(pollKick); pollKick = 0; }
   }
-
   async function pollOnce() {
     if (destroyed || pollInFlight) return;
     pollInFlight = true;
@@ -223,7 +314,10 @@ export async function mountLibrary() {
       const data = await apiGet('/api/books');
       pollFailures = 0;
       if (destroyed) return;
+      hideError();
       applyBooks((data && data.books) || []);
+      loadedOnce = true;
+      if (skeletonEl && !loadedOnce) skeletonEl.hidden = true;
       if (es && es.readyState === 1) setLiveState('live');
       else if (liveState === 'offline') setLiveState('polling');
     } catch (err) {
@@ -231,7 +325,6 @@ export async function mountLibrary() {
       if (pollFailures >= 2) setLiveState('offline');
     } finally {
       pollInFlight = false;
-      // 轮询期间每个周期都尝试一次 SSE 重连（仍是同一个定时器）；成功则 open 事件里停掉轮询
       if (!es) openEventSource();
     }
   }
@@ -240,33 +333,21 @@ export async function mountLibrary() {
   function scheduleRefresh(delay) {
     if (destroyed) return;
     if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      refreshTimer = 0;
-      refreshBooks();
-    }, delay || 120);
+    refreshTimer = setTimeout(() => { refreshTimer = 0; refreshBooks(); }, delay || 120);
   }
-
   function closeEventSource() {
     if (!es) return;
     try { es.close(); } catch (e) { /* ignore */ }
     es = null;
   }
-
   function openEventSource() {
     if (destroyed || es) return;
-    if (typeof EventSource === 'undefined') {
-      startPolling();          // 浏览器不支持 SSE → 轮询
-      return;
-    }
+    if (typeof EventSource === 'undefined') { startPolling(); return; }
     let source;
-    try {
-      source = new EventSource('/api/events');
-    } catch (e) {
-      startPolling();
-      return;
-    }
+    try { source = new EventSource('/api/events'); }
+    catch (e) { startPolling(); return; }
     es = source;
-    if (!pollTimer) setLiveState('connecting');   // 已处于轮询/离线时，重连尝试不覆盖状态（避免状态闪烁）
+    if (!pollTimer) setLiveState('connecting');
     source.addEventListener('open', () => {
       if (destroyed) return;
       stopPolling();
@@ -276,17 +357,15 @@ export async function mountLibrary() {
     source.addEventListener('books_changed', () => {
       if (destroyed) return;
       if (liveState !== 'live') setLiveState('live');
-      scheduleRefresh(100);    // 多事件合并成一次拉取
+      scheduleRefresh(100);
     });
     source.addEventListener('error', () => {
       if (destroyed || !es) return;
       if (source.readyState === 2) {
-        // CLOSED：不可恢复（404/非 SSE 响应等）→ 轮询（轮询周期内自动尝试重连）
         closeEventSource();
         startPolling();
         if (pollFailures >= 2) setLiveState('offline');
       } else {
-        // CONNECTING：浏览器会自动重连，期间用轮询兜底，避免长时间无更新
         startPolling();
         setLiveState(pollFailures >= 2 ? 'offline' : 'polling');
       }
@@ -304,7 +383,6 @@ export async function mountLibrary() {
   }
   window.addEventListener('pagehide', destroy, { once: true });
   window.addEventListener('beforeunload', destroy, { once: true });
-  // bfcache 恢复（后退回书库）：重新订阅并补拉一次，避免停在已销毁状态
   window.addEventListener('pageshow', (e) => {
     if (!e.persisted || !destroyed) return;
     destroyed = false;
@@ -312,6 +390,19 @@ export async function mountLibrary() {
     refreshBooks({ force: true });
     openEventSource();
   });
+
+  /* ---------------- 视图切换 / 过滤 ---------------- */
+  function setViewMode(mode) {
+    if (viewMode === mode) return;
+    viewMode = mode;
+    const reading = mode === 'reading';
+    navLibrary.classList.toggle('is-active', !reading);
+    navContinue.classList.toggle('is-active', reading);
+    if (reading) navContinue.setAttribute('aria-current', 'page'); else navContinue.removeAttribute('aria-current');
+    if (!reading) navLibrary.setAttribute('aria-current', 'page'); else navLibrary.removeAttribute('aria-current');
+    if (appMain) appMain.scrollTop = 0;
+    renderShelf();
+  }
 
   /* ---------------- 导入 ---------------- */
   async function importFile(file) {
@@ -326,9 +417,7 @@ export async function mountLibrary() {
       store.set({ book: res.book.id, chapter: 0, para: 0, offset: 0 });
       toast(res.deduped ? '这本书已在书架中' : '导入成功 · ' + res.book.chapter_count + ' 章');
       setImporting(1, file.name);
-      setTimeout(() => {
-        location.href = '/?book=' + encodeURIComponent(res.book.id);
-      }, 320);
+      setTimeout(() => { location.href = '/?book=' + encodeURIComponent(res.book.id); }, 320);
     } catch (err) {
       importing = false;
       setImporting(-1);
@@ -349,14 +438,16 @@ export async function mountLibrary() {
       : '上传中 ' + (name || '') + ' · ' + Math.round(progress * 100) + '%';
   }
 
+  function pickFile() { if (!importing) input.click(); }
+
   /* ---------------- 事件 ---------------- */
   input.addEventListener('change', () => {
     importFile(input.files && input.files[0]);
     input.value = '';
   });
-  drop.addEventListener('click', () => { if (!importing) input.click(); });
+  drop.addEventListener('click', pickFile);
   drop.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (!importing) input.click(); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickFile(); }
   });
   let dragDepth = 0;
   drop.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth += 1; drop.classList.add('drag'); });
@@ -370,10 +461,26 @@ export async function mountLibrary() {
     importFile(file);
   });
   $('#lib-refresh').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
+  if ($('#rail-import')) $('#rail-import').addEventListener('click', pickFile);
+  if ($('#lib-empty-pick')) $('#lib-empty-pick').addEventListener('click', pickFile);
+  if ($('#lib-error-retry')) $('#lib-error-retry').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
+  if (navLibrary) navLibrary.addEventListener('click', () => setViewMode('all'));
+  if (navContinue) navContinue.addEventListener('click', () => setViewMode('reading'));
+  if (filterInput) {
+    filterInput.addEventListener('input', () => {
+      filterText = filterInput.value || '';
+      if (appMain) appMain.scrollTop = 0;
+      renderShelf();
+    });
+    filterInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') { filterInput.value = ''; filterText = ''; renderShelf(); } });
+  }
 
   /* ---------------- 启动 ---------------- */
   setLiveState('connecting');
   await refreshBooks({ force: true });
+  loadedOnce = true;
+  if (skeletonEl) skeletonEl.hidden = true;
+  renderShelf();
   openEventSource();
   setLiveState(es ? 'connecting' : (pollTimer ? 'polling' : 'connecting'));
 
@@ -387,6 +494,8 @@ export async function mountLibrary() {
       destroy,
       refresh: () => refreshBooks({ manual: true, force: true }),
       fingerprint: () => fingerprint,
+      viewMode: () => viewMode,
+      filterText: () => filterText,
     };
   }
 

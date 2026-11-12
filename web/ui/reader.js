@@ -18,6 +18,9 @@ export async function mountReader({ bookId, params, debug }) {
     column: $('#reader-column'),
     pageLabel: $('#page-label'),
     percentLabel: $('#percent-label'),
+    finishChip: $('#finished-chip'),
+    pagePrevBtn: $('#btn-page-prev'),
+    pageNextBtn: $('#btn-page-next'),
     progressFill: $('#progress-fill'),
     progressTrack: $('#progress-track'),
     segmentsBtn: $('#btn-segments'),
@@ -71,6 +74,11 @@ export async function mountReader({ bookId, params, debug }) {
   let swipeStart = null;
   let suppressClickUntil = 0;
 
+  /* 章节编号判定 / 读完态状态（必须在首章加载前初始化） */
+  const CHAPTER_MARK = /^(第\s*[0-9零〇一二三四五六七八九十百千万两]+\s*[章节回卷]|Chapter\s+\d+)/i;
+  let finishSent = false;
+  let atBookEnd = false;
+
   // 进度保存：翻页/切章后 1.2s 防抖写回服务端（失败静默）
   const scheduleSave = debounce(async () => {
     if (state.chapter < 0) return;
@@ -99,6 +107,7 @@ export async function mountReader({ bookId, params, debug }) {
   state.chapterCount = Math.max(1, state.book.chapter_count || 1);
   document.title = state.book.title + ' · Velmira';   // 契约 7.1：<书名> · Velmira
   dom.title.textContent = state.book.title;
+  dom.title.title = state.book.title;
 
   /* ---------------- CBZ 漫画委托（契约 7.6） ---------------- */
   if ((state.book.format || 'txt') === 'cbz') {
@@ -165,6 +174,81 @@ export async function mountReader({ bookId, params, debug }) {
   setTimeout(() => { ensureAnnUI().catch(() => {}); }, 0);
   setTimeout(() => { loadBookmarks().catch(() => {}); }, 600);
 
+  /* 章节标题：源标题自带章节标记时直接显示，避免「第 2 章 · 第18章」双编号 */
+  function chapterText(title, idx) {
+    const raw = String(title || '').trim();
+    if (!raw) return '第 ' + (idx + 1) + ' 章';
+    if (CHAPTER_MARK.test(raw)) return raw;   // 以源标题为准，不再叠加界面序号
+    return '第 ' + (idx + 1) + ' 章 · ' + raw;
+  }
+
+  /* 读完态：到达最后一章最后一页/滚动到底时写入末段末尾坐标，服务端 percent=1.0 */
+  function isAtBookEnd() {
+    if (state.chapter < 0 || state.chapter !== state.chapterCount - 1) return false;
+    if (state.vertical) {
+      const vp = dom.viewport;
+      return vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 8;
+    }
+    return state.chunk >= state.chunks - 1 && state.page >= state.pages - 1;
+  }
+
+  function setFinishUI(on) {
+    atBookEnd = !!on;
+    if (dom.finishChip) dom.finishChip.hidden = !on;
+  }
+
+  function checkFinished() {
+    if (state.chapter < 0) return;
+    const end = isAtBookEnd();
+    setFinishUI(end);
+    if (!end) { finishSent = false; return; }
+    if (finishSent) return;
+    finishSent = true;
+    const paras = (pager && pager.paragraphs) || [];
+    const lastIdx = Math.max(0, paras.length - 1);
+    const lastLen = String(paras[lastIdx] || '').length;
+    // 定位到全书最后一段末尾，服务端 percent 即为 1.0
+    state.para = lastIdx;
+    state.offset = lastLen;
+    state.percent = 1;
+    updateProgressUI();
+    persist();
+    syncUrl();
+    const url = '/api/books/' + encodeURIComponent(bookId) + '/progress';
+    fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chapter: state.chapter, para: lastIdx, offset: lastLen }),
+      cache: 'no-store',
+      keepalive: true,
+    }).then((res) => (res && res.ok ? res.json() : null))
+      .then((data) => {
+        const p = data && data.progress ? Number(data.progress.percent) : NaN;
+        if (Number.isFinite(p) && p > 0.999) { state.percent = 1; updateProgressUI(); }
+      })
+      .catch(() => { /* 读完进度保存失败：UI 保持 100%，下次翻页会再保存 */ });
+  }
+
+  function updateArrowState() {
+    if (!dom.pagePrevBtn || !dom.pageNextBtn) return;
+    const start = state.chapter <= 0 && state.page <= 0 && state.chunk <= 0 && !state.vertical;
+    const end = isAtBookEnd();
+    dom.pagePrevBtn.classList.toggle('is-edge', start);
+    dom.pageNextBtn.classList.toggle('is-edge', end);
+    dom.pagePrevBtn.title = start ? '已经是第一页' : '上一页';
+    dom.pageNextBtn.title = end ? '已经是最后一页' : '下一页';
+    dom.pagePrevBtn.setAttribute('aria-disabled', start ? 'true' : 'false');
+    dom.pageNextBtn.setAttribute('aria-disabled', end ? 'true' : 'false');
+  }
+
+  /* 章节切换：正文一次 240ms 淡入（prefers-reduced-motion 下由 CSS 直接到位） */
+  function playChapterIn() {
+    dom.column.classList.remove('is-chapter-in');
+    void dom.column.offsetWidth;
+    dom.column.classList.add('is-chapter-in');
+    setTimeout(() => dom.column.classList.remove('is-chapter-in'), 320);
+  }
+
   /* ================= 核心：章节加载 ================= */
   async function loadChapter(idx, target = {}, opts = {}) {
     if (idx < 0 || idx >= state.chapterCount) return;
@@ -182,6 +266,8 @@ export async function mountReader({ bookId, params, debug }) {
     state.annotations = [];          // 内存约束：只驻留当前章注释
     dom.chapterLabel.textContent = '第 ' + (idx + 1) + ' 章 · 加载中…';
     dom.pageLabel.textContent = '— / —';
+    finishSent = false;
+    setFinishUI(false);
     updateBookmarkBtn();
 
     // 注释与章节并行拉取（接口未就绪/失败 → 静默降级为空，不阻塞阅读）
@@ -203,13 +289,16 @@ export async function mountReader({ bookId, params, debug }) {
     }
     if (token !== loadToken) return;
 
-    dom.chapterLabel.textContent = '第 ' + (idx + 1) + ' / ' + state.chapterCount + ' 章 · ' + (data.title || '');
+    const chapterHead = chapterText(data.title, idx);
+    dom.chapterLabel.textContent = chapterHead;
+    dom.chapterLabel.title = chapterHead;
     const paragraphs = data.paragraphs || [];
     const chapterTitle = data.title || '';
     data = null; // 释放章节 JSON 外壳，正文数组交给 pager 持有
 
     await pager.load(idx, chapterTitle, paragraphs, target);
     if (token !== loadToken) return;
+    playChapterIn();
 
     // 高亮必须在章节 DOM 之后按注释列表整章重建
     const anns = await annPromise;
@@ -231,22 +320,22 @@ export async function mountReader({ bookId, params, debug }) {
     loadChapter(idx, { para: 0 });
   }
 
-  async function pageNext() {
-    const moved = await pager.next();
+  async function pageNext(animate = true) {
+    const moved = await pager.next({ animate });
     if (!moved) {
       if (state.chapter < state.chapterCount - 1) await loadChapter(state.chapter + 1, { para: 0 });
       else toast('已经是最后一章了');
     }
   }
 
-  async function pagePrev() {
+  async function pagePrev(animate = true) {
     if (state.chapter <= 0 && pager.page <= 0 && pager.ci <= 0) {
       // 已在全书开头
-      const moved = await pager.prev();
+      const moved = await pager.prev({ animate });
       if (!moved) toast('已经是第一页了');
       return;
     }
-    const moved = await pager.prev();
+    const moved = await pager.prev({ animate });
     if (!moved && state.chapter > 0) await loadChapter(state.chapter - 1, { landAt: 'end' });
   }
 
@@ -268,6 +357,8 @@ export async function mountReader({ bookId, params, debug }) {
     persist();
     updateBookmarkBtn();
     scheduleSave();
+    checkFinished();
+    updateArrowState();
     updateDebug();
   }
 
@@ -400,13 +491,10 @@ export async function mountReader({ bookId, params, debug }) {
   function updateBookmarkBtn() {
     if (!dom.bookmarkBtn) return;
     const on = state.chapter >= 0 && !!bookmarkFor(state.chapter, state.para);
-    const ico = dom.bookmarkBtn.querySelector('.ico');
-    if (ico) {
-      ico.textContent = on ? '★' : '☆';
-      ico.classList.toggle('hollow', !on);
-    }
+    // 星标图标由内联 SVG 构成：激活时填充，不用字符替换
     dom.bookmarkBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    dom.bookmarkBtn.title = on ? '当前段已有书签，点击移除 (B)' : '当前段加书签 (B)';
+    dom.bookmarkBtn.title = on ? '当前段已加书签，点击取消' : '书签当前段 (B)';
+    dom.bookmarkBtn.setAttribute('aria-label', on ? '当前段已加书签，点击取消' : '书签当前段');
     dom.bookmarkBtn.classList.toggle('active', on);
   }
 
@@ -566,6 +654,10 @@ export async function mountReader({ bookId, params, debug }) {
     dom.themeBtn.addEventListener('click', openThemeMenu);
     dom.fontBtn.addEventListener('click', cycleFontSize);
 
+    // 桌面端左右翻页按钮（阻止 click 冒泡到 1/3 热区，避免一次点击翻两页）
+    if (dom.pagePrevBtn) dom.pagePrevBtn.addEventListener('click', (e) => { e.stopPropagation(); pagePrev(); });
+    if (dom.pageNextBtn) dom.pageNextBtn.addEventListener('click', (e) => { e.stopPropagation(); pageNext(); });
+
     // 书签按钮：当前段 toggle（同一段不重复添加）；列表按钮打开抽屉
     dom.bookmarkBtn.addEventListener('click', () => { toggleBookmark(); });
     $('#btn-bookmarks').addEventListener('click', async () => {
@@ -625,7 +717,7 @@ export async function mountReader({ bookId, params, debug }) {
       if (Math.abs(dx) <= Math.abs(dy) * 1.2) return;      // 更偏纵向 → 不翻页
       if (Date.now() - s.t > 900) return;                  // 缓慢拖拽不翻页
       suppressClickUntil = Date.now() + 450;               // 抑制随后的 click 误翻页
-      if (dx < 0) pageNext(); else pagePrev();
+      if (dx < 0) pageNext(false); else pagePrev(false);   // 滑动翻页不加过渡
     });
     dom.viewport.addEventListener('pointercancel', () => { swipeStart = null; });
   }

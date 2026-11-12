@@ -37,6 +37,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_m1.ps1
 ~~~
 
+## 桌面应用（MyGo）
+
+除了浏览器，Velmira 有原生桌面端：用 [MyGo](https://github.com/egoist/mygo)（Go 桌面框架，MIT）把同一套界面装进系统 WebView2 窗口，并由它启动/关闭本地 Python 后端。
+
+![Velmira 桌面窗口](docs/screenshots/desktop-window.png)
+
+~~~powershell
+# 构建（需要 Go 1.27+ 与 Python 3.11+；WebView2 由 Windows 10/11 提供）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop.ps1
+
+# 运行
+desktop\Velmira.exe
+~~~
+
+- 启动时自动在空闲端口拉起后端，健康检查通过后导航到界面；退出时结束后端进程树；
+- 已有开发服务（8765）在跑时直接复用，方便调试；
+- 原生菜单（文件 / 视图 / 窗口）、1280×860 窗口、系统标题栏与窗口控件；
+- `-screenshot` 参数可截图窗口后退出，用于验收与 CI。
+
+细节见 [desktop/README.md](desktop/README.md)。
+
 ## 能做什么
 
 | 能力 | 说明 |
@@ -63,15 +84,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_m1.ps1
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 阅读内核 | 自研分页内核（CSS 多列 + translateX） | 无 iframe / blob 累积，行为可预测 |
-| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 110KB，首屏请求 9（文本）/ 10–11（漫画），无 node_modules |
+| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 120KB，首屏请求 9（文本）/ 10–11（漫画），无 node_modules |
 | 后端 | Python 3.11 + FastAPI + SQLite(WAL) | 单机 all-in-one，后续接 ComfyUI 同栈 |
 | EPUB | 只取文本、不渲染内嵌样式 | 与阅读器统一排版与高亮坐标，兼容性最好 |
 | CBZ | 单个 img 换 src，不预加载 | 漫画原图 2–4MB / 页，单图 + immutable 缓存 |
 | 实时 | SSE + 轮询兜底 | 单用户单进程场景最轻；断线自动降级 |
+| 桌面端 | MyGo（Go）+ 系统 WebView2 | 原生窗口与生命周期，复用同一 Web 前端；Go 壳 + Python 边车 |
 
 ## 目录
 
 ~~~text
+desktop/                MyGo 桌面壳（Go）：窗口、菜单、后端进程管理
 server/
   app/importer*.py      格式识别（magic）+ TXT / EPUB / CBZ 解析
   app/api/books.py      books / toc / chapters / progress / bookmarks
@@ -100,7 +123,7 @@ docs/                   架构、计划、契约、截图
 | --- | --- |
 | TXT 导入（234 章 / 51.6 万字） | 27ms |
 | EPUB 导入（234 章） | ~140ms |
-| 前端 JS 总量 | 约 110KB（预算 150KB） |
+| 前端 JS 总量 | 约 119.5KB（预算 150KB） |
 | 首屏请求 | 文本 9 / 漫画 10–11 |
 | 单章 DOM | 不超过 256（含高亮）；漫画模式 94 |
 | 翻页 | 0.075ms / 次（只改 transform）；漫画翻页 0–4ms |
