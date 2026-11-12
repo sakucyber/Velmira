@@ -36,3 +36,5 @@ tests/fixtures/
 android/build/
 android/keystore/
 dist/
+# 本地设计/交接过程材料（只留本地，不入库）
+.oil-ui/
