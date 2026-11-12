@@ -58,6 +58,18 @@ desktop\Velmira.exe
 
 细节见 [desktop/README.md](desktop/README.md)。
 
+## 安卓客户端（通用 APK）
+
+手机与电脑在同一 Wi-Fi 时，用 Android 客户端连接桌面端 Velmira，继续读书架里的书（书库、书签、注释、进度都在桌面端）。
+
+~~~powershell
+# 构建（需要 Android SDK：cmdline-tools + build-tools 35 + platform android-34；可用 .toolchains/android/sdk）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
+# 产物：dist/Velmira-universal.apk（约 30KB，纯 Java + WebView，无 ABI 拆分）
+~~~
+
+使用：电脑端用 `scripts/run.ps1 -BindAddress 0.0.0.0`（或 `desktop\Velmira.exe -bind 0.0.0.0`）启动服务，手机安装 APK 后填入 `http://<电脑局域网IP>:8765` 连接。细节与限制见 [docs/ANDROID.md](docs/ANDROID.md)。
+
 ## 能做什么
 
 | 能力 | 说明 |

@@ -32,6 +32,7 @@ var (
 	flagPython     = flag.String("python", "", "python executable (default: VELMIRA_PYTHON or python)")
 	flagWidth      = flag.Int("width", 1280, "window width in DIPs")
 	flagHeight     = flag.Int("height", 860, "window height in DIPs")
+	flagBind       = flag.String("bind", "127.0.0.1", "backend bind address (0.0.0.0 to allow phones on the LAN)")
 )
 
 type health struct {
@@ -191,7 +192,7 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 		fmt.Fprintf(logFile, "\n=== %s velmira backend :%d ===\n", time.Now().Format(time.RFC3339), port)
 	}
 
-	cmd := exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", "127.0.0.1", "--port", strconv.Itoa(port))
+	cmd := exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port))
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
 	if logFile != nil {

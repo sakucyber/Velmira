@@ -32,3 +32,7 @@ mygo/
 # 验证运行时生成物（可重新生成）
 tests/m1_state.json
 tests/fixtures/
+# Android 构建产物与本地签名密钥
+android/build/
+android/keystore/
+dist/
