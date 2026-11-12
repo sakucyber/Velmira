@@ -221,6 +221,60 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     renderSegments(body, segments, chapter);
   }
 
+  /* ---------------- M2 AI 分析与人物卡 ---------------- */
+  function renderAI(area, data, onExtract, onFreeze) {
+    clear(area);
+    const scenes = (data && Array.isArray(data.scenes)) ? data.scenes : [];
+    const characters = (data && Array.isArray(data.characters)) ? data.characters : [];
+    const extract = el('button', 'btn ai-extract', '分析当前候选片段');
+    extract.type = 'button';
+    extract.addEventListener('click', async () => {
+      extract.disabled = true;
+      extract.textContent = '分析中…';
+      try { await onExtract(); } finally { extract.disabled = false; extract.textContent = '分析当前候选片段'; }
+    });
+    area.appendChild(extract);
+    area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个 scene') : '尚未生成 scene；默认使用离线 Mock provider'));
+    for (const scene of scenes) {
+      const card = el('article', 'ai-scene-card');
+      card.appendChild(el('div', 'ai-scene-title', '第 ' + ((scene.chapter_id | 0) + 1) + ' 章 · ' + ((scene.plan && scene.plan.summary) || '未命名场景')));
+      const plan = scene.plan || {};
+      const meta = [plan.location, plan.time_of_day, plan.drawable == null ? '' : ('可绘制度 ' + Math.round(Number(plan.drawable) * 100) + '%')].filter(Boolean).join(' · ');
+      if (meta) card.appendChild(el('div', 'ai-scene-meta', meta));
+      if (plan.reason) card.appendChild(el('div', 'ai-scene-reason', plan.reason));
+      area.appendChild(card);
+    }
+    area.appendChild(el('div', 'ai-section-title', '人物卡 · ' + characters.length));
+    if (!characters.length) area.appendChild(el('div', 'drawer-empty', '抽取 scene 后会在这里出现人物卡'));
+    for (const character of characters) {
+      const card = el('article', 'ai-character-card');
+      const head = el('div', 'ai-character-head');
+      head.appendChild(el('strong', null, character.name || '未命名'));
+      head.appendChild(el('span', 'ai-character-state', character.frozen ? '已冻结' : '草稿'));
+      card.appendChild(head);
+      const identity = character.identity_block || (character.card && Object.entries(character.card).filter(([key]) => key !== 'evidence' && key !== 'identity_history').map(([key, value]) => key + ': ' + value).join(' · '));
+      if (identity) card.appendChild(el('div', 'ai-identity', identity));
+      const actions = el('div', 'ai-character-actions');
+      if (!character.frozen) {
+        const freeze = el('button', 'btn btn-ghost', '冻结身份');
+        freeze.type = 'button';
+        freeze.addEventListener('click', () => onFreeze(character));
+        actions.appendChild(freeze);
+      }
+      card.appendChild(actions);
+      area.appendChild(card);
+    }
+  }
+
+  function openAI(data, onExtract, onFreeze) {
+    open('ai', 'AI 分析与人物卡', (area) => renderAI(area, data, onExtract, onFreeze));
+  }
+
+  function updateAI(data, onExtract, onFreeze) {
+    if (!shell || kind !== 'ai') return;
+    renderAI(body, data, onExtract, onFreeze);
+  }
+
   /* ---------------- 书签抽屉（数据由 reader 持有并拉取） ---------------- */
   function renderBookmarks(area, bookmarks, current) {
     clear(area);
@@ -393,7 +447,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
 
   return {
     openToc, openSearch, openSegments, updateSegments, openTheme,
-    openBookmarks, updateBookmarks, openNotes, updateNote,
+    openBookmarks, updateBookmarks, openNotes, updateNote, openAI, updateAI,
     close, isOpen, isSegmentsOpen,
   };
 }

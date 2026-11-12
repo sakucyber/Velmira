@@ -433,3 +433,13 @@ data: {"revision": 7, "count": 3}
 - 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。
 - 桌面分发包包含 `backend/Velmira-backend.exe`（PyInstaller），优先启动内置后端，源代码模式仍可使用 Python。打包模式默认数据目录为 `%LOCALAPPDATA%\Velmira\data`，`DATA_DIR` 可覆盖。
 - 桌面窗口禁用浏览器默认右键菜单。书库页整页接收文件拖放，侧栏、搜索框、封面或空白处松开文件均沿用现有导入校验与流程；普通文字拖拽不触发文件导入。
+
+# 10. M2 增量：文本抽取与人物卡
+
+- `GET /api/books/{book_id}/ai/config` → 当前文本 provider 配置；默认 `mock`，密钥只保存环境变量名。
+- `PATCH /api/books/{book_id}/ai/config` body `{provider, base_url?, model?, api_key_env?, temperature?, prompt_version?, enabled?}`。
+- `POST /api/books/{book_id}/ai/extract` body `{segment_ids?: string[], provider?: string, force?: boolean, prompt_version?: number}` → scene/人物卡抽取统计。省略 `segment_ids` 时只处理 `selected=1` 的候选片段；默认 Mock 离线可运行。
+- `GET /api/books/{book_id}/ai/scenes`、`GET /api/books/{book_id}/ai/characters` → 结构化 scene 与人物卡；scene 只包含 `summary/location/time_of_day/characters/key_props/drawable/reason/continuity`。
+- `GET/PATCH /api/books/{book_id}/ai/characters/{id}` → 人工查看/编辑；`POST .../{id}/freeze` 固定确定性英文 `identity_block` 并保存 `identity_hash`；`POST .../{id}/unfreeze` 必须 `confirm=true`，升版本并保留旧身份快照。
+- 自动抽取幂等键为 `(book_id, segment_id, prompt_version, sha256(segment_text + prompt_version))`；provider 输出非法时只将该片段标为 `needs_review`，不会中断整批。
+- 人物卡视觉字段必须有原文 `evidence[{field,value,quote,ch}]`；冻结后自动流程不覆盖 identity 字段，只能追加证据/变体。

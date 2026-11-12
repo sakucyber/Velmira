@@ -101,6 +101,16 @@ def create_app() -> FastAPI:
     except Exception as exc:
         log.warning("search 路由挂载跳过：%s", exc)
 
+    # M2：可配置文本 provider、scene 抽取、人物卡与冻结；模块异常不得拖垮阅读服务。
+    try:
+        from .api.ai import router as ai_router
+
+        app.include_router(ai_router)
+    except ImportError:
+        pass
+    except Exception as exc:
+        log.warning("AI 路由挂载跳过：%s", exc)
+
     # 静态目录必须最后挂（避免挡住 /api/* 与 /media/*）。web/ 可能尚未就绪，故 check_dir=False。
     if not config.WEB_DIR.is_dir():
         log.info("web/ 目录尚未就绪（%s），静态托管先处于容错状态", config.WEB_DIR)

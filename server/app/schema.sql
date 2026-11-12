@@ -105,3 +105,86 @@ CREATE TABLE IF NOT EXISTS annotations (          -- 高亮/笔记
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_book ON annotations(book_id, chapter, para);
+
+-- ============================================================================
+-- M2 AI 增量 DDL（文本抽取、人物卡、scene；幂等，M0/M1 老库可直接升级）
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS ai_provider_configs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL DEFAULT 'mock',
+  base_url TEXT,
+  model TEXT,
+  api_key_env TEXT,
+  temperature REAL NOT NULL DEFAULT 0.2,
+  prompt_version INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ai_runs (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  stats_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ai_runs_book ON ai_runs(book_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_extractions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL,
+  segment_id TEXT NOT NULL,
+  prompt_version INTEGER NOT NULL,
+  input_hash TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'done',
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(book_id, segment_id, prompt_version, input_hash),
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ai_extractions_book ON ai_extractions(book_id, segment_id);
+
+CREATE TABLE IF NOT EXISTS characters (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  aliases_json TEXT NOT NULL DEFAULT '[]',
+  card_json TEXT NOT NULL DEFAULT '{}',
+  frozen INTEGER NOT NULL DEFAULT 0,
+  identity_block TEXT,
+  identity_hash TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
+  first_chapter INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(book_id, name),
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_characters_book ON characters(book_id, name);
+
+CREATE TABLE IF NOT EXISTS scenes (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL,
+  chapter_id INTEGER,
+  segment_id TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  prompt_version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(book_id, segment_id, prompt_version),
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scenes_book ON scenes(book_id, chapter_id, segment_id);

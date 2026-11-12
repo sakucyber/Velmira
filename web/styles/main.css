@@ -630,6 +630,20 @@ a { color: var(--accent); }
 .seg-text { font-size: 13px; line-height: 1.6; color: var(--text); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .seg-note { margin: 0 4px 12px; font-size: 12px; color: var(--muted); line-height: 1.55; }
 
+/* M2 AI 抽取与人物卡 */
+.ai-extract { width: 100%; margin-bottom: 12px; }
+.ai-section-title { margin: 18px 2px 8px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.ai-scene-card, .ai-character-card {
+  margin-bottom: 8px; padding: 11px 12px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface);
+}
+.ai-scene-title { font-size: 13px; line-height: 1.5; font-weight: 600; }
+.ai-scene-meta, .ai-scene-reason, .ai-identity { margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.ai-character-head { display: flex; align-items: center; gap: 8px; }
+.ai-character-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ai-character-state { color: var(--accent); font-size: 11px; }
+.ai-character-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
 /* 书签 */
 .bm-item {
   display: flex; align-items: center; gap: 6px;

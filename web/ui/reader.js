@@ -24,6 +24,7 @@ export async function mountReader({ bookId, params, debug }) {
     progressFill: $('#progress-fill'),
     progressTrack: $('#progress-track'),
     segmentsBtn: $('#btn-segments'),
+    aiBtn: $('#btn-ai'),
     themeBtn: $('#btn-theme'),
     fontBtn: $('#btn-font'),
     bookmarkBtn: $('#btn-bookmark'),
@@ -464,7 +465,7 @@ export async function mountReader({ bookId, params, debug }) {
     const ac = new AbortController();
     segmentsAc = ac;
     const chapter = state.chapter;
-    apiGet('/api/books/' + encodeURIComponent(bookId) + '/segments?chapter=' + chapter + '&selected=1&limit=20', ac.signal)
+    return apiGet('/api/books/' + encodeURIComponent(bookId) + '/segments?chapter=' + chapter + '&selected=1&limit=20', ac.signal)
       .then((data) => {
         if (ac.signal.aborted || chapter !== state.chapter) return;
         if (!data || !Array.isArray(data.segments)) { markSegmentsUnavailable(); return; }
@@ -483,6 +484,49 @@ export async function mountReader({ bookId, params, debug }) {
     state.segments = null;
     dom.segmentsBtn.hidden = true;
     if (panels && panels.isSegmentsOpen()) panels.close();
+  }
+
+  /* ================= M2 AI scene / 人物卡 ================= */
+  async function loadAIStudio() {
+    const p = await ensurePanels();
+    const render = (data) => p.updateAI(data, runAIExtract, freezeCharacter);
+    p.openAI({ scenes: [], characters: [] }, runAIExtract, freezeCharacter);
+    try {
+      const [sceneData, characterData] = await Promise.all([
+        apiGet('/api/books/' + encodeURIComponent(bookId) + '/ai/scenes'),
+        apiGet('/api/books/' + encodeURIComponent(bookId) + '/ai/characters'),
+      ]);
+      render({ scenes: (sceneData && sceneData.scenes) || [], characters: (characterData && characterData.characters) || [] });
+    } catch (err) {
+      toast('AI 数据加载失败');
+    }
+  }
+
+  async function runAIExtract() {
+    if (!state.segments) {
+      try { await refreshSegments(); } catch (err) { /* handled by refreshSegments */ }
+    }
+    const ids = (state.segments || []).filter((seg) => seg.selected !== 0).map((seg) => seg.id);
+    if (!ids.length) { toast('当前章节没有 selected 片段'); return; }
+    try {
+      const result = await apiPost('/api/books/' + encodeURIComponent(bookId) + '/ai/extract', { segment_ids: ids });
+      toast(result && result.needs_review ? 'AI 完成，部分片段待复核' : 'AI scene 抽取完成');
+      const [sceneData, characterData] = await Promise.all([
+        apiGet('/api/books/' + encodeURIComponent(bookId) + '/ai/scenes'),
+        apiGet('/api/books/' + encodeURIComponent(bookId) + '/ai/characters'),
+      ]);
+      const p = await ensurePanels();
+      p.updateAI({ scenes: sceneData.scenes || [], characters: characterData.characters || [] }, runAIExtract, freezeCharacter);
+    } catch (err) { toast('AI 抽取失败：' + (err.message || '未知错误')); }
+  }
+
+  async function freezeCharacter(character) {
+    if (!character || !character.id) return;
+    try {
+      await apiPost('/api/books/' + encodeURIComponent(bookId) + '/ai/characters/' + encodeURIComponent(character.id) + '/freeze', {});
+      toast('人物身份已冻结');
+      await loadAIStudio();
+    } catch (err) { toast('冻结失败：' + (err.message || '未知错误')); }
   }
 
   /* ================= 书签（契约 4.9） ================= */
@@ -655,6 +699,7 @@ export async function mountReader({ bookId, params, debug }) {
       p.openSegments(state.segments, state.chapter);
       if (!state.segments) refreshSegments(); // 按需拉取，不在切章时浪费请求
     });
+    if (dom.aiBtn) dom.aiBtn.addEventListener('click', loadAIStudio);
     dom.themeBtn.addEventListener('click', openThemeMenu);
     dom.fontBtn.addEventListener('click', cycleFontSize);
 
