@@ -20,6 +20,13 @@
 
   <!-- ========== 书库页 ========== -->
   <section id="library-view" class="view view-library" hidden>
+    <div id="library-drop-overlay" class="library-drop-overlay" role="status" hidden>
+      <div class="library-drop-message">
+        <span class="library-drop-plus" aria-hidden="true">＋</span>
+        <strong>松开即可导入小说</strong>
+        <span>支持 TXT / EPUB / CBZ · 单文件 ≤ 64MB</span>
+      </div>
+    </div>
     <div class="app-shell">
       <aside class="app-rail" aria-label="主导航">
         <div class="rail-top">
@@ -64,7 +71,7 @@
           <div class="drop-plus" aria-hidden="true">＋</div>
           <div class="drop-copy">
             <div class="drop-title">拖入 TXT / EPUB / CBZ，或点击选择文件</div>
-            <div class="drop-hint">自动识别格式 · 单文件 ≤ 64MB</div>
+            <div class="drop-hint">拖到书架任意位置即可导入 · 单文件 ≤ 64MB</div>
           </div>
           <span class="drop-cta">选择文件</span>
           <div id="import-status" class="import-status" hidden></div>

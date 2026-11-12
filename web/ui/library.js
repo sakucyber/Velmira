@@ -31,6 +31,7 @@ export async function mountLibrary() {
   const status = $('#import-status');
   const liveEl = $('#lib-live');
   const libView = $('#library-view');
+  const dropOverlay = $('#library-drop-overlay');
   const appMain = $('.app-main');
   const filterInput = $('#lib-filter');
   const countEls = [$('#lib-count'), $('#lib-sub-count')];
@@ -376,13 +377,14 @@ export async function mountLibrary() {
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    resetDrag();
     closeEventSource();
     stopPolling();
     if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = 0; }
     pollInFlight = false;
   }
-  window.addEventListener('pagehide', destroy, { once: true });
-  window.addEventListener('beforeunload', destroy, { once: true });
+  window.addEventListener('pagehide', destroy);
+  window.addEventListener('beforeunload', destroy);
   window.addEventListener('pageshow', (e) => {
     if (!e.persisted || !destroyed) return;
     destroyed = false;
@@ -456,17 +458,47 @@ export async function mountLibrary() {
   drop.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickFile(); }
   });
+  // 文件拖到侧栏、搜索框、封面或空白处都走同一个导入入口。
   let dragDepth = 0;
-  drop.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth += 1; drop.classList.add('drag'); });
-  drop.addEventListener('dragover', (e) => { e.preventDefault(); });
-  drop.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) drop.classList.remove('drag'); });
-  drop.addEventListener('drop', (e) => {
-    e.preventDefault();
+  function hasFiles(e) {
+    const transfer = e.dataTransfer;
+    return transfer && (Array.from(transfer.types || []).includes('Files')
+      || Array.from(transfer.items || []).some((item) => item.kind === 'file')
+      || transfer.files.length > 0);
+  }
+  function resetDrag() {
     dragDepth = 0;
     drop.classList.remove('drag');
-    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    dropOverlay.hidden = true;
+  }
+  function acceptDrag(e) {
+    if (destroyed || libView.hidden || !hasFiles(e)) return false;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = importing ? 'none' : 'copy';
+    drop.classList.toggle('drag', !importing);
+    dropOverlay.hidden = importing;
+    return true;
+  }
+  document.addEventListener('dragenter', (e) => {
+    if (acceptDrag(e)) dragDepth += 1;
+  });
+  document.addEventListener('dragover', acceptDrag);
+  document.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) resetDrag();
+  });
+  document.addEventListener('drop', (e) => {
+    const isFileDrop = !destroyed && !libView.hidden && hasFiles(e);
+    resetDrag();
+    if (!isFileDrop) return;
+    // 阻止 WebView 将拖入文件当成页面打开。
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
     importFile(file);
   });
+  document.addEventListener('dragend', resetDrag);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') resetDrag(); });
+  window.addEventListener('blur', resetDrag);
   $('#lib-refresh').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
   if ($('#rail-import')) $('#rail-import').addEventListener('click', pickFile);
   if ($('#lib-empty-pick')) $('#lib-empty-pick').addEventListener('click', pickFile);

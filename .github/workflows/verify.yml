@@ -69,7 +69,7 @@ jobs:
           GOPROXY: https://goproxy.cn,direct
         run: ./scripts/build-desktop-bundle.ps1
 
-      - name: Verify packaged backend and annotation UI
+      - name: Verify packaged backend, annotations and library file drops
         shell: pwsh
         run: |
           $env:DATA_DIR = Join-Path $env:RUNNER_TEMP 'velmira-data'

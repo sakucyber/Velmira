@@ -1,4 +1,4 @@
-/* Neutral fixture + real API/browser regression for annotation popovers.
+/* Neutral fixture + real API/browser regression for annotations and library imports.
    node tests/cdp_annotations.mjs --base http://127.0.0.1:8876 */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -187,6 +187,43 @@ try {
   await sleep(200);
   assert.ok(fileChooserOpened, 'File chooser opens again after returning from a successful import');
   pass('导入成功后返回书架，可再次打开文件选择器');
+  await send('Page.setInterceptFileChooserDialog', { enabled: false });
+
+  // Use the browser's real file-drag input path, including drops over controls.
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false });
+  const dragData = { items: [], files: [path.resolve('samples/demo-text.txt')], dragOperationsMask: 1 };
+  for (const selector of ['#nav-library', '#lib-filter', '.book-cover', '.lib-heading']) {
+    const target = await point(selector);
+    await send('Input.dispatchDragEvent', { type: 'dragEnter', ...target, data: dragData });
+    await send('Input.dispatchDragEvent', { type: 'dragOver', ...target, data: dragData });
+    assert.equal(await evaluate("document.querySelector('#library-drop-overlay').hidden"), false);
+    await send('Input.dispatchDragEvent', { type: 'drop', ...target, data: dragData });
+    await waitFor("location.search.includes('book=') && !document.querySelector('#reader-view').hidden");
+    await evaluate('history.back()');
+    await waitFor("!document.querySelector('#library-view').hidden && !!window.__lib");
+    assert.equal(await evaluate("document.querySelector('#library-drop-overlay').hidden"), true);
+  }
+  pass('文件拖到侧栏、搜索框、封面或标题空白处均可导入，返回后可继续拖入');
+
+  const textDrag = await evaluate(`(() => {
+    const data = new DataTransfer(); data.setData('text/plain', '示例文字');
+    const event = new DragEvent('dragover', {bubbles:true,cancelable:true,dataTransfer:data});
+    document.querySelector('#lib-filter').dispatchEvent(event);
+    return {prevented:event.defaultPrevented,overlay:!document.querySelector('#library-drop-overlay').hidden};
+  })()`);
+  assert.deepEqual(textDrag, { prevented: false, overlay: false });
+  pass('普通文字拖拽不触发文件导入提示');
+
+  const cancelPoint = await point('#lib-filter');
+  await send('Input.dispatchDragEvent', { type: 'dragEnter', ...cancelPoint, data: dragData });
+  await send('Input.dispatchDragEvent', { type: 'dragOver', ...cancelPoint, data: dragData });
+  await screenshot('library-file-drag.png');
+  await send('Input.dispatchDragEvent', { type: 'dragCancel', ...cancelPoint, data: dragData });
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await waitFor("document.querySelector('#library-drop-overlay').hidden");
+  pass('按 Escape 取消文件拖拽后提示收起，页面保持书架');
   assert.deepEqual(errors, []);
   pass('全程无 JavaScript 异常');
 } finally {

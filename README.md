@@ -59,6 +59,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-bundle
 - 已有开发服务（8765）在跑时直接复用，方便调试；
 - 原生菜单（文件 / 视图 / 窗口）、1280×860 窗口、系统标题栏与窗口控件；
 - `-screenshot` 参数可截图窗口后退出，用于验收与 CI。
+- 桌面窗口禁用浏览器默认右键菜单；小说文件可拖到书架任意位置导入，拖入时显示提示。
 
 细节见 [desktop/README.md](desktop/README.md)。
 
@@ -139,7 +140,7 @@ docs/                   架构、计划、契约、截图
 | --- | --- |
 | TXT 导入（234 章 / 51.6 万字） | 27ms |
 | EPUB 导入（234 章） | ~140ms |
-| 前端 JS 总量 | 约 123.8KB（预算 150KB，v0.4.0 实测） |
+| 前端 JS 总量 | 约 124.8KB（预算 150KB，v0.4.0 实测） |
 | 首屏请求 | 文本 9 / 漫画 10–11 |
 | 单章 DOM | 不超过 256（含高亮）；漫画模式 94 |
 | 翻页 | 0.075ms / 次（只改 transform）；漫画翻页 0–4ms |

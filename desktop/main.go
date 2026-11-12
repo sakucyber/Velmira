@@ -67,6 +67,9 @@ func main() {
 			// The page is our own local server; trust it for typed IPC.
 			Page: mygo.PageOptions{TrustedOrigins: []string{baseURL}},
 		})
+		win.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
+			e.PreventDefault()
+		})
 		installMenu(root, win)
 		if err := win.Page().LoadURL(baseURL + "/"); err != nil {
 			log.Printf("load %s: %v", baseURL, err)
