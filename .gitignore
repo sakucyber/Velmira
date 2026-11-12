@@ -1,0 +1,25 @@
+# 运行时数据（书库/媒体/数据库，不入库）
+data/
+
+# 本地测试素材（版权内容不入库；测试脚本运行时自动取 book/ 第一本）
+book/
+
+# 临时文件
+.tmp/
+*.log
+*.pyc
+__pycache__/
+.venv/
+node_modules/
+
+# 自动化证据（可重新生成）
+tests/*_result.json
+tests/screenshots/
+tests/*.log
+
+# 内部工作记录
+.workbuddy/
+
+# 系统
+.DS_Store
+Thumbs.db

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="day">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Velmira</title>
+<script>
+  // 尽早应用主题，避免首屏闪白（原生脚本，不产生额外请求）
+  try {
+    var _velmira = JSON.parse(localStorage.getItem('velmira.r1') || '{}');
+    if (_velmira && _velmira.theme) document.documentElement.dataset.theme = _velmira.theme;
+  } catch (e) { /* ignore */ }
+</script>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="./styles/main.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ========== 书库页 ========== -->
+  <section id="library-view" class="view" hidden>
+    <div class="lib-wrap">
+      <header class="lib-header">
+        <div class="brand">Velmira<span class="brand-tag">v0.3</span></div>
+        <p class="lib-sub">导入 TXT / EPUB / CBZ，开始分页阅读</p>
+      </header>
+
+      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="选择或拖入 TXT / EPUB / CBZ 文件导入">
+        <div class="drop-plus" aria-hidden="true">＋</div>
+        <div class="drop-title">点击选择文件，或拖拽到此处</div>
+        <div class="drop-hint">TXT / EPUB / CBZ · 单文件 ≤ 64MB</div>
+        <div id="import-status" class="import-status" hidden></div>
+        <input id="file-input" type="file" accept=".txt,.epub,.cbz,text/plain,application/epub+zip,application/zip" hidden>
+      </div>
+
+      <div class="lib-list-head">
+        <span class="lib-list-title">书架<span id="lib-live" class="lib-live" data-state="connecting" role="status" aria-live="polite" title="书库实时更新状态"><i class="live-dot" aria-hidden="true"></i><span class="live-text">连接中</span></span></span>
+        <button id="lib-refresh" class="btn btn-ghost" type="button">刷新</button>
+      </div>
+      <ul id="book-list" class="book-list" aria-label="书架列表"></ul>
+      <div id="lib-empty" class="lib-empty" hidden>书架还是空的 · 把 TXT / EPUB / CBZ 拖到上方导入区即可开始</div>
+    </div>
+  </section>
+
+  <!-- ========== 阅读器 ========== -->
+  <section id="reader-view" class="view view-reader" hidden>
+    <header class="reader-top">
+      <a id="btn-back" class="btn btn-icon" href="/" title="返回书架" aria-label="返回书架">←</a>
+      <div class="reader-meta">
+        <div id="book-title" class="reader-title">加载中…</div>
+        <div id="chapter-label" class="reader-chapter">—</div>
+      </div>
+      <div class="reader-tools">
+        <button id="btn-bookmark" class="btn btn-icon" type="button" title="当前段加书签 (B)" aria-pressed="false" aria-label="当前段加书签"><span class="ico star hollow">☆</span></button>
+        <button id="btn-bookmarks" class="btn" type="button" title="书签列表"><span class="ico">签</span><span class="lbl">书签</span></button>
+        <button id="btn-notes" class="btn" type="button" title="笔记与高亮"><span class="ico">注</span><span class="lbl">笔记</span></button>
+        <button id="btn-toc" class="btn" type="button" title="目录 (T)"><span class="ico">目</span><span class="lbl">目录</span></button>
+        <button id="btn-search" class="btn" type="button" title="搜索 (F)"><span class="ico">搜</span><span class="lbl">搜索</span></button>
+        <button id="btn-segments" class="btn" type="button" title="本章候选片段"><span class="ico">片</span><span class="lbl">片段</span></button>
+        <button id="btn-theme" class="btn btn-icon" type="button" title="主题"><span class="ico">◐</span></button>
+        <button id="btn-font" class="btn btn-icon" type="button" title="字号"><span class="ico">Aa</span></button>
+      </div>
+    </header>
+
+    <div id="progress-track" class="progress-track" role="progressbar" aria-label="全书进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div id="progress-fill" class="progress-fill"></div>
+    </div>
+
+    <main id="reader-main" class="reader-main">
+      <div id="reader-viewport" class="reader-viewport" tabindex="0" aria-label="正文分页区域">
+        <div id="reader-column" class="reader-column"></div>
+      </div>
+    </main>
+
+    <footer class="reader-foot">
+      <span id="page-label" aria-live="polite">— / —</span>
+      <span class="foot-hint">← → / 空格 翻页 · 滑动翻页 · T 目录 · F 搜索</span>
+      <span id="percent-label">0.0%</span>
+    </footer>
+  </section>
+
+  <div id="drawer-layer" class="drawer-layer" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="debug-badge" class="debug-badge" hidden></div>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
