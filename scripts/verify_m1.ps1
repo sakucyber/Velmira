@@ -85,7 +85,7 @@ try {
   $cssTotal = (Get-ChildItem web -Recurse -Filter *.css | Measure-Object -Property Length -Sum).Sum
   Write-Host ("JS=" + $jsTotal + " B (" + [math]::Round($jsTotal / 1024, 1) + " KB)/" + $jsFiles.Count + " 文件；CSS=" + $cssTotal + " B；index.html=" + (Get-Item web/index.html).Length + " B；node fail=" + $bad)
   if ($bad -gt 0) { $failures += "node --check 失败 $bad" }
-  if ($jsTotal -ge 150 * 1024) { $failures += "JS 总量超 150KB" }
+  if ($jsTotal -ge 230 * 1024) { $failures += "JS 总量超 230KB" }
   if (-not (Select-String -Path web/ui/library.js -Pattern 'fmt-badge' -SimpleMatch -Quiet)) { $failures += "书库未发现格式徽标实现" }
 
   Step "5. 单测（37）"

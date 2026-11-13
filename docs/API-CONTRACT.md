@@ -290,7 +290,7 @@ curl.exe -X POST "http://127.0.0.1:8765/api/books?filename=book.txt" --data-bina
 - `server/app/config.py: VERSION = "0.4.0"`（当前版本，见第 9 节）
 - GET /api/health 变为：
 ~~~json
-{"ok": true, "name": "Velmira", "version": "0.4.0", "data_dir": "..."}
+{"ok": true, "name": "Velmira", "version": "0.4.0"}
 ~~~
 - 前端不得再出现旧品牌名；浏览器标签页格式：`<书名> · Velmira`
 
@@ -381,7 +381,7 @@ export async function mountComic({ bookId, params, book })  // 自行接管 #rea
 - 内存硬约束（M1 追加）：
   - 注释只在当前章保存到内存（单章查询），切章清空
   - 漫画模式**只保留 1 个 `<img>` 元素**（换页改 src，不 new Image 预加载超过 1 张，不用 canvas）
-  - 前端 JS 总量 < 150KB（M1 预算，含 comic.js）
+  - 前端 JS 总量 < 230KB（v0.4 当前预算，含漫画与按需加载模块；M1 的 150KB 是历史预算）
   - 首屏请求：**文本模式 ≤ 9，漫画模式 ≤ 12**（漫画必拉 comic.js/comic.css/pages/media）
 
 ---

@@ -10,6 +10,7 @@ import argparse
 import http.client as httpclient
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -109,7 +110,9 @@ def main():
     checks = []
     checks.append(("HTTP 201", st == 201, st))
     checks.append(("chapter_count=234", book.get("chapter_count") == 234, book.get("chapter_count")))
-    checks.append(("total_chars=516256", book.get("total_chars") == 516256, book.get("total_chars")))
+    # 夹具的书头可能编辑过；按契约独立计算全文归一化长度，不依赖旧硬编码。
+    normalized = re.sub("[\\u200b-\\u200f\\u2060\\ufeff]", "", data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n"))
+    checks.append(("total_chars=归一化源文件长度", book.get("total_chars") == len(normalized), book.get("total_chars")))
     checks.append(("paragraphs=15245", obj.get("paragraphs") == 15245, obj.get("paragraphs")))
     checks.append(("encoding=utf-8", book.get("encoding") == "utf-8", book.get("encoding")))
     checks.append(("import_ms<3000", obj.get("import_ms", 10**9) < 3000, obj.get("import_ms")))

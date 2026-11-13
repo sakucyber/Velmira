@@ -81,7 +81,10 @@ export function openBookDetails(book, meta, onChanged) {
     update({ title: input.value.trim() });
   });
   archive.addEventListener('click', () => update({ archived: !archived }));
-  body.append(facts, form, message, archive, note);
+  const source = el('a', 'btn btn-ghost', '下载原文件');
+  source.href = '/api/books/' + encodeURIComponent(book.id) + '/source';
+  source.download = book.title + '.' + book.format;
+  body.append(facts, source, form, message, archive, note);
   dialog.append(head, body);
   dialog.addEventListener('click', (e) => { if (e.target === dialog) { const r = dialog.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close(); } });
   dialog.addEventListener('close', () => { dialog.remove(); if (prior?.isConnected) prior.focus(); }, { once: true });

@@ -3,7 +3,7 @@
 - 验收人：verifier-m1（task-8；依赖 task-5/6/7 均 completed）
 - 验收时间：2026-11-12 16:31–17:35（Asia/Shanghai）
 - 产品：**Velmira v0.3.0**
-- 形态：**独立评估**——冷启动隔离 DATA_DIR + 独占端口 8787/8788（避开 8765/8783/8785），不引用任何 owner 自测值；web/MEMORY.md 全部关键结论已用 CDP 复跑。
+- 形态：**独立评估**——冷启动隔离 DATA_DIR + 独占端口 8787/8788（避开 8765/8783/8785），不引用任何 owner 自测值；docs/WEB-MEMORY.md 全部关键结论已用 CDP 复跑。
 - 结论：**A–I 全部 PASS（P0=0 / P1=0）**；6 条 P2 建议 + 3 条验证脚本自身修正记录，见 §4。
 - 证据文件：`tests/verify_m1_result.json`、`tests/cdp_m1_result.json`、`tests/verify_m0_result.json`（截图证据已随交付清理，可跑 scripts/verify_m1.ps1 复现）
 - 复现套件：`tests/fixture_book.py`（夹具标题/作者/搜索词运行时解析）、`tests/verify_m0.py`（TXT 回归 41 项，版本断言已更新 0.3.0）、`tests/verify_m1.py`（API A/C/D/E/F/I）、`tests/cdp_m1.mjs`（前端 G）、`scripts/verify_m1.ps1`（一键）
@@ -70,7 +70,7 @@ node tests/cdp_m1.mjs --base http://127.0.0.1:8787 --port 9334
 | index.html `<title>` | Velmira | `Velmira` | PASS |
 | 书库 brand | Velmira + v0.3 标签 | `Velmira` + `.brand-tag`=`v0.3`；3 张书卡 | PASS |
 | 阅读器 document.title | `<书名> · Velmira` | `示例小说 · Velmira` | PASS |
-| 旧品牌名 | web/ server/ README 0 处 | 代码/README **0 处**；md 文档仅 web/MEMORY.md:32 引用该词（自测记录，非 UI/代码） | PASS（见 P2-1） |
+| 旧品牌名 | web/ server/ README 0 处 | 代码/README **0 处**；md 文档仅 docs/WEB-MEMORY.md:32 引用该词（自测记录，非 UI/代码） | PASS（见 P2-1） |
 | 格式徽标 | TXT/EPUB/CBZ | 书库 DOM `.fmt-badge` = `fmt-epub/fmt-cbz/fmt-txt`，文案 EPUB/CBZ/TXT | PASS |
 
 ### B. TXT 回归（tests/verify_m0.py，41/41 PASS）
@@ -219,8 +219,8 @@ fixture：`tests/fixtures/m1_comic_5p.cbz`（page_1..page_5，9,418–9,561 B/�
 
 | # | 位置 | 期望 | 实际 | 影响 |
 | --- | --- | --- | --- | --- |
-| P2-1 | `web/MEMORY.md:32` | web/ 不再出现旧名 | 该 md 自测记录中引用了「旧品牌名」一次（描述 grep 结果）；UI/JS/CSS/服务端 0 处 | 仅文档卫生，不影响产品；建议 M1 归档后移入 docs/ 或改写 |
-| P2-2 | `web/MEMORY.md:17` | JS 文件数记录准确 | 写「11 个文件」，实测 **8 个 .js**（字节数以实测为准，当前 112,411） | 文档口径误差 |
+| P2-1 | `docs/WEB-MEMORY.md:32` | web/ 不再出现旧名 | 该 md 自测记录中引用了「旧品牌名」一次（描述 grep 结果）；UI/JS/CSS/服务端 0 处 | 仅文档卫生，不影响产品；建议 M1 归档后移入 docs/ 或改写 |
+| P2-2 | `docs/WEB-MEMORY.md:17` | JS 文件数记录准确 | 写「11 个文件」，实测 **8 个 .js**（字节数以实测为准，当前 112,411） | 文档口径误差 |
 | P2-3 | `web/ui/reader.js`（734 行） | 契约「每模块 <400 行」软约束 | 734 行（M0 已 487） | 已知；建议 M2 拆书签/debug/comic 委托 |
 | P2-4 | 书签 POST（server/app/api/books.py） | 契约 4.9 无唯一约束 | 同 (chapter,para) 可重复创建两条 201；前端 toggle 已去重 | 多端/直接调 API 可能产生重复书签；M2 可加唯一索引或幂等 200 |
 | P2-5 | 双页模式 | P2 可选 | 未实现（契约 7.6 允许放弃） | 单页模式无回归 |

@@ -1,7 +1,7 @@
 """书库 / 目录 / 章节 / 进度 / 书签接口（契约 4.1-4.9；v0.3 追加 8.2 导入广播）。
 
 路由路径自带 /api 前缀；main.py include_router 时不加 prefix。
-POST /api/books 直接用 request.body() 取原始字节（不解析 multipart）。
+POST /api/books 限量读取原始字节流（不解析 multipart），在线程池执行导入。
 导入成功（新书 / force 重建）→ events_bus.publish_books_changed(count)；
 去重命中（deduped=true）不广播。
 """
@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import secrets
 import time
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.requests import ClientDisconnect
 
+from .. import config
 from .. import importer
 from ..core.events_bus import events_bus
 from ..db import get_conn
@@ -146,14 +150,40 @@ async def create_book(
 ):
     if not filename or not filename.strip():
         return _error(400, "missing_filename", "缺少 filename 查询参数")
-    raw = await request.body()
+    # 先检查明确的 Content-Length，再按分块读取。这样大文件不会先完整
+    # 进入内存，且导入解析不会阻塞负责 SSE/阅读请求的事件循环。
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > config.MAX_UPLOAD_BYTES:
+                return _error(413, "file_too_large", "文件超过 64MB 上限")
+        except (TypeError, ValueError):
+            # 非法头交给分块读取处理，不能因为它阻断合法请求。
+            pass
+    raw_buf = bytearray()
     try:
-        result = importer.import_book(raw, filename.strip(), force=bool(force))
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            if len(raw_buf) + len(chunk) > config.MAX_UPLOAD_BYTES:
+                return _error(413, "file_too_large", "文件超过 64MB 上限")
+            raw_buf.extend(chunk)
+    except ClientDisconnect:
+        return _error(400, "invalid_upload", "上传连接已断开")
+    raw = bytes(raw_buf)
+    del raw_buf
+    try:
+        result = await run_in_threadpool(_import_and_restore, raw, filename.strip(), bool(force))
     except importer.BookImportError as exc:
         return _error(exc.status_code, exc.code, exc.message)
     except Exception as exc:  # 兜底，避免把堆栈直接抛给前端
         return _error(500, "internal_error", f"导入失败：{exc}")
-    # 重新导入已移出的书，恢复原书及其所有阅读数据。
+    return JSONResponse(status_code=200 if result["deduped"] else 201, content=result)
+
+
+def _import_and_restore(raw: bytes, filename: str, force: bool) -> dict:
+    result = importer.import_book(raw, filename, force=force)
+    # 数据库恢复与广播也在线程池完成，避免 SQLite 忙等占住事件循环。
     conn = get_conn()
     try:
         with conn:
@@ -166,13 +196,33 @@ async def create_book(
             _publish_books_changed()
         except Exception as exc:  # 广播失败不影响导入结果
             log.warning("books_changed 广播失败：%s", exc)
-    # 去重命中（force=0 且 sha256 已存在）返回 200，否则 201
-    return JSONResponse(status_code=200 if result["deduped"] else 201, content=result)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # 4.3 / 4.4 书库列表与详情
 # ---------------------------------------------------------------------------
+
+@router.get("/api/books/{book_id}/source")
+def download_source(book_id: str):
+    conn = get_conn()
+    try:
+        book = _book_row(conn, book_id)
+    finally:
+        conn.close()
+    if book is None:
+        return _error(404, "book_not_found", "书籍不存在")
+    try:
+        source = Path(book["file_path"]).resolve()
+        source.relative_to(config.DATA_DIR.resolve())
+        if not source.is_file():
+            return _error(404, "source_not_found", "原文件不存在")
+    except (ValueError, OSError):
+        return _error(404, "source_not_found", "原文件不存在")
+    fmt = book["format"] if book["format"] in ("txt", "epub", "cbz") else "bin"
+    return FileResponse(source, media_type="application/octet-stream",
+                        filename=f"{book['title']}.{fmt}", headers={"Cache-Control": "no-store"})
+
 
 @router.get("/api/books")
 def list_books(archived: bool = False):
@@ -446,15 +496,21 @@ async def create_bookmark(book_id: str, request: Request):
         label = data.get("label")
         if label is not None and not isinstance(label, str):
             label = str(label)
-        bookmark_id = "bm_" + secrets.token_hex(4)
+        bookmark_id = "bm_" + secrets.token_hex(8)
         now = int(time.time())
         with conn:
             conn.execute(
-                "INSERT INTO bookmarks(id,book_id,chapter,para,offset,label,created_at)"
-                " VALUES(?,?,?,?,?,?,?)",
+                """
+                INSERT INTO bookmarks(id,book_id,chapter,para,offset,label,created_at)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(book_id, chapter, para) DO NOTHING
+                """,
                 (bookmark_id, book_id, chapter, para, offset, label, now),
             )
-        row = conn.execute("SELECT * FROM bookmarks WHERE id=?", (bookmark_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM bookmarks WHERE book_id=? AND chapter=? AND para=?",
+            (book_id, chapter, para),
+        ).fetchone()
     finally:
         conn.close()
     return JSONResponse(status_code=201, content={"bookmark": _bookmark_to_dict(row)})

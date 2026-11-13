@@ -58,8 +58,12 @@ def create_app() -> FastAPI:
             "ok": True,
             "name": config.APP_NAME,
             "version": config.VERSION,
-            "data_dir": str(config.DATA_DIR).replace("\\", "/"),
         }
+
+    # 阻断旧地址，避免升级目录残留的开发笔记继续公开。
+    @app.get("/MEMORY.md", include_in_schema=False)
+    def hidden_memory():
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     app.include_router(books_router)
     from .api.manga import router as manga_router

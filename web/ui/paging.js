@@ -51,6 +51,8 @@ export class Pager {
     this.vertical = false;
     this.paraPage = null;     // Map<para, page>，仅当前块
     this.pageFirstPara = null; // Int32Array(pages)，每页第一个段落下标
+    this.pageLocations = [];
+    this.location = null;
 
     this._raf = 0;
     this._scrollTimer = 0;
@@ -85,6 +87,8 @@ export class Pager {
     this.chunks = null;
     this.paraPage = null;
     this.pageFirstPara = null;
+    this.pageLocations = [];
+    this.location = null;
     this.annotations = null;
     this.page = 0;
     this.pages = 1;
@@ -109,6 +113,7 @@ export class Pager {
     const ci = this.chunkIndexForPara(para);
     const landAt = target.landAt === 'end' ? 'end' : 'start';
     await this._renderChunk(ci, para, landAt);
+    this._restoreOffset(para, target.offset);
     this.emit();
   }
 
@@ -150,12 +155,23 @@ export class Pager {
     return this.paragraphs && this.paragraphs.length ? 0 : 0;
   }
 
+  /* 页首坐标在布局测量时计算，翻页只读取缓存，不在动画中测量字符。 */
+  locateOffset() {
+    if (!this.vertical) return this.pageLocations[this.page]?.offset || 0;
+    const node = this.column.querySelector('[data-i="' + this.locatePara() + '"]');
+    if (!node) return 0;
+    const text = this._textNodes(node);
+    const top = this.viewport.getBoundingClientRect().top + 6;
+    const offset = this._firstOffset(text, (rect) => rect.bottom > top);
+    return Array.from(node.textContent.slice(0, offset)).length;
+  }
+
   emit() {
     if (!this.paragraphs) return;
+    this.location = { para: this.locatePara(), offset: this.locateOffset() };
     this.onChange({
       chapter: this.chapter,
-      para: this.locatePara(),
-      offset: 0,
+      ...this.location,
       page: this.page,
       pages: this.pages,
       chunk: this.ci,
@@ -250,13 +266,14 @@ export class Pager {
   }
 
   /* 跳到指定段落（同章内，自动切块） */
-  async gotoPara(para) {
+  async gotoPara(para, offset = 0) {
     if (!this.paragraphs) return;
     const p = clamp(Number(para) || 0, 0, Math.max(0, this.paragraphs.length - 1));
     const ci = this.chunkIndexForPara(p);
     if (this.vertical) {
       if (ci !== this.ci) await this._renderChunk(ci, p, 'start');
       this._scrollToPara(p);
+      this._restoreOffset(p, offset);
       this.emit();
       return;
     }
@@ -266,6 +283,7 @@ export class Pager {
       this.page = clamp(this.pageForPara(p), 0, this.pages - 1);
       this.applyTransform();
     }
+    this._restoreOffset(p, offset);
     this.emit();
   }
 
@@ -280,10 +298,12 @@ export class Pager {
   /* 重新测量并回到同一阅读位置（resize / 字号变化后调用） */
   async relocate() {
     if (!this.paragraphs) return;
-    const para = this.locatePara();
+    // resize/字号变化已经改变 DOM；使用上次 emit 保存的字符锚点。
+    const { para, offset } = this.location || { para: this.locatePara(), offset: 0 };
     if (this.vertical) {
       await this._waitFrames();
       this._scrollToPara(para);
+      this._restoreOffset(para, offset);
       this.emit();
       return;
     }
@@ -292,6 +312,7 @@ export class Pager {
     this._applyMeasure(m);
     this.page = clamp(this.pageForPara(para), 0, this.pages - 1);
     this.applyTransform();
+    this._restoreOffset(para, offset);
     this.emit();
   }
 
@@ -447,50 +468,45 @@ export class Pager {
     return n;
   }
 
-  /* 只读一次布局：页数 + 段→页映射。翻页阶段不再读 layout */
+  /* 构建段落起始页与每页首字符坐标，跨页的段落仍属于当前页。 */
   _measure() {
     const vw = this.viewport.clientWidth || 1;
     this.stride = vw;
     const colRect = this.column.getBoundingClientRect();
-    const pageMap = new Map();
+    const pageMap = new Map(), locations = [];
     let maxRight = 0;
-    const children = this.column.children;
-    for (let k = 0; k < children.length; k++) {
-      const node = children[k];
-      const raw = node.getAttribute('data-i');
+    const pageOf = (rect) => Math.max(0, Math.floor((rect.left - colRect.left + .5) / vw));
+    for (const node of this.column.children) {
       const rect = node.getBoundingClientRect();
-      const left = rect.left - colRect.left;
-      if (raw !== null) pageMap.set(Number(raw), Math.round(left / vw));
-      const right = rect.right - colRect.left;
-      if (right > maxRight) maxRight = right;
+      maxRight = Math.max(maxRight, rect.right - colRect.left);
+      const raw = node.getAttribute('data-i');
+      if (raw === null) continue;
+      const para = Number(raw), text = this._textNodes(node);
+      if (!text.length) continue;
+      const first = this._charRectFromText(text, 0), last = this._charRectFromText(text, text.length - 1);
+      if (!first || !last) continue;
+      const start = pageOf(first), end = pageOf(last);
+      pageMap.set(para, start);
+      for (let page = start; page <= end; page++) {
+        if (locations[page]) continue;
+        const offset = page === start ? 0 : this._firstOffset(text, (r) => pageOf(r) >= page);
+        locations[page] = { para, offset: Array.from(node.textContent.slice(0, offset)).length };
+      }
     }
-    const chunk = this.chunks[this.ci];
-    const chars = this._chunkChars(chunk);
-    let pages = Math.max(1, Math.ceil((maxRight - 1) / vw));
-    const sw = this.column.scrollWidth || 0;
-    const swPages = Math.max(1, Math.round(sw / vw));
-    if (swPages > pages && swPages <= pages + 2) pages = swPages;
-    return { pages, pageMap, chars };
+    const chars = this._chunkChars(this.chunks[this.ci]);
+    const pages = Math.max(1, locations.length, Math.ceil((maxRight - 1) / vw));
+    return { pages, pageMap, chars, locations };
   }
 
   _applyMeasure(m) {
     this.pages = m.pages;
     this.paraPage = m.pageMap;
-    const chunk = this.chunks[this.ci];
-    const chunkStart = chunk ? chunk.start : 0;
-    const first = new Int32Array(this.pages).fill(-1);
-    for (let i = chunkStart; i <= chunk.end; i++) {
-      const pg = m.pageMap.get(i);
-      if (pg === undefined) continue;
-      const clamped = clamp(pg, 0, this.pages - 1);
-      if (first[clamped] < 0) first[clamped] = i;
-    }
-    let carry = chunkStart;
-    for (let pg = 0; pg < this.pages; pg++) {
-      if (first[pg] < 0) first[pg] = carry;
-      else carry = first[pg];
-    }
-    this.pageFirstPara = first;
+    let carry = { para: this.chunks[this.ci].start, offset: 0 };
+    this.pageLocations = Array.from({ length: this.pages }, (_, page) => {
+      carry = m.locations[page] || carry;
+      return carry;
+    });
+    this.pageFirstPara = Int32Array.from(this.pageLocations, (loc) => loc.para);
   }
 
   async _enableVertical(focusPara) {
@@ -512,5 +528,71 @@ export class Pager {
     const vpRect = this.viewport.getBoundingClientRect();
     const nodeRect = node.getBoundingClientRect();
     this.viewport.scrollTop += nodeRect.top - vpRect.top - 12;
+  }
+
+  _textNodes(node) {
+    const result = [];
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+    let current;
+    let start = 0;
+    while ((current = walker.nextNode())) {
+      const length = current.nodeValue ? current.nodeValue.length : 0;
+      if (!length) continue;
+      result.push({ node: current, start, end: start + length });
+      start += length;
+    }
+    return { nodes: result, length: start };
+  }
+
+  _pointAt(text, offset) {
+    const pos = clamp(Number(offset) || 0, 0, text.length);
+    for (const item of text.nodes) {
+      if (pos <= item.end) return [item.node, Math.max(0, pos - item.start)];
+    }
+    const last = text.nodes[text.nodes.length - 1];
+    return last ? [last.node, last.node.nodeValue.length] : null;
+  }
+
+  _charRectFromText(text, offset) {
+    if (!text.length) return null;
+    const start = clamp(Number(offset) || 0, 0, text.length - 1);
+    const from = this._pointAt(text, start);
+    const to = this._pointAt(text, start + 1);
+    const range = document.createRange();
+    range.setStart(from[0], from[1]);
+    range.setEnd(to[0], to[1]);
+    return range.getClientRects()[0] || null;
+  }
+
+  _firstOffset(text, visible) {
+    let low = 0, high = text.length;
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      const rect = this._charRectFromText(text, mid);
+      if (rect && visible(rect)) high = mid;
+      else low = mid + 1;
+    }
+    return low;
+  }
+
+  _restoreOffset(para, offset) {
+    const node = this.column.querySelector('[data-i="' + para + '"]');
+    if (!node) return;
+    const text = this._textNodes(node);
+    // API offset 与 Python len 一致，按 Unicode 字符计数；DOM Range 使用 UTF-16。
+    const wanted = Math.max(0, Number(offset) || 0);
+    if (!wanted) return;
+    const units = Array.from(node.textContent).slice(0, wanted).join('').length;
+    const rect = this._charRectFromText(text, units);
+    if (!rect) return;
+    if (this.vertical) {
+      const vp = this.viewport.getBoundingClientRect();
+      this.viewport.scrollTop += rect.top - vp.top - 12;
+      return;
+    }
+    const col = this.column.getBoundingClientRect();
+    const page = clamp(Math.floor((rect.left - col.left) / Math.max(1, this.stride)), 0, this.pages - 1);
+    this.page = page;
+    this.applyTransform();
   }
 }

@@ -7,6 +7,19 @@
    ============================================================ */
 import { el, clear, debounce, apiGet, apiDelete, fmtTime, normalizeFontSize, toast } from '../util/core.js';
 
+// 搜索契约只允许 <b>；所有其它标签和实体解码结果均作为文本节点。
+export function renderSnippet(target, snippet) {
+  const entities = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#x27;': "'", '&#39;': "'" };
+  let bold = false;
+  target.replaceChildren();
+  for (const part of String(snippet || '').split(/(<\/?b>)/)) {
+    if (part === '<b>') { bold = true; continue; }
+    if (part === '</b>') { bold = false; continue; }
+    const text = part.replace(/&(?:amp|lt|gt|quot|#x27|#39);/g, value => entities[value]);
+    target.append(bold ? el('b', null, text) : document.createTextNode(text));
+  }
+}
+
 export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSelect, onNotesJump, onNotesChanged, onBookmarkJump, onBookmarkDelete, onSettings }) {
   let shell = null;        // 当前抽屉
   let body = null;
@@ -174,8 +187,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
             item.type = 'button';
             item.appendChild(el('span', 'hit-meta', '第 ' + (hit.chapter + 1) + ' 章 · 第 ' + (hit.para + 1) + ' 段'));
             const snip = el('span', 'hit-snippet');
-            // 只信任后端转义后带 <b> 的 snippet 字段
-            snip.innerHTML = hit.snippet || '';
+            renderSnippet(snip, hit.snippet);
             item.appendChild(snip);
             item.addEventListener('click', () => {
               close();

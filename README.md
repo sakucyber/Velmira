@@ -113,7 +113,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 阅读内核 | 自研分页内核（CSS 多列 + translateX） | 无 iframe / blob 累积，行为可预测 |
-| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 149.4KB，设置面板按需加载，无 node_modules |
+| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 215.8KiB（14 个文件，未压缩），设置面板按需加载，无 node_modules |
 | 后端 | Python 3.11 + FastAPI + SQLite(WAL) | 单机 all-in-one，后续接 ComfyUI 同栈 |
 | EPUB | 只取文本、不渲染内嵌样式 | 与阅读器统一排版与高亮坐标，兼容性最好 |
 | CBZ | 单个 img 换 src，不预加载 | 漫画原图 2–4MB / 页，单图 + immutable 缓存 |
@@ -153,7 +153,9 @@ docs/                   架构、计划、契约、截图
 | --- | --- |
 | TXT 导入（234 章 / 51.6 万字） | 27ms |
 | EPUB 导入（234 章） | ~140ms |
-| 前端 JS 总量 | 约 165.5KB（阅读器约 150KB；漫画生成面板独立懒加载） |
+| 前端 JS 总量 | 约 215.8KiB（14 个文件，未压缩；漫画与设置面板按需加载） |
+| 前端 CSS 总量 | 约 69.5KiB（2 个文件，未压缩） |
+| index.html | 12,813 B |
 | 首屏请求 | 文本 9 / 漫画 10–11 |
 | 单章 DOM | 不超过 256（含高亮）；漫画模式 94 |
 | 翻页 | 0.075ms / 次（只改 transform）；漫画翻页 0–4ms |

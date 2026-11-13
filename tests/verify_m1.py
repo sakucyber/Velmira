@@ -210,16 +210,17 @@ def bookmark_checks(book_id):
     st2, hdrs, obj2, raw2, _ = api("POST", url, b1, {"Content-Type": "application/json"})
     st3, hdrs, obj3, _, _ = api("GET", url)
     n = len((obj3 or {}).get("bookmarks", []))
-    dup_note = (f"API 允许重复（前端去重）：第一次 {st1} id={id1}，重复 POST {st2} id={((obj2 or {}).get('bookmark') or {}).get('id')}，"
-                f"当前 {n} 条（M0 契约 4.9 无唯一约束，按实际记录）")
-    add("F1 POST 书签 + 重复 POST 实际行为", "PASS" if st1 == 201 and id1 and st3 == 200 and n >= 1 else "FAIL",
-        f"first={st1}, dup={st2}, list={n}；{dup_note}")
+    id2 = ((obj2 or {}).get("bookmark") or {}).get("id")
+    add("F1 POST 同段书签幂等", "PASS" if st1 == st2 == 201 and id1 == id2 and st3 == 200 and n == 1 else "FAIL",
+        f"first={st1}, dup={st2}, same_id={id1 == id2}, list={n}")
     st, hdrs, obj, _, _ = api("DELETE", f"{url}/{id1}")
     st_g, hdrs, obj_g, _, _ = api("GET", url)
     remaining = len((obj_g or {}).get("bookmarks", []))
     add("F2 DELETE 书签生效", "PASS" if st == 200 and (obj or {}).get("ok") is True and remaining == n - 1 else "FAIL",
         f"delete={st} list {n}->{remaining}")
-    return {"bookmark_id": ((obj2 or {}).get("bookmark") or {}).get("id"), "remaining": remaining}
+    # 为后续重启持久化验证重新建立一条独立书签。
+    _, _, saved, _, _ = api("POST", url, b1, {"Content-Type": "application/json"})
+    return {"bookmark_id": saved["bookmark"]["id"], "remaining": remaining}
 
 
 def phase_api():

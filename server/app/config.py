@@ -33,3 +33,9 @@ WEB_DIR = PROJECT_ROOT / "web"
 
 # 上传上限：64MB（契约 4.2）
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+# CBZ 解压保护：压缩包本身受 MAX_UPLOAD_BYTES 约束，但解压后可能远大于
+# 上传体积。限制页数、单页和全部图片的解压大小，避免 zip bomb 耗尽磁盘/内存。
+MAX_CBZ_PAGES = 2000
+MAX_CBZ_PAGE_BYTES = 32 * 1024 * 1024
+MAX_CBZ_TOTAL_BYTES = 512 * 1024 * 1024

@@ -30,5 +30,5 @@
 ### 验收
 - 视觉：独立评审（存量润色标准，不打分）无阻断；4 项必须修 + 2 项次要已全部落实并复核截图。
 - 回归：`scripts/verify.ps1` 41/41；`scripts/verify_m1.ps1` 41 + 34 + 3 + CDP 22 全 PASS；37 单测 OK。
-- 体积：JS 116.3KB（含漫画）/ CSS 49.3KB / HTML 10.4KB；1280×860 与 390×844 无横向溢出。
+- 体积（2026-11-13 实测）：JS 约 215.9KiB（14 个文件）/ CSS 约 69.5KiB（2 个文件）/ HTML 12,813 B；1280×860 与 390×844 无横向溢出。
 - 证据：docs/screenshots/library.png、reader-desktop.png、notes-drawer.png、toc.png、search.png、comic.png、comic-mobile.png、mobile-reader.png、desktop-window.png、desktop-app.png。

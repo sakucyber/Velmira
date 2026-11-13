@@ -17,6 +17,19 @@ def init_db() -> None:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        # 只有首次升级需要去重；同一事务建立唯一索引，启动幂等且保留最早书签。
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_bookmarks_location'").fetchone():
+            conn.execute("""
+                DELETE FROM bookmarks WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY book_id, chapter, para ORDER BY created_at, id
+                        ) AS rank FROM bookmarks
+                    ) WHERE rank > 1
+                )
+            """)
+            conn.execute("CREATE UNIQUE INDEX idx_bookmarks_location ON bookmarks(book_id, chapter, para)")
         conn.commit()
     finally:
         conn.close()

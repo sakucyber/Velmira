@@ -9,7 +9,7 @@
   // 尽早应用主题，避免首屏闪白（原生脚本，不产生额外请求）
   try {
     var _velmira = JSON.parse(localStorage.getItem('velmira.r1') || '{}');
-    if (_velmira && _velmira.theme) document.documentElement.dataset.theme = _velmira.theme;
+    if (_velmira && ['day', 'night', 'sepia'].includes(_velmira.theme)) document.documentElement.dataset.theme = _velmira.theme;
   } catch (e) { /* ignore */ }
 </script>
 <link rel="icon" href="data:,">
@@ -58,12 +58,12 @@
             <p class="lib-sub"><span id="lib-sub-count">0 本</span> · 你的私人书库</p>
           </div>
           <div class="lib-actions">
-            <label class="lib-search">
+            <div class="lib-search">
               <span class="lib-search-ico" aria-hidden="true">⌕</span>
               <input id="lib-filter" class="lib-search-input" type="search" placeholder="搜索书名" aria-label="按书名过滤书架" autocomplete="off">
               <kbd class="search-key" aria-hidden="true">/</kbd>
               <button id="lib-clear" class="search-clear" type="button" aria-label="清空书名搜索" hidden>×</button>
-            </label>
+            </div>
             <button id="lib-refresh" class="btn btn-icon lib-refresh" type="button" title="刷新书架" aria-label="刷新书架"><span class="ico">↻</span></button>
           </div>
         </header>

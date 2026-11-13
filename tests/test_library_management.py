@@ -101,6 +101,32 @@ class LibraryManagementTests(unittest.TestCase):
         db.init_db()
         self.assertEqual(books.list_books()["books"][0]["id"], self.id)
 
+    def test_bookmark_requests_are_idempotent_under_concurrency(self):
+        from concurrent.futures import ThreadPoolExecutor
+        def create(_):
+            return json.loads(asyncio.run(books.create_bookmark(self.id, request({"chapter": 0, "para": 0, "offset": 3, "label": "bookmark"}))).body)["bookmark"]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            bookmarks = list(pool.map(create, range(16)))
+        self.assertTrue(all(b == bookmarks[0] for b in bookmarks))
+        # A stale client must not overwrite another client's label/offset.
+        asyncio.run(books.create_bookmark(self.id, request({"chapter": 0, "para": 0})))
+        self.assertEqual(books.list_bookmarks(self.id)["bookmarks"], [bookmarks[0]])
+
+    def test_bookmark_upgrade_deduplicates_and_is_repeatable(self):
+        conn = db.get_conn()
+        with conn:
+            conn.execute("DROP INDEX idx_bookmarks_location")
+            conn.executemany("INSERT INTO bookmarks VALUES(?,?,?,?,?,?,?)", [
+                ("first", self.id, 0, 0, 2, "saved", 1),
+                ("later", self.id, 0, 0, 4, "duplicate", 2),
+                ("other", self.id, 0, 1, 0, None, 1),
+            ])
+        conn.close()
+        db.init_db(); db.init_db()
+        rows = books.list_bookmarks(self.id)["bookmarks"]
+        self.assertEqual({r["id"] for r in rows}, {"first", "other"})
+        self.assertEqual(next(r for r in rows if r["id"] == "first")["label"], "saved")
+
 
 if __name__ == "__main__":
     unittest.main()

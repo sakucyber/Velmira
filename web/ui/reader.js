@@ -126,24 +126,34 @@ export async function mountReader({ bookId, params, debug }) {
   const qCh = intOrNull(params.get('ch'));
   const qPara = intOrNull(params.get('para'));
   const qP = intOrNull(params.get('p'));
+  const qOffset = intOrNull(params.get('offset'));
   let progressFetched = false; // init 阶段是否已取过 /progress，避免首屏重复请求
   let target;
   if (qCh !== null) {
     target = {
       chapter: clamp(qCh, 0, state.chapterCount - 1),
       para: qPara !== null ? qPara : 0,
+      offset: qOffset !== null ? Math.max(0, qOffset) : 0,
     };
   } else if (settings.book === bookId && Number.isInteger(settings.chapter)) {
-    target = { chapter: clamp(settings.chapter, 0, state.chapterCount - 1), para: Math.max(0, settings.para | 0) };
+    target = {
+      chapter: clamp(settings.chapter, 0, state.chapterCount - 1),
+      para: Math.max(0, settings.para | 0),
+      offset: Math.max(0, settings.offset | 0),
+    };
   } else {
     try {
       const pr = (await apiGet('/api/books/' + encodeURIComponent(bookId) + '/progress')).progress;
       progressFetched = true;
-      target = { chapter: clamp(pr.chapter || 0, 0, state.chapterCount - 1), para: Math.max(0, pr.para | 0) };
+      target = {
+        chapter: clamp(pr.chapter || 0, 0, state.chapterCount - 1),
+        para: Math.max(0, pr.para | 0),
+        offset: Math.max(0, pr.offset | 0),
+      };
       state.percent = Number(pr.percent) || 0;
       updateProgressUI();
     } catch (err) {
-      target = { chapter: 0, para: 0 };
+      target = { chapter: 0, para: 0, offset: 0 };
     }
   }
 
@@ -258,7 +268,7 @@ export async function mountReader({ bookId, params, debug }) {
     finishSent = true;
     const paras = (pager && pager.paragraphs) || [];
     const lastIdx = Math.max(0, paras.length - 1);
-    const lastLen = String(paras[lastIdx] || '').length;
+    const lastLen = Array.from(String(paras[lastIdx] || '')).length;
     // 定位到全书最后一段末尾，服务端 percent 即为 1.0
     state.para = lastIdx;
     state.offset = lastLen;
@@ -316,6 +326,7 @@ export async function mountReader({ bookId, params, debug }) {
     state.chapter = idx;
     state.segments = null;
     state.para = Number(target.para) || 0;
+    state.offset = Math.max(0, Number(target.offset) || 0);
     state.annotations = [];          // 内存约束：只驻留当前章注释
     dom.chapterLabel.textContent = '第 ' + (idx + 1) + ' 章 · 加载中…';
     dom.pageLabel.textContent = '— / —';
@@ -396,6 +407,7 @@ export async function mountReader({ bookId, params, debug }) {
   function onPagerChange(info) {
     if (annUI) annUI.hideMenu();
     state.para = info.para;
+    state.offset = Math.max(0, Number(info.offset) || 0);
     state.page = info.page;
     state.pages = info.pages;
     state.chunk = info.chunk;
@@ -420,8 +432,9 @@ export async function mountReader({ bookId, params, debug }) {
     if (state.chapter < 0) return;
     const url = location.pathname + '?book=' + encodeURIComponent(bookId)
       + '&ch=' + state.chapter + '&p=' + state.page
-      + '&para=' + Math.max(0, state.para);
-    try { history.replaceState({ book: bookId, ch: state.chapter, p: state.page, para: state.para }, '', url); } catch (e) { /* ignore */ }
+      + '&para=' + Math.max(0, state.para)
+      + '&offset=' + Math.max(0, state.offset);
+    try { history.replaceState({ book: bookId, ch: state.chapter, p: state.page, para: state.para, offset: state.offset }, '', url); } catch (e) { /* ignore */ }
   }
 
   function persist() {
@@ -460,11 +473,11 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   /* ================= 跳转 / 高亮 ================= */
-  async function jumpTo({ chapter, para = 0, q = null }) {
+  async function jumpTo({ chapter, para = 0, offset = 0, q = null }) {
     if (chapter !== state.chapter) {
-      await loadChapter(chapter, { para });
+      await loadChapter(chapter, { para, offset });
     } else {
-      await pager.gotoPara(para);
+      await pager.gotoPara(para, offset);
     }
     flashPara(para, q);
   }
@@ -645,11 +658,11 @@ export async function mountReader({ bookId, params, debug }) {
     if (existing) { await removeBookmark(existing); return; }
     try {
       const res = await apiPost('/api/books/' + encodeURIComponent(bookId) + '/bookmarks', {
-        chapter, para, offset: 0,
+        chapter, para, offset: state.offset,
       });
       const bm = res && res.bookmark;
       if (bm) {
-        state.bookmarks = [bm].concat(state.bookmarks);
+        state.bookmarks = [bm].concat(state.bookmarks.filter((item) => item.id !== bm.id));
         updateBookmarkBtn();
         if (panels && panels.isOpen()) panels.updateBookmarks(state.bookmarks, { chapter: state.chapter, para: state.para });
         toast('已加书签');
@@ -758,7 +771,7 @@ export async function mountReader({ bookId, params, debug }) {
         onNotesChanged: (ev) => {
           if (ev && ev.type === 'delete') onAnnotationDeleted(ev.annotation);
         },
-        onBookmarkJump: (bm) => jumpTo({ chapter: bm.chapter, para: bm.para }),
+        onBookmarkJump: (bm) => jumpTo(bm),
         onBookmarkDelete: (bm) => removeBookmark(bm),
       });
     }

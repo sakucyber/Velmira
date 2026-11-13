@@ -216,7 +216,6 @@ export async function mountLibrary() {
     updateCounts(visible);
     const hasBooks = books.length > 0;
     if (libView) libView.classList.toggle('is-lib-empty', !hasBooks);
-    emptyEl.hidden = hasBooks || !loadedOnce;
     if (emptyTextEl) emptyTextEl.textContent = EMPTY_TEXT;
     const isArchive = statusFilter.value === 'archived';
     emptyEl.hidden = isArchive || hasBooks || !loadedOnce;
@@ -328,10 +327,11 @@ export async function mountLibrary() {
       const data = await apiGet('/api/books');
       if (destroyed) return;
       hideError();
-      applyBooks((data && data.books) || [], { force: !!opts.force });
       loadedOnce = true;
+      applyBooks((data && data.books) || [], { force: !!opts.force });
       if (statusFilter.value === 'archived') await loadArchived();
       if (pollFailures) pollFailures = 0;
+      return true;
     } catch (err) {
       if (destroyed) return;
       showError(err);
@@ -341,7 +341,7 @@ export async function mountLibrary() {
         if (pollFailures >= 2) setLiveState('offline');
       }
     } finally {
-      if (skeletonEl && !loadedOnce) skeletonEl.hidden = true;
+      if (skeletonEl) skeletonEl.hidden = true;
     }
   }
 
@@ -361,19 +361,9 @@ export async function mountLibrary() {
     if (destroyed || pollInFlight) return;
     pollInFlight = true;
     try {
-      const data = await apiGet('/api/books');
-      pollFailures = 0;
-      if (destroyed) return;
-      hideError();
-      applyBooks((data && data.books) || []);
-      loadedOnce = true;
-      if (statusFilter.value === 'archived') await loadArchived();
-      if (skeletonEl && !loadedOnce) skeletonEl.hidden = true;
+      if (!await refreshBooks({ poll: true }) || destroyed) return;
       if (es && es.readyState === 1) setLiveState('live');
       else if (liveState === 'offline') setLiveState('polling');
-    } catch (err) {
-      pollFailures += 1;
-      if (pollFailures >= 2) setLiveState('offline');
     } finally {
       pollInFlight = false;
       if (!es) openEventSource();

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS progress (
   updated_at INTEGER NOT NULL
 );
 
+-- 唯一位置索引由 db.init_db 在旧库去重后建立。
 CREATE TABLE IF NOT EXISTS bookmarks (
   id TEXT PRIMARY KEY,
   book_id TEXT NOT NULL,

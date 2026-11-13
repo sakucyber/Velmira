@@ -17,6 +17,7 @@ import io
 import json
 import re
 import secrets
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
 
 # M1：原始文件落盘后缀（按检测到的格式，便于排查/重放）
 _STORED_SUFFIX = {"txt": ".txt", "epub": ".epub", "cbz": ".cbz"}
+_IMPORT_LOCK = threading.Lock()
 
 
 class BookImportError(Exception):
@@ -336,8 +338,9 @@ def detect_format(raw: bytes) -> str:
         for name, lower in zip(names, lower_names):
             if lower == "mimetype":
                 try:
-                    if zf.read(name).strip() == b"application/epub+zip":
-                        return "epub"
+                    with zf.open(name) as mimetype:
+                        if mimetype.read(128).strip() == b"application/epub+zip":
+                            return "epub"
                 except (KeyError, zipfile.BadZipFile, OSError):
                     pass
                 break
@@ -354,7 +357,7 @@ def detect_format(raw: bytes) -> str:
 
 
 def _store_source(raw: bytes, book_id: str, fmt: str) -> Path:
-    """原文落盘（重放/段落数重算），路径写入 books.file_path。"""
+    """保留原文件供书籍详情下载备份/重新导入，路径写入 books.file_path。"""
     books_dir = config.DATA_DIR / "books"
     books_dir.mkdir(parents=True, exist_ok=True)
     stored_path = books_dir / f"{book_id}{_STORED_SUFFIX.get(fmt, '.bin')}"
@@ -413,6 +416,13 @@ def _import_cbz(raw: bytes, book_id: str, filename: str, reset: bool) -> dict:
 
 
 def import_book(raw: bytes, filename: str, force: bool = False) -> dict:
+    # 单进程部署：线程池可并发导入，同一内容的查重、文件写入和 DB 提交
+    # 必须串行，避免两个请求同时创建相同 SHA 的书籍和孤立媒体目录。
+    with _IMPORT_LOCK:
+        return _import_book(raw, filename, force)
+
+
+def _import_book(raw: bytes, filename: str, force: bool = False) -> dict:
     """完整导入（去重/覆盖/格式分发）：返回契约 4.2 / 7.3 的响应体。"""
     t0 = perf_counter()
     if not raw:
