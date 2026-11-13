@@ -108,6 +108,36 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(len(self.sql("SELECT * FROM render_jobs")), 3)
         self.assertEqual(self.story_provider.complete.await_count, 1)
 
+    def test_streaming_generates_at_ten_waits_for_late_chapter_and_keeps_pause_owner(self):
+        for idx in range(2, 12):
+            self.sql("INSERT INTO chapters(id,book_id,idx,title,chars,paras_json) VALUES(?,'m3-book',?,'Later',12,'[\"Later sample\"]')", (f"ch{idx + 1}", idx))
+        self.sql("INSERT INTO book_analysis(book_id,run_id,status,source_hash,config_json,total,completed,updated_at) VALUES('m3-book','owned','paused','test','{}',12,9,1)")
+        progress = {"status": "running", "run_id": "owned", "completed": 9, "total": 12}
+        with patch.object(a.analysis, "enqueue", return_value=progress):
+            self.call()
+            self.sql("UPDATE book_analysis SET status='running'")
+            self.advance(2)
+            self.story_provider.complete.assert_not_awaited()
+            self.assertEqual(self.sql("SELECT status FROM auto_manga")[0]["status"], "analyzing")
+            progress["completed"] = 10
+            self.sql("UPDATE book_analysis SET completed=10")
+            for _ in range(20):
+                self.advance()
+                if self.sql("SELECT id FROM auto_manga_pages"): break
+            self.assertEqual(len(self.sql("SELECT id FROM auto_manga_pages")), 1)
+            value = self.client.get(self.base + "/auto").json()["auto"]
+            self.assertEqual(value["analysis"], {"status": "running", "completed": 10, "total": 12})
+            self.advance()  # Advance to the next chapter without losing analysis ownership.
+            state = json.loads(self.sql("SELECT state_json FROM auto_manga")[0]["state_json"])
+            self.assertEqual(state["analysis_run"], "owned")
+            calls = self.story_provider.complete.await_count
+            self.sql("UPDATE auto_manga SET chapter=10")
+            self.advance(2)
+            self.assertEqual(self.story_provider.complete.await_count, calls)
+            self.assertEqual(self.sql("SELECT status FROM auto_manga")[0]["status"], "analyzing")
+            self.call(False)
+            self.assertEqual(self.sql("SELECT status FROM book_analysis")[0]["status"], "paused")
+
     def test_pause_during_model_request_discards_late_work(self):
         self.call()
         async def delayed(**kw):

@@ -5,7 +5,7 @@ const names = { idle: '尚未开启', queued: '准备生成', analyzing: '整书
 
 export function mountAutomatic({ area, bookId, signal, chapter, onSettings, onChange }) {
   const base = '/api/books/' + encodeURIComponent(bookId) + '/manga/auto';
-  const note = el('p', 'manga-note', '从开启时的阅读章节开始，按顺序生成后续章节。AI 先阅读全书，再编排连续分镜，复用人物参考图与画风，自动加入旁白并拼页。');
+  const note = el('p', 'manga-note', '从开启时的阅读章节开始，按顺序生成后续章节。分析完前 10 章即可开始画漫画，剩余章节同时继续分析；不足 10 章则分析全书。每一章都等分析完成后再画，复用人物参考图与画风，自动加入旁白并拼页。');
   const control = el('button', 'btn automatic-switch', '正在读取…'); control.type = 'button'; control.disabled = true;
   control.setAttribute('role', 'switch'); control.setAttribute('aria-label', '自动生成连贯漫画'); control.setAttribute('aria-checked', 'false');
   const status = el('p', 'manga-note'); status.setAttribute('role', 'status');

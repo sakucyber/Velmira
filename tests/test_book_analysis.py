@@ -168,6 +168,55 @@ class BookAnalysisTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["plan"]["scope"]["related_chapters"], [0])
 
+    def test_comic_warmup_target_prefix_and_stale_cache(self):
+        for idx in range(1, 12): self.add_chapter(idx, "Ari returned to the garden wearing a red coat.")
+        self.run_job()
+        # Cached summaries exist for the entire book, but only this run's prefix counts.
+        self.sql("UPDATE book_analysis SET status='running',completed=9")
+        conn = db.get_conn()
+        try:
+            with conn:
+                self.assertFalse(ba.ensure_ready(conn, "m3-book", 0))
+                self.assertFalse(ba.ensure_ready(conn, "m3-book", 9))
+            self.sql("UPDATE book_analysis SET completed=10")
+            with conn:
+                self.assertTrue(ba.ensure_ready(conn, "m3-book", 0))
+                self.assertTrue(ba.ensure_ready(conn, "m3-book", 9))
+                self.assertFalse(ba.ensure_ready(conn, "m3-book", 10))
+                self.assertFalse(ba.ensure_ready(conn, "m3-book"))
+            self.sql("UPDATE book_analysis SET completed=11")
+            with conn: self.assertTrue(ba.ensure_ready(conn, "m3-book", 10))
+            settings.save_settings({"model": "new-model"})
+            with conn: self.assertFalse(ba.ensure_ready(conn, "m3-book", 0))
+            self.assertEqual(self.sql("SELECT completed FROM book_analysis")[0]["completed"], 0)
+        finally: conn.close()
+
+    def test_short_book_and_paused_analysis_readiness(self):
+        self.add_chapter(1, "Ari walks home.")
+        self.run_job()
+        conn = db.get_conn()
+        try:
+            for status, completed, expected in [("running", 1, False), ("running", 2, True), ("done", 2, True), ("paused", 2, False), ("error", 2, False)]:
+                self.sql("UPDATE book_analysis SET status=?,completed=?", (status, completed))
+                with conn: self.assertEqual(ba.ensure_ready(conn, "m3-book", 0), expected)
+        finally: conn.close()
+
+    def test_director_starts_at_ten_while_analysis_continues(self):
+        for idx in range(1, 12): self.add_chapter(idx, "Ari returned to the garden wearing a red coat.")
+        self.run_job()
+        self.sql("UPDATE book_analysis SET status='running',completed=9")
+        mock = SimpleNamespace(complete=AsyncMock(side_effect=[{"summary": "Garden scene."}, {"visual_prompt": "An adult stands in a garden."}]))
+        with patch.object(director, "make_provider", return_value=mock):
+            payload = {"scene_id": "m3-scene", "form_id": "form_m3-char"}
+            response = self.client.post("/api/books/m3-book/manga/plan", json=payload)
+            self.assertEqual(response.status_code, 409)
+            mock.complete.assert_not_awaited()
+            self.sql("UPDATE book_analysis SET completed=10")
+            response = self.client.post("/api/books/m3-book/manga/plan", json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(mock.complete.await_count, 2)
+        self.assertEqual(self.sql("SELECT status,completed FROM book_analysis"), [{"status": "running", "completed": 10}])
+
     def test_disabled_auto_read_and_invalid_model_output(self):
         settings.save_settings({"auto_analyze": False})
         conn = db.get_conn()

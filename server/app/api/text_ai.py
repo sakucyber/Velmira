@@ -94,10 +94,15 @@ async def probe():
 async def create_plan(book_id: str, payload: dict = Body(...)):
     fields(payload, {"scene_id", "form_id", "shot", "action", "para", "flashback"})
     cfg = director.text_config()
+    if not isinstance(payload.get("scene_id"), str) or not 1 <= len(payload["scene_id"]) <= 200:
+        raise MangaError("scene_id 须为 1–200 字符")
     with connection(book_id) as conn:
-        ready = book_analysis.ensure_ready(conn, book_id)
+        scene = conn.execute("SELECT chapter_id FROM scenes WHERE id=? AND book_id=?", (payload["scene_id"], book_id)).fetchone()
+        if not scene:
+            raise MangaError("请先选择本书的场景", "scene_not_found", 404)
+        ready = book_analysis.ensure_ready(conn, book_id, scene["chapter_id"] or 0)
     if not ready:
-        raise MangaError("整书分析尚未完成，请在“整书分析”查看进度，完成后生成漫画", "book_analysis_pending", 409)
+        raise MangaError("请等待前 10 章及目标章节分析完成（不足 10 章则分析全书）；剩余章节可在出图时继续分析", "book_analysis_pending", 409)
     with connection(book_id) as conn:
         material = director.prepare_material(conn, book_id, payload)
         source_hash = digest(material)

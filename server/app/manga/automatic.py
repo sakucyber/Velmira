@@ -64,7 +64,7 @@ def overview(conn, book_id):
             "pages": count, "completed_chapters": state.get("completed", 0),
             "total_chapters": conn.execute("SELECT COUNT(*) FROM chapters WHERE book_id=? AND idx>=?", (book_id, job["start_chapter"])).fetchone()[0],
             "panel": state.get("panel", 0), "panels": len(state.get("story", [])),
-            "analysis": dict(reading) if reading and job["status"] == "analyzing" else None}
+            "analysis": dict(reading) if reading else None}
 
 
 def toggle(conn, book_id, enabled, chapter):
@@ -201,10 +201,13 @@ async def step(job):
         config_hash = digest([cfg, s.configuration(conn, bid)])
         with conn:
             ready = analysis.enqueue(conn, bid)
-            if ready["status"] != "done":
+            if not analysis.comic_ready(conn, bid, job["chapter"], ready):
                 if ready["status"] in {"error", "paused"}:
                     raise MangaError("整书分析已中断，请检查文本 API 后重新开启自动漫画")
-                save(conn, job, state, "analyzing", "正在阅读全书，整理人物和章节大意")
+                warmup = min(analysis.COMIC_WARMUP_CHAPTERS, ready["total"])
+                message = (f"正在分析前 {warmup} 章，完成后开始画漫画；剩余章节继续分析"
+                           if ready["completed"] < warmup else f"等待第 {job['chapter'] + 1} 章分析完成后继续画漫画")
+                save(conn, job, state, "analyzing", message)
                 return
         if state.get("story") and state.get("config") != config_hash:
             raise MangaError("模型或画风设置已变化，请恢复此前设置后继续当前页")
@@ -214,7 +217,7 @@ async def step(job):
             raise MangaError("本章没有完整分析场景，请先完成整书分析")
         if index >= len(scenes):
             next_ch = conn.execute("SELECT idx FROM chapters WHERE book_id=? AND idx>? ORDER BY idx LIMIT 1", (bid, job["chapter"])).fetchone()
-            new_state = {"completed": state.get("completed", 0) + 1, "previous": state.get("previous", [])}
+            new_state = {"completed": state.get("completed", 0) + 1, "previous": state.get("previous", []), "analysis_run": state.get("analysis_run")}
             with conn:
                 save(conn, job, new_state, "queued" if next_ch else "done", "进入下一章" if next_ch else "后续章节已生成，漫画草稿可阅读", chapter=next_ch[0] if next_ch else job["chapter"], enabled=int(bool(next_ch)))
             return
@@ -250,7 +253,7 @@ async def step(job):
                         raise MangaError("拼页期间分镜发生变化")
                     count = conn.execute("SELECT COUNT(*) FROM auto_manga_pages WHERE book_id=? AND run_id=?", (bid, job["run_id"])).fetchone()[0]
                     conn.execute("INSERT INTO auto_manga_pages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (s.uid("autopage_"), bid, job["run_id"], scene["id"], job["chapter"], count, stable_json(spec), stable_json(captured), path, image_hash, int(time.time())))
-                    state = {"completed": state.get("completed", 0), "scene": index + 1, "previous": [{k: p[k] for k in ("caption", "action", "character_id")} for p in story]}
+                    state = {"completed": state.get("completed", 0), "scene": index + 1, "previous": [{k: p[k] for k in ("caption", "action", "character_id")} for p in story], "analysis_run": state.get("analysis_run")}
                     save(conn, job, state, "queued", "漫画页已保存，继续下一段情节")
             except BaseException:
                 s.asset_path(path).unlink(missing_ok=True)

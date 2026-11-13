@@ -477,7 +477,7 @@ data: {"revision": 7, "count": 3}
 - `GET /api/ai/settings` 返回 `{settings:{base_url,model,enabled,auto_analyze,key_configured}}`，不返回密钥。`PATCH /api/ai/settings` 接收 `{base_url?,model?,enabled?,auto_analyze?,api_key?}`；同一地址下空密钥保留旧值，修改地址会清除旧密钥。设置位于本机数据目录 `text-api.json`，Windows 使用当前用户 DPAPI 加密凭据，其他平台使用权限为 0600 的本地文件。远端地址只允许无凭据/查询参数的 HTTPS，本机可用 HTTP。已有密钥不会跟随 HTTP 重定向，也不会在配置并发切换后发送到旧地址。
 - `GET /api/ai/models` 从已保存的地址读取模型名称；`POST /api/ai/probe` 发起小型 JSON 完成请求，返回 `{ok:true,model}`。
 - 默认文本模型 `gpt-oss-120b`，128K 上下文，只发送文字。请求按 UTF-8 字节数保守估算 token 上界，预留 3000 输出 token 和 1024 消息开销；这是保守预算，不是精确 tokenizer 计数。整书按章节和分段处理，无需把全书一次塞入上下文。模型具备工具调用能力，本流程由应用串联请求和图像队列，不向模型开放额外工具。
-- `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。整书分析未完成时自动入队并返回 409 `book_analysis_pending`；暂停/失败任务需显式继续。读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），结合相关章节摘要和人物证据，调用文本模型生成结构化中文总结和英文单格提示词。生成目标章节时不引用未来章节资料，也不把参考图发给文本模型。
+- `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。分析完成前 `min(10,总章节数)` 章且目标章节已分析即可生成；否则自动入队并返回 409 `book_analysis_pending`。就绪依据当前分析 run 的已完成章节前缀，旧缓存不能越过门槛；暂停/失败任务需显式继续。读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），结合相关章节摘要和人物证据，调用文本模型生成结构化中文总结和英文单格提示词。生成目标章节时不引用未来章节资料，也不把参考图发给文本模型。
 - 总结字段为 `summary/location/time_of_day/moment/visible_action/emotion/key_props/continuity/uncertainties`。模型输出须通过 JSON、类型和长度校验；提示词夹带中文时最多纠正一次，失败返回 502，不提交出图任务。
 - `plan` 保存来源哈希、范围字符数、模型标识、总结和提示词；缓存键包括来源、地址、模型及方案版本。场景/人物/镜头/上下文在分析期间改变，或旧方案被用于新选择时，返回 409 `text_plan_stale`。
 - 有效 `plan_id` 的出图任务在快照中保存 `text_plan`，将英文提示词与冻结身份、参考图约束一起交给 MOSS。参考图确认、人物版本、生效段落和人脸阈值检查继续适用；执行前和完成时重新验证源上下文，换种子保留总结方案。
@@ -498,7 +498,7 @@ data: {"revision": 7, "count": 3}
 
 - `GET /api/books/{book_id}/manga/auto` 返回 `{auto}`：开关、阶段、起始/当前章节、已完成章节和页数、待处理分格、错误提示。
 - `PATCH .../auto` 接收 `{enabled:boolean,chapter?:number}`。首次开启从当前章开始；暂停后开启恢复原 run 和起点。完成后重新开启创建新 run，历史草稿可继续查看。仅支持 TXT/EPUB，使用已配置的文本及图像 API。
-- 后台先完成整书分析，再按章节及原文片段顺序编排 1–4 格一页的连续分镜；把上一页/格内容带入下一次编排和总结。对白校验为原文逐字引用，人物必须来自片段；没有具名人物的片段生成过渡旁白页。
+- 后台分析完成前 10 章（短书则全部章节）后，按章节及原文片段顺序编排 1–4 格一页的连续分镜，整书分析继续运行；生成追上分析进度时等待目标章就绪。把上一页/格内容带入下一次编排和总结。对白校验为原文逐字引用，人物必须来自片段；没有具名人物的片段生成过渡旁白页。
 - 依照当前章节以前的外貌证据创建冻结形态，复用同一形态的参考图。自动选用的参考图记录于 `auto_manga_refs`，不把 `accepted` 写成人工确认。撤销自动参考会使相关任务失效，不能由后台重新选回。
 - 自动页写入独立的 `auto_manga_pages`，明确标为草稿，`needs_review` 和真实人脸分数保持不变；不绕过 M4 正式拼页/导出的复核门槛。`GET .../auto/pages?offset=0&limit=12&run_id=...` 分页读取草稿（最多30页），省略 run_id 取本次；`GET .../auto/runs` 查看历史记录，`GET .../auto/pages/{id}/image` 读取页图。
 - 关闭开关后不再创建下一张任务，已提交的一张保留；自动流程自行启动的整书分析也暂停。状态写入 SQLite，重启可续跑；重复开启幂等。模型异常停机并显示可处理错误，不无限重试；章节、人物、参考图变化会阻止旧快照继续。中途修改模型/画风须恢复当前页原配置后继续。
