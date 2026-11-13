@@ -11,6 +11,7 @@
    ============================================================ */
 import {
   $, el, store, toast, fmtChars, apiGet, uploadBook,
+  THEMES, FONT_SIZE, applyTheme, applyFontSize,
 } from '../util/core.js';
 import { readingState, readingLabel, coverHue, shelfPreferences, saveShelfPreferences, openBookDetails } from './library-tools.js';
 
@@ -69,6 +70,29 @@ export async function mountLibrary() {
   let pollInFlight = false;
   let pollFailures = 0;
   let refreshTimer = 0;        // SSE 事件去抖
+  let settingsPanels = null;
+
+  async function openSettings() {
+    const button = $('#rail-settings');
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      if (!settingsPanels) {
+        const { createPanels } = await import('./panels.js');
+        if (destroyed) return;
+        settingsPanels = createPanels({ layer: $('#drawer-layer') });
+      }
+      const saved = store.get();
+      settingsPanels.openSettings({
+        themes: THEMES, theme: THEMES.some(t => t.id === saved.theme) ? saved.theme : 'day',
+        fontRange: FONT_SIZE, fontSize: applyFontSize(saved.fontSize),
+        books: books.filter(book => book.format !== 'cbz'),
+        onTheme: (theme) => { applyTheme(theme); store.set({ theme }); },
+        onFont: async (value) => { store.set({ fontSize: applyFontSize(value) }); },
+      });
+    } catch (err) { toast('设置加载失败：' + err.message); }
+    finally { button.disabled = false; }
+  }
 
   /* ---------------- 状态点 ---------------- */
   function setLiveState(state, text) {
@@ -417,6 +441,7 @@ export async function mountLibrary() {
   function destroy() {
     if (destroyed) return;
     destroyed = true;
+    settingsPanels?.close(false);
     resetDrag();
     closeEventSource();
     stopPolling();
@@ -542,6 +567,7 @@ export async function mountLibrary() {
   window.addEventListener('blur', resetDrag);
   $('#lib-refresh').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
   if ($('#rail-import')) $('#rail-import').addEventListener('click', pickFile);
+  $('#rail-settings').addEventListener('click', openSettings);
   if ($('#lib-empty-pick')) $('#lib-empty-pick').addEventListener('click', pickFile);
   if ($('#lib-error-retry')) $('#lib-error-retry').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
   if (navLibrary) navLibrary.addEventListener('click', () => setViewMode('all'));
@@ -560,7 +586,7 @@ export async function mountLibrary() {
   });
   clearSearch.addEventListener('click', () => { filterInput.value = ''; filterText = ''; renderShelf(); filterInput.focus(); });
   document.addEventListener('keydown', (e) => {
-    if (libView.hidden || e.altKey || e.ctrlKey || e.metaKey || document.querySelector('dialog[open]')) return;
+    if (libView.hidden || settingsPanels?.isOpen() || e.altKey || e.ctrlKey || e.metaKey || document.querySelector('dialog[open]')) return;
     if (e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
     if (e.key === '/') { e.preventDefault(); filterInput.focus(); }
   });

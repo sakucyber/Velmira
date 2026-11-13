@@ -176,6 +176,8 @@ a { color: var(--accent); }
 .rail-ico { font-size: 13px; line-height: 1; opacity: .85; }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 12px; padding: 0 2px; }
 .rail-import { width: 100%; height: 38px; }
+.rail-settings { min-height: 44px; border-radius: 8px; color: var(--text); }
+.rail-settings svg { flex: none; }
 .rail-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .rail-count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .rail-version { font-size: 11px; color: var(--muted); opacity: .72; }
@@ -1097,6 +1099,14 @@ body.comic-mode .progress-track { display: none !important; }
 .settings-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
 .settings-tabs [aria-pressed="true"], .ai-row[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-weak); }
 .drawer-settings { width: min(680px, 100vw); }
+@media (max-width: 1023px) {
+  .rail-settings {
+    position: fixed; left: max(14px, env(safe-area-inset-left)); bottom: max(14px, env(safe-area-inset-bottom));
+    width: auto; padding: 0 14px; border: 1px solid var(--line);
+    background: var(--surface); box-shadow: var(--shadow-soft);
+  }
+  .view-library .app-main { padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+}
 .settings-reading[hidden], .settings-manga[hidden], .ai-analysis-section[hidden], .ai-characters-section[hidden], .reader-comics[hidden] { display: none; }
 .ai-rows { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 20px; }
 .ai-row { width: 100%; min-height: 52px; justify-content: space-between; text-align: left; }

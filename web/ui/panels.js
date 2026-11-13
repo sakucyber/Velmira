@@ -491,16 +491,33 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       const nav = el('div', 'settings-tabs'); const area = el('div', 'settings-reading');
       const manga = el('section', 'settings-manga'); manga.setAttribute('aria-label', '漫画与画风设置');
       let controller;
+      let mangaReady = false;
       disposePanel = () => controller?.abort();
+      const loadManga = (area, selectedBook) => {
+        controller?.abort();
+        const ac = new AbortController(); controller = ac;
+        if (!selectedBook) { area.replaceChildren(el('p', 'settings-help', '选择小说后可调整它的漫画与画风设置。')); return; }
+        area.replaceChildren(el('p', 'settings-help', '正在加载漫画与画风设置…'));
+        import('./manga.js').then(({ mountManga }) => {
+          if (!ac.signal.aborted) return mountManga({ area, bookId: selectedBook, signal: ac.signal, settingsOnly: true });
+        }).catch(() => { if (!ac.signal.aborted) area.textContent = '设置加载失败，请重新打开'; });
+      };
       const choose = (value) => {
         area.hidden = value !== 'reading'; manga.hidden = value !== 'manga';
         for (const b of nav.children) b.setAttribute('aria-pressed', String(b.dataset.section === value));
         container.scrollTop = 0;
-        if (value === 'manga' && !controller) {
-          controller = new AbortController(); manga.appendChild(el('p', 'settings-help', '正在加载漫画与画风设置…'));
-          import('./manga.js').then(({ mountManga }) => {
-            if (!controller.signal.aborted) mountManga({ area: manga, bookId, signal: controller.signal, settingsOnly: true });
-          }).catch(() => { if (!controller.signal.aborted) manga.textContent = '设置加载失败，请重新打开'; });
+        if (value === 'manga' && !mangaReady) {
+          mangaReady = true;
+          if (bookId) { loadManga(manga, bookId); return; }
+          const books = options.books || [];
+          if (!books.length) { manga.append(el('p', 'settings-help', '请先导入一本 TXT 或 EPUB 小说，再设置漫画与画风。')); return; }
+          const label = el('label', 'manga-field', '选择小说');
+          const select = el('select'); select.setAttribute('aria-label', '选择小说');
+          const placeholder = el('option', null, '请选择要设置的小说'); placeholder.value = ''; select.append(placeholder);
+          for (const book of books) { const option = el('option', null, book.title); option.value = book.id; select.append(option); }
+          const content = el('div'); label.append(select); manga.append(label, content);
+          select.addEventListener('change', () => loadManga(content, select.value));
+          loadManga(content, '');
         }
       };
       for (const [id, title] of [['reading', '阅读与快捷键'], ...(!options.comic ? [['manga', '漫画与画风设置']] : [])]) {
