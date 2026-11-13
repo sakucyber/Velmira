@@ -62,12 +62,12 @@ desktop\Velmira.exe -screenshot docs\screenshots\desktop-app.png -wait 6s
 cd desktop
 go mod tidy
 go vet ./...
-go build -o Velmira.exe .
+go build -trimpath -ldflags "-H=windowsgui -s -w" -o Velmira.exe .
 ~~~
 
 ## 已知限制
 
-- 源码运行仍可使用本机 Python；分发目录由 `build-desktop-bundle.ps1` 生成 `backend/Velmira-backend.exe`，目标机器无需安装 Python。分发包数据存放在 `%LOCALAPPDATA%\Velmira\data`；源码工作区继续使用项目 `data/`，`DATA_DIR` 可覆盖两者。
+- 源码运行仍可使用本机 Python；分发目录由 `build-desktop-bundle.ps1` 生成目录模式的 `backend/Velmira-backend/`，目标机器无需安装 Python，也避免每次启动解压单文件后端。分发包数据存放在 `%LOCALAPPDATA%\Velmira\data`；源码工作区继续使用项目 `data/`，`DATA_DIR` 可覆盖两者。
 - 目前只测 Windows（WebView2）；MyGo 支持 macOS/Linux，进程管理在非 Windows 上退化为普通 `Kill`。
 - 窗口只有一个；多窗口、托盘、自动更新等桌面能力留给后续。
 

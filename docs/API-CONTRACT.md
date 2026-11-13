@@ -431,7 +431,7 @@ data: {"revision": 7, "count": 3}
 - 注释 API 和数据库结构不变。`note` 为非空文字时，原文 `mark.ann` 额外带 `ann-note` 类，用双下划线标记；普通高亮维持四色背景。
 - 鼠标悬停批注文字直接展示笔记，点击可固定弹层；手机单击、键盘 Enter/空格也可查看。弹层保留改色、编辑、删除操作。
 - 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。
-- 桌面分发包包含 `backend/Velmira-backend.exe`（PyInstaller），优先启动内置后端，源代码模式仍可使用 Python。打包模式默认数据目录为 `%LOCALAPPDATA%\Velmira\data`，`DATA_DIR` 可覆盖。
+- 桌面分发包包含目录模式的 `backend/Velmira-backend/`（PyInstaller），优先启动内置后端，避免每次启动解压单文件后端；源代码模式仍可使用 Python。打包模式默认数据目录为 `%LOCALAPPDATA%\Velmira\data`，`DATA_DIR` 可覆盖。
 - 桌面窗口禁用浏览器默认右键菜单。书库页整页接收文件拖放，侧栏、搜索框、封面或空白处松开文件均沿用现有导入校验与流程；普通文字拖拽不触发文件导入。
 
 # 10. M2 增量：文本抽取与人物卡

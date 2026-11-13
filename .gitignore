@@ -28,6 +28,7 @@ Thumbs.db
 desktop/Velmira.exe
 desktop/build/
 backend/Velmira-backend.exe
+backend/Velmira-backend/
 backend/build/
 .toolchains/
 mygo/

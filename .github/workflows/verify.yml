@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $env:DATA_DIR = Join-Path $env:RUNNER_TEMP 'velmira-data'
-          $backend = Start-Process -FilePath './dist/Velmira-desktop-v0.4.0/backend/Velmira-backend.exe' -ArgumentList '--port','8876' -PassThru -WindowStyle Hidden
+          $backend = Start-Process -FilePath './dist/Velmira-desktop-v0.4.0/backend/Velmira-backend/Velmira-backend.exe' -ArgumentList '--port','8876' -PassThru -WindowStyle Hidden
           try {
             $ready = $false
             for ($i=0; $i -lt 120; $i++) {

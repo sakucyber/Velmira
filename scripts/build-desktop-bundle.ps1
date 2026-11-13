@@ -29,11 +29,16 @@ if (-not $bundle.StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) {
   throw '分发目录必须位于本项目 dist/ 下，避免误覆盖其他目录'
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'backend') | Out-Null
+$backendDir = Join-Path $root 'backend\Velmira-backend'
+$backendOneFile = Join-Path $root 'backend\Velmira-backend.exe'
+if (Test-Path -LiteralPath $backendDir) { Remove-Item -LiteralPath $backendDir -Recurse -Force }
+if (Test-Path -LiteralPath $backendOneFile) { Remove-Item -LiteralPath $backendOneFile -Force }
 
 $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = if ($previousPythonPath) { $root + ';' + $previousPythonPath } else { $root }
 try {
-  & $Python -m PyInstaller --noconfirm --clean --onefile `
+  # Directory mode avoids PyInstaller extracting a 35 MB archive on every launch.
+  & $Python -m PyInstaller --noconfirm --clean --onedir `
   --name Velmira-backend `
   --distpath (Join-Path $root 'backend') `
   --workpath (Join-Path $root '.tmp\pyi-work') `
@@ -56,7 +61,7 @@ if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle -Recurse 
 New-Item -ItemType Directory -Force -Path $bundle | Out-Null
 Copy-Item (Join-Path $root 'desktop\Velmira.exe') (Join-Path $bundle 'Velmira.exe') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $bundle 'backend') | Out-Null
-Copy-Item (Join-Path $root 'backend\Velmira-backend.exe') (Join-Path $bundle 'backend\Velmira-backend.exe') -Force
+Copy-Item $backendDir (Join-Path $bundle 'backend\Velmira-backend') -Recurse -Force
 foreach ($name in @('README.md','LICENSE','NOTICE.md')) {
   if (Test-Path (Join-Path $root $name)) { Copy-Item (Join-Path $root $name) (Join-Path $bundle $name) -Force }
 }
@@ -64,6 +69,6 @@ Copy-Item (Join-Path $root 'desktop\START-HERE.txt') (Join-Path $bundle 'START-H
 & $Python (Join-Path $root 'scripts\collect-bundle-licenses.py') --bundle $bundle --root $root
 if ($LASTEXITCODE -ne 0) { throw '收集分发依赖许可失败' }
 $exe = Get-Item (Join-Path $bundle 'Velmira.exe')
-$backend = Get-Item (Join-Path $bundle 'backend\Velmira-backend.exe')
+$backend = Get-ChildItem (Join-Path $bundle 'backend\Velmira-backend') -File -Recurse | Measure-Object -Property Length -Sum
 Write-Host ("桌面分发包：" + $bundle)
-Write-Host ("  Velmira.exe=" + [math]::Round($exe.Length / 1MB, 1) + " MB；backend=" + [math]::Round($backend.Length / 1MB, 1) + " MB")
+Write-Host ("  Velmira.exe=" + [math]::Round($exe.Length / 1MB, 1) + " MB；backend=" + [math]::Round($backend.Sum / 1MB, 1) + " MB（目录模式）")

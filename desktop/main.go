@@ -1,7 +1,7 @@
 // Velmira desktop — a MyGo app that launches the local Velmira server
 // (Python + FastAPI) and shows its web UI in a native window.
 //
-//	cd desktop && go build -o Velmira.exe .
+//	cd desktop && go build -trimpath -ldflags '-H=windowsgui -s -w' -o Velmira.exe .
 //	./Velmira.exe                      # normal desktop app
 //	./Velmira.exe -screenshot shot.png # capture the window and quit (CI / evidence)
 package main
@@ -128,15 +128,21 @@ func findRoot() (string, error) {
 			d = parent
 		}
 	}
-	return "", fmt.Errorf("找不到 Velmira 后端（backend/Velmira-backend.exe 或 server/app/main.py）；用 -root 指定")
+	return "", fmt.Errorf("找不到 Velmira 后端（backend/Velmira-backend/、backend/Velmira-backend.exe 或 server/app/main.py）；用 -root 指定")
 }
 
 func sidecarPath(root string) string {
 	name := "Velmira-backend"
+	fileName := name
 	if os.PathSeparator == '\\' {
-		name += ".exe"
+		fileName += ".exe"
 	}
-	return filepath.Join(root, "backend", name)
+	oneFile := filepath.Join(root, "backend", fileName)
+	if _, err := os.Stat(oneFile); err == nil {
+		return oneFile
+	}
+	// Directory-mode PyInstaller builds avoid extracting the backend on every launch.
+	return filepath.Join(root, "backend", name, fileName)
 }
 
 func backendPort() int {

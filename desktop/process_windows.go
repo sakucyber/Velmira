@@ -15,5 +15,8 @@ func hideWindow(cmd *exec.Cmd) {
 
 // killProcessTree stops the backend and anything it spawned (uvicorn workers).
 func killProcessTree(pid int) {
-	_ = exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F").Run()
+	cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid), "/T", "/F")
+	// taskkill is a console program; keep its cleanup window hidden when the app closes.
+	hideWindow(cmd)
+	_ = cmd.Run()
 }
