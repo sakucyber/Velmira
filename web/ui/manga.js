@@ -1,22 +1,23 @@
 import { el, apiGet, apiPost, apiPatch, toast } from '../util/core.js';
+import { mountBookAnalysis } from './book-analysis.js';
 
 const STATES = { queued: '排队中', running: '生成中', needs_review: '待复核', done: '相似度通过', approved: '人工已确认', error: '生成失败', stale: '已过期，需重新生成', cancelled: '已取消' };
 const SHOTS = { portrait: '正面特写', medium: '中景', wide: '全身远景', three_quarter: '侧面近景', reaction: '表情特写' };
 const APPEARANCE = { age: '年龄', gender: '性别', hair_style: '发型', hair_color: '发色', eye_color: '瞳色', skin: '肤色', outfit: '服装', accessories: '配饰' };
 
-export async function mountManga({ area, bookId, signal }) {
+export async function mountManga({ area, bookId, signal, initialTab = 'generate' }) {
   const base = '/api/books/' + encodeURIComponent(bookId);
-  let forms = [], scenes = [], config, textSettings, selected = '', timer, busy = false;
+  let forms = [], scenes = [], config, textSettings, styles = {}, selected = '', timer, busy = false, analysisAbort;
   const root = el('div', 'manga-studio');
   area.replaceChildren(root);
-  const note = el('p', 'manga-note', '每格使用一个人物的一张已确认参考图。先在 AI 面板分析片段并冻结人物身份。');
+  const note = el('p', 'manga-note', '整书阅读 → 人物卡与章节大意 → 相关情节总结 → 生图提示词 → 图像 API。每格使用一个人物的一张已确认参考图。');
   root.appendChild(note);
   const tabs = el('div', 'manga-tabs'); root.appendChild(tabs);
   const content = el('div'); root.appendChild(content);
   const jobsHead = el('h3', 'ai-section-title', '生成记录'); root.appendChild(jobsHead);
   const jobsArea = el('div', 'manga-jobs'); root.appendChild(jobsArea);
-  let active = 'generate', lastJobs = '';
-  signal.addEventListener('abort', () => clearTimeout(timer), { once: true });
+  let active = initialTab, lastJobs = '';
+  signal.addEventListener('abort', () => { clearTimeout(timer); analysisAbort?.abort(); }, { once: true });
 
   function button(parent, label, fn, cls = '') {
     const b = el('button', 'btn ' + cls, label); b.type = 'button'; parent.appendChild(b);
@@ -48,24 +49,39 @@ export async function mountManga({ area, bookId, signal }) {
     const img = el('img'); img.src = url; img.alt = alt; img.loading = 'lazy'; link.appendChild(img); parent.appendChild(link);
   }
   async function load() {
-    const [f, c, sc, text] = await Promise.all([apiGet(base + '/manga/forms', signal), apiGet(base + '/manga/config', signal), apiGet(base + '/ai/scenes', signal), apiGet('/api/ai/settings', signal)]);
-    forms = f.forms; config = c.config; scenes = sc.scenes; textSettings = text.settings;
+    const loadScenes = async () => {
+      const result = new Map(); let offset = 0;
+      while (!signal.aborted) {
+        const page = await apiGet(base + '/ai/scenes?status=draft&limit=500&offset=' + offset, signal);
+        for (const scene of page.scenes) result.set(scene.id, scene);
+        if (!page.has_more) return [...result.values()];
+        offset += page.scenes.length;
+      }
+      return [...result.values()];
+    };
+    const [f, c, sc, text] = await Promise.all([apiGet(base + '/manga/forms', signal), apiGet(base + '/manga/config', signal), loadScenes(), apiGet('/api/ai/settings', signal)]);
+    forms = f.forms; config = c.config; styles = c.styles; scenes = sc; textSettings = text.settings;
     if (!forms.some(f => f.id === selected)) selected = forms[0]?.id || '';
   }
   function render() {
     if (signal.aborted) return;
+    analysisAbort?.abort();
     tabs.replaceChildren(); content.replaceChildren();
-    for (const [id, label] of [['generate', '分镜'], ['refs', '人物与参考图'], ['config', '出图设置']]) {
-      const tab = button(tabs, label, () => { active = id; render(); });
+    for (const [id, label] of [['analysis', '整书分析'], ['generate', '分镜'], ['refs', '人物与参考图'], ['config', '出图设置']]) {
+      const tab = button(tabs, label, async () => { await load(); active = id; render(); });
       tab.setAttribute('aria-pressed', String(active === id));
     }
     if (active === 'generate') renderGenerate();
     if (active === 'refs') renderRefs();
     if (active === 'config') renderConfig();
+    if (active === 'analysis') { analysisAbort = new AbortController(); mountBookAnalysis({ area: content, bookId, signal: analysisAbort.signal }); }
   }
   function renderGenerate() {
-    if (!scenes.length || !forms.length) { content.appendChild(el('p', 'manga-note', '还没有场景或人物卡。请返回 AI 面板分析片段。')); return; }
-    const scene = select(content, '场景', scenes.map(s => [s.id, '第 ' + (s.chapter_id + 1) + ' 章 · ' + s.plan.summary]));
+    if (!scenes.length || !forms.length) { content.appendChild(el('p', 'manga-note', '还没有场景或人物卡。请在“整书分析”中查看阅读进度或开始分析。')); return; }
+    const chapters = [...new Set(scenes.map(s => s.chapter_id))];
+    const currentChapter = Number(new URL(location.href).searchParams.get('ch') || 0);
+    const chapter = select(content, '生成章节', chapters.map(ch => [String(ch), '第 ' + (ch + 1) + ' 章']), String(chapters.includes(currentChapter) ? currentChapter : chapters[0]));
+    const scene = select(content, '场景', scenes.filter(s => s.chapter_id === Number(chapter.value)).map(s => [s.id, s.plan.summary]));
     const form = select(content, '人物形态', forms.map(f => [f.id, f.label + ' · v' + f.version]), selected);
     const hint = el('p', 'manga-note'); content.appendChild(hint);
     const update = () => {
@@ -86,8 +102,18 @@ export async function mountManga({ area, bookId, signal }) {
       return payload;
     };
     const invalidate = () => { plan = null; planArea.replaceChildren(); };
+    chapter.addEventListener('change', () => {
+      scene.replaceChildren();
+      for (const item of scenes.filter(s => s.chapter_id === Number(chapter.value))) { const option = el('option', null, item.plan.summary); option.value = item.id; scene.appendChild(option); }
+      update(); invalidate();
+    });
     for (const input of [scene, form, shot, action, para, flash]) input.addEventListener('input', invalidate);
-    content.appendChild(el('p', 'manga-note', textSettings.enabled ? ('文本 AI：' + textSettings.model + ' · 当前片段、本章上下文及上一章末尾 → 总结 → 英文提示词 → MOSS') : '请先在“出图设置”中启用文本 AI，即可根据上下文总结后自动出图。'));
+    const styleChoice = select(content, '生图风格', [...Object.entries(styles).map(([id, s]) => [id, s.label]), ['custom', '自定义']], config.style_preset);
+    styleChoice.addEventListener('change', async () => {
+      try { config = (await apiPatch(base + '/manga/config', { style_preset: styleChoice.value })).config; invalidate(); }
+      catch (err) { styleChoice.value = config.style_preset; toast(err.message); }
+    });
+    content.appendChild(el('p', 'manga-note', textSettings.enabled ? ('文本 AI：' + textSettings.model + ' · 整书资料 → 相关情节总结 → 英文提示词 → 图像 API') : '请先在“出图设置”中启用文本 AI，即可自动分析全书并生成漫画。'));
     const prepare = async () => {
       const payload = payloadFor();
       const f = forms.find(f => f.id === form.value);
@@ -101,6 +127,7 @@ export async function mountManga({ area, bookId, signal }) {
         planArea.replaceChildren();
         planArea.appendChild(el('h4', null, '上下文总结'));
         planArea.appendChild(el('p', 'manga-note', plan.summary.summary));
+        planArea.appendChild(el('p', 'manga-note', '参考章节：' + plan.scope.related_chapters.map(ch => ch + 1).join('、')));
         planArea.appendChild(el('h4', null, '生图提示词'));
         planArea.appendChild(el('p', 'manga-note', plan.visual_prompt));
         return payload;
@@ -114,6 +141,8 @@ export async function mountManga({ area, bookId, signal }) {
     }, 'btn-primary');
     button(content, '仅生成总结与提示词', prepare);
     button(content, '加入生成队列', async () => {
+      if (textSettings.enabled && !plan && !await prepare()) return;
+      if (signal.aborted) return;
       const payload = { ...payloadFor(), request_id: crypto.randomUUID() };
       if (plan) payload.plan_id = plan.id;
       await apiPost(base + '/manga/jobs', payload); toast('已加入生成队列'); await refreshJobs();
@@ -181,8 +210,9 @@ export async function mountManga({ area, bookId, signal }) {
   function renderConfig() {
     const textPanel = el('details', 'manga-editor'); textPanel.appendChild(el('summary', null, '文本 AI：上下文总结与提示词'));
     textPanel.open = true; content.appendChild(textPanel);
-    textPanel.appendChild(el('p', 'manga-note', '将当前片段、本章上下文和上一章末尾发送到下方 API。图片由本机 ComfyUI 生成。设置适用于本机所有书籍。'));
+    textPanel.appendChild(el('p', 'manga-note', '通过文本 API 自动逐章阅读整本小说，保存人物卡和每章大意；生成时汇总相关情节再编写提示词。图片交给所选图像 API。文本设置适用于本机所有书籍。'));
     const enabled = field(textPanel, '启用上下文 AI', '', 'checkbox'); enabled.checked = textSettings.enabled;
+    const autoRead = field(textPanel, '自动分析书库中的小说及新导入小说', '', 'checkbox'); autoRead.checked = textSettings.auto_analyze;
     const address = field(textPanel, '文本 API 地址', textSettings.base_url);
     const model = field(textPanel, '文本模型', textSettings.model);
     const capabilities = el('p', 'manga-note'); textPanel.appendChild(capabilities);
@@ -195,7 +225,7 @@ export async function mountManga({ area, bookId, signal }) {
     const key = field(textPanel, 'API 密钥（留空保留已保存的密钥）', '', 'password'); key.autocomplete = 'off';
     const feedbackText = el('p', 'manga-note', textSettings.key_configured ? '已保存本机密钥' : '尚未保存密钥'); textPanel.appendChild(feedbackText);
     const saveText = async () => {
-      const result = await apiPatch('/api/ai/settings', { base_url: address.value, model: model.value, enabled: enabled.checked, api_key: key.value });
+      const result = await apiPatch('/api/ai/settings', { base_url: address.value, model: model.value, enabled: enabled.checked, auto_analyze: autoRead.checked, api_key: key.value });
       textSettings = result.settings; key.value = ''; feedbackText.textContent = '文本 AI 设置已保存';
     };
     button(textPanel, '保存文本 AI 设置', saveText);
@@ -209,19 +239,32 @@ export async function mountManga({ area, bookId, signal }) {
     });
     button(textPanel, '检测文本 AI', async () => { await saveText(); const result = await apiPost('/api/ai/probe', {}); feedbackText.textContent = result.model + ' 连接正常'; });
     content.appendChild(el('h3', 'ai-section-title', '图像生成设置'));
-    const provider = select(content, '图像后端', [['comfyui', 'ComfyUI / MOSS'], ['mock', '占位图（仅验证流程）']], config.provider);
+    const provider = select(content, '图像后端', [['comfyui', 'ComfyUI / MOSS API'], ['openai-images', 'OpenAI 兼容图像 API'], ['mock', '占位图（仅验证流程）']], config.provider);
+    const preset = select(content, '默认生图风格', [...Object.entries(styles).map(([id, s]) => [id, s.label]), ['custom', '自定义']], config.style_preset);
     const inputs = {};
-    const labels = { base_url: '服务地址', unet: '绘图模型', clip: '9B 文本编码器', vae: '图像解码模型', edit_lora: '参考图编辑模型', width: '宽度', height: '高度', steps: '采样步数', cfg: '提示词强度', sampler: '采样器', scheduler: '调度器', seed: '基础种子', face_threshold: '相似度阈值', max_attempts: '最多生成次数', timeout: '等待超时（秒）', style: '画风', negative: '排除内容', face_python: '人脸校验 Python 路径（可选）', face_models: '人脸模型目录（可选）' };
+    const labels = { base_url: '服务地址', model: '图像 API 模型名', unet: '绘图模型', clip: '9B 文本编码器', vae: '图像解码模型', edit_lora: '参考图编辑模型', width: '宽度', height: '高度', steps: '采样步数', cfg: '提示词强度', sampler: '采样器', scheduler: '调度器', seed: '基础种子', face_threshold: '相似度阈值', max_attempts: '最多生成次数', timeout: '等待超时（秒）', style: '画风', negative: '排除内容', face_python: '人脸校验 Python 路径（可选）', face_models: '人脸模型目录（可选）' };
     const numbers = new Set(['width', 'height', 'steps', 'cfg', 'seed', 'face_threshold', 'max_attempts', 'timeout']);
     for (const [key, label] of Object.entries(labels)) {
       inputs[key] = field(content, label, config[key], numbers.has(key) ? 'number' : ['style', 'negative'].includes(key) ? 'textarea' : 'text');
       if (numbers.has(key)) inputs[key].step = ['cfg', 'face_threshold'].includes(key) ? '0.01' : '1';
     }
+    preset.addEventListener('change', () => { if (styles[preset.value]) inputs.style.value = styles[preset.value].prompt; });
+    inputs.style.addEventListener('input', () => { preset.value = 'custom'; });
+    const imageKey = field(content, '图像 API 密钥（独立保存，留空保留）', '', 'password'); imageKey.autocomplete = 'off';
+    const imageHelp = el('p', 'manga-note', '兼容 /images/generations 与 /images/edits，须返回 base64 图片。带参考图的分镜使用 edits；尺寸须符合所选模型要求。'); content.appendChild(imageHelp);
+    const adaptProvider = () => {
+      const remote = provider.value === 'openai-images';
+      inputs.model.parentElement.hidden = imageKey.parentElement.hidden = imageHelp.hidden = !remote;
+      for (const key of ['unet', 'clip', 'vae', 'edit_lora', 'sampler', 'scheduler', 'steps', 'cfg']) inputs[key].parentElement.hidden = remote;
+    };
+    provider.addEventListener('change', adaptProvider); adaptProvider();
     const feedback = el('p', 'manga-note'); content.appendChild(feedback);
     button(content, '保存设置', async () => {
-      const payload = { provider: provider.value };
+      const payload = { provider: provider.value, style_preset: preset.value };
       for (const [key, input] of Object.entries(inputs)) payload[key] = numbers.has(key) ? Number(input.value) : input.value;
-      config = (await apiPatch(base + '/manga/config', payload)).config; toast('出图设置已保存');
+      config = (await apiPatch(base + '/manga/config', payload)).config;
+      if (provider.value === 'openai-images') { await apiPatch('/api/image-ai/settings', { base_url: inputs.base_url.value, api_key: imageKey.value }); imageKey.value = ''; }
+      toast('出图设置已保存');
     }, 'btn-primary');
     button(content, '检测已保存的连接与模型', async () => {
       const result = await apiPost(base + '/manga/probe', {});
@@ -240,7 +283,7 @@ export async function mountManga({ area, bookId, signal }) {
       const latestImage = [...job.history].reverse().find(h => h.url);
       image(card, latestImage?.url || job.url, job.kind === 'reference' ? '参考图候选' : '生成的分镜');
       card.appendChild(el('p', 'manga-note', job.face_score == null ? '尚无有效人脸相似度' : '人脸相似度 ' + job.face_score.toFixed(3) + ' / 阈值 ' + job.snapshot.config.face_threshold));
-      if (job.error) card.appendChild(el('p', 'manga-note', job.error));
+      if (job.error) card.appendChild(el('p', 'manga-note', job.error === 'no_face' ? '未检测到可比较的人脸，请人工复核画面。' : job.error));
       const actions = el('div', 'manga-actions'); card.appendChild(actions);
       if (job.url && ['done', 'needs_review', 'approved'].includes(job.status)) button(actions, '存为参考图候选', async () => {
         await apiPost(base + '/manga/jobs/' + job.id + '/reference', {}); await load(); active = 'refs'; selected = job.form_id; render();

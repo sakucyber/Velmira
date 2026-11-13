@@ -84,12 +84,7 @@ def normalize_evidence(value: Any, source_text: str, chapter: int) -> list[dict[
         quote = _text(item.get("quote"), 500)
         if not field or not value_text or not quote or quote not in source_text:
             continue
-        ch = item.get("ch", chapter)
-        try:
-            ch = int(ch)
-        except (TypeError, ValueError):
-            ch = chapter
-        row = {"field": field, "value": value_text, "quote": quote, "ch": ch}
+        row = {"field": field, "value": value_text, "quote": quote, "ch": chapter}
         if row not in result:
             result.append(row)
     return result

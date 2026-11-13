@@ -205,6 +205,37 @@ CREATE TABLE IF NOT EXISTS manga_text_plans (
   UNIQUE(book_id, cache_key)
 );
 
+-- Resumable whole-book reading. Cache keys include source, model and prompt version.
+CREATE TABLE IF NOT EXISTS book_analysis (
+  book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  total INTEGER NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 0,
+  current_chapter INTEGER,
+  current_part INTEGER NOT NULL DEFAULT 0,
+  total_parts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analysis_chunks (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  cache_key TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  PRIMARY KEY(book_id, cache_key)
+);
+CREATE TABLE IF NOT EXISTS chapter_summaries (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  cache_key TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(book_id, chapter)
+);
+
 -- M3: versioned identities, reviewed references, reproducible single-panel jobs.
 CREATE TABLE IF NOT EXISTS render_configs (
   book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,

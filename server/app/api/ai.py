@@ -224,7 +224,7 @@ def list_ai_runs(book_id: str, limit: int = Query(default=20, ge=1, le=100)):
 
 
 @router.get("/api/books/{book_id}/ai/scenes")
-def list_ai_scenes(book_id: str, status: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=1000)):
+def list_ai_scenes(book_id: str, status: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)):
     conn = db.get_conn()
     try:
         if not _book_exists(conn, book_id):
@@ -234,12 +234,12 @@ def list_ai_scenes(book_id: str, status: str | None = Query(default=None), limit
         if status:
             sql += " AND status=?"
             args.append(status)
-        sql += " ORDER BY chapter_id, segment_id LIMIT ?"
-        args.append(limit)
+        sql += " ORDER BY chapter_id, segment_id, id LIMIT ? OFFSET ?"
+        args.extend([limit + 1, offset])
         rows = conn.execute(sql, args).fetchall()
-        return {"scenes": [{"id": row["id"], "book_id": row["book_id"], "chapter_id": row["chapter_id"],
+        return {"has_more": len(rows) > limit, "scenes": [{"id": row["id"], "book_id": row["book_id"], "chapter_id": row["chapter_id"],
                              "segment_id": row["segment_id"], "plan": _json(row["plan_json"], {}), "status": row["status"],
-                             "prompt_version": row["prompt_version"], "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]}
+                             "prompt_version": row["prompt_version"], "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows[:limit]]}
     finally:
         conn.close()
 

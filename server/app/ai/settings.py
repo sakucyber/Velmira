@@ -11,11 +11,11 @@ from urllib.parse import urlsplit
 from .. import config
 
 _lock = threading.RLock()
-DEFAULTS = {"base_url": "", "model": "gpt-oss-120b", "enabled": False}
+DEFAULTS = {"base_url": "", "model": "gpt-oss-120b", "enabled": False, "auto_analyze": True}
 
 
-def _path():
-    return config.DATA_DIR / "text-api.json"
+def _path(slot="text"):
+    return config.DATA_DIR / (slot + "-api.json")
 
 
 def _crypt(raw: bytes, decrypt=False) -> bytes:
@@ -38,10 +38,10 @@ def _crypt(raw: bytes, decrypt=False) -> bytes:
         ctypes.windll.kernel32.LocalFree(target.data)
 
 
-def load_settings():
+def load_settings(slot="text"):
     with _lock:
         try:
-            value = json.loads(_path().read_text(encoding="utf-8"))
+            value = json.loads(_path(slot).read_text(encoding="utf-8"))
             return {**DEFAULTS, **value}
         except FileNotFoundError:
             return dict(DEFAULTS)
@@ -54,15 +54,15 @@ def api_key(settings=None):
     return value.get("key_local", "")
 
 
-def api_key_for(base_url):
-    value = load_settings()
+def api_key_for(base_url, slot="text"):
+    value = load_settings(slot)
     if value["base_url"] != base_url:
         raise ValueError("文本 API 地址已变化，请重新发起请求")
     return api_key(value)
 
 
-def public_settings():
-    value = load_settings()
+def public_settings(slot="text"):
+    value = load_settings(slot)
     return {**{k: value[k] for k in DEFAULTS}, "key_configured": bool(value.get("key_dpapi") or value.get("key_local"))}
 
 
@@ -78,13 +78,16 @@ def validate_url(value):
     return value
 
 
-def save_settings(patch):
+def save_settings(patch, slot="text"):
     if not isinstance(patch, dict) or set(patch) - {*DEFAULTS, "api_key"}:
         raise ValueError("文本 API 设置包含未知字段")
     with _lock:
-        value = load_settings()
+        value = load_settings(slot)
         if "base_url" in patch:
-            value["base_url"] = validate_url(patch["base_url"])
+            address = validate_url(patch["base_url"])
+            if address != value["base_url"]:
+                value.pop("key_dpapi", None); value.pop("key_local", None)
+            value["base_url"] = address
         if "model" in patch:
             if not isinstance(patch["model"], str) or len(patch["model"]) > 200:
                 raise ValueError("模型名称须为文本（最多 200 字符）")
@@ -93,6 +96,10 @@ def save_settings(patch):
             if not isinstance(patch["enabled"], bool):
                 raise ValueError("enabled 须为布尔值")
             value["enabled"] = patch["enabled"]
+        if "auto_analyze" in patch:
+            if not isinstance(patch["auto_analyze"], bool):
+                raise ValueError("auto_analyze 须为布尔值")
+            value["auto_analyze"] = patch["auto_analyze"]
         # Blank leaves the existing credential in place, so reopening the form is safe.
         key = patch.get("api_key", "")
         if not isinstance(key, str) or len(key) > 2000 or any(c in key for c in "\r\n"):
@@ -106,10 +113,10 @@ def save_settings(patch):
                 value["key_local"] = key
         if value["enabled"] and (not value["base_url"] or not value["model"]):
             raise ValueError("启用前请填写 API 地址和模型")
-        path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
+        path = _path(slot); path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(".tmp")
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, ensure_ascii=False)
         temp.replace(path)
-    return public_settings()
+    return public_settings(slot)

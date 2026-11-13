@@ -10,7 +10,7 @@ from .. import db
 from ..ai.models import stable_json
 from .face import evaluate_face
 from .models import MangaError, check_identity
-from .provider import ComfyProvider, mock_image
+from .provider import ComfyProvider, ImageAPIProvider, mock_image
 from .service import asset_path, digest, digest_bytes, save_image, uid
 
 log = logging.getLogger("velmira.manga")
@@ -86,7 +86,7 @@ def process(job_id):
             valid_snapshot(conn, job, snap)
         except (ValueError, OSError) as exc:
             status(conn, job_id, "stale", error=str(exc)); return
-        provider = ComfyProvider(cfg) if cfg["provider"] == "comfyui" else None
+        provider = ComfyProvider(cfg) if cfg["provider"] == "comfyui" else ImageAPIProvider(cfg) if cfg["provider"] == "openai-images" else None
         for idx in range(1, cfg["max_attempts"] + 1):
             if _stop.is_set():
                 return
@@ -103,7 +103,14 @@ def process(job_id):
                 conn.execute("INSERT INTO render_attempts(id,job_id,idx,seed) VALUES(?,?,?,?)", (attempt_id, job_id, idx, seed))
                 conn.execute("UPDATE render_jobs SET attempts=? WHERE id=?", (idx, job_id)); conn.commit()
             pid = attempt["prompt_id"] if attempt else None
-            if provider:
+            if cfg["provider"] == "openai-images":
+                if pid:
+                    raise MangaError("上次图像 API 请求结果不确定；请先核对服务端记录，再用“换种子重画”新建任务，避免重复计费")
+                pid = uid("image_")
+                conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (pid, stable_json({"provider": cfg["provider"], "model": cfg["model"]}), attempt_id)); conn.commit()
+                ref = snap.get("reference")
+                raw = provider.generate(snap, asset_path(ref["path"]) if ref else None, pid)
+            elif provider:
                 if not pid:
                     capabilities = provider.probe()
                     if not capabilities["ok"]:

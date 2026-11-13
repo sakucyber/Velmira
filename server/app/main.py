@@ -26,10 +26,13 @@ async def _lifespan(app: FastAPI):
     # 幂等建库：冷启动（无 data/）也能直接服务
     init_db()
     from .manga import queue
+    from .ai import book_analysis
     queue.start()
+    book_analysis.start()
     try:
         yield
     finally:
+        await book_analysis.stop()
         await queue.stop()
 
 

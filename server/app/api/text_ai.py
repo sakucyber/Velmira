@@ -6,7 +6,7 @@ import time
 
 from fastapi import APIRouter, Body
 
-from ..ai import director, settings
+from ..ai import director, settings, book_analysis
 from ..ai.models import stable_json
 from ..ai.providers import request_json, make_provider
 from ..manga import service as s
@@ -16,9 +16,43 @@ from .manga import connection, fields
 router = APIRouter()
 
 
+@router.get("/api/books/{book_id}/ai/analysis")
+def analysis_status(book_id: str):
+    with connection(book_id) as conn:
+        return book_analysis.overview(conn, book_id)
+
+
+@router.post("/api/books/{book_id}/ai/analysis")
+def start_analysis(book_id: str):
+    with connection(book_id) as conn:
+        book_analysis.enqueue(conn, book_id, resume=True)
+        return book_analysis.overview(conn, book_id)
+
+
+@router.post("/api/books/{book_id}/ai/analysis/pause")
+def pause_analysis(book_id: str):
+    with connection(book_id) as conn:
+        conn.execute("UPDATE book_analysis SET status='paused',updated_at=? WHERE book_id=? AND status IN ('queued','running')", (int(time.time()), book_id))
+        return book_analysis.overview(conn, book_id)
+
+
 @router.get("/api/ai/settings")
 def get_settings():
     return {"settings": settings.public_settings()}
+
+
+@router.get("/api/image-ai/settings")
+def get_image_settings():
+    return {"settings": settings.public_settings("image")}
+
+
+@router.patch("/api/image-ai/settings")
+def patch_image_settings(payload: dict = Body(...)):
+    fields(payload, {"base_url", "api_key"})
+    try:
+        return {"settings": settings.save_settings(payload, "image")}
+    except ValueError as exc:
+        raise MangaError(str(exc)) from None
 
 
 @router.patch("/api/ai/settings")
@@ -61,6 +95,10 @@ async def create_plan(book_id: str, payload: dict = Body(...)):
     fields(payload, {"scene_id", "form_id", "shot", "action", "para", "flashback"})
     cfg = director.text_config()
     with connection(book_id) as conn:
+        ready = book_analysis.ensure_ready(conn, book_id)
+    if not ready:
+        raise MangaError("整书分析尚未完成，请在“整书分析”查看进度，完成后生成漫画", "book_analysis_pending", 409)
+    with connection(book_id) as conn:
         material = director.prepare_material(conn, book_id, payload)
         source_hash = digest(material)
         cache_key = digest({"source": source_hash, "model": cfg["model"], "base_url": cfg["base_url"], "version": director.PLAN_VERSION})
@@ -75,6 +113,7 @@ async def create_plan(book_id: str, payload: dict = Body(...)):
         plan = {"id": s.uid("plan_"), "version": director.PLAN_VERSION, "source_hash": source_hash,
                 "scene_id": material["scene_id"], "form_id": material["form_id"],
                 "scope": {"chapter": material["chapter"], "current_chars": len(material["chapter_context"]),
+                          "related_chapters": [r["chapter"] for r in material["book_context"]["chapters"]],
                           "previous_chars": len(material["previous_chapter_tail"]), "target_chars": len(material["target_segment"])},
                 "provider": {"base_url": cfg["base_url"], "model": cfg["model"]},
                 "created_at": int(time.time()), **result}

@@ -6,14 +6,24 @@ from urllib.parse import urlsplit
 
 from ..ai.models import identity_hash, stable_json
 
+STYLE_PRESETS = {
+    "anime": {"label": "日系二次元", "prompt": "Japanese anime illustration, expressive anime eyes, refined cel shading, clean line art, rich colors, cinematic composition"},
+    "manga": {"label": "黑白漫画", "prompt": "black and white Japanese manga, crisp ink lines, screen tones, expressive lighting, dramatic comic composition"},
+    "watercolor": {"label": "水彩插画", "prompt": "delicate watercolor illustration, soft pigment washes, textured paper, gentle color transitions, lyrical composition"},
+    "chinese": {"label": "国风插画", "prompt": "Chinese fantasy illustration, elegant flowing brush lines, subtle ink wash textures, refined colors, atmospheric composition"},
+    "semi_realistic": {"label": "半写实漫画", "prompt": "semi-realistic color comic illustration, detailed face, clean lines, cinematic lighting"},
+    "cinematic": {"label": "电影写实", "prompt": "cinematic realistic illustration, natural skin texture, detailed materials, photographic lighting, film still composition"},
+}
+
 DEFAULTS = {
     "provider": "comfyui", "base_url": "http://127.0.0.1:8188",
+    "model": "", "style_preset": "anime",
     "unet": "moss_image_sft_int8_convrot.safetensors",
     "clip": "moss\\qwen3.5_9b_int8_convrot.safetensors", "vae": "moss\\flux2-vae.safetensors",
     "edit_lora": "moss_image_edit_lora_bf16.safetensors",
     "width": 640, "height": 832, "steps": 20, "cfg": 2.5,
     "sampler": "er_sde", "scheduler": "simple", "seed": 424242,
-    "style": "semi-realistic color comic illustration, detailed face, clean lines, cinematic lighting",
+    "style": STYLE_PRESETS["anime"]["prompt"],
     "negative": "nsfw, worst quality, bad anatomy, watermark, text, speech bubbles, extra fingers, duplicate person, crowd, background people, additional faces",
     "face_threshold": .55, "max_attempts": 3, "timeout": 600,
     "face_python": "", "face_models": "",
@@ -41,8 +51,21 @@ def validate_config(patch, old=None):
     if not isinstance(patch, dict) or set(patch) - set(DEFAULTS):
         raise MangaError("出图配置包含未知字段")
     cfg = {**DEFAULTS, **(old or {}), **patch}
-    if not isinstance(cfg["provider"], str) or cfg["provider"] not in {"comfyui", "mock"}:
-        raise MangaError("图像后端须为 comfyui 或 mock")
+    if not isinstance(cfg["provider"], str) or cfg["provider"] not in {"comfyui", "mock", "openai-images"}:
+        raise MangaError("图像后端须为 comfyui、openai-images 或 mock")
+    if not isinstance(cfg["style_preset"], str) or cfg["style_preset"] not in {*STYLE_PRESETS, "custom"}:
+        raise MangaError("未知画风预设")
+    if "style_preset" in patch and cfg["style_preset"] != "custom":
+        cfg["style"] = STYLE_PRESETS[cfg["style_preset"]]["prompt"]
+    elif "style" in patch and cfg["style"] != STYLE_PRESETS.get(cfg["style_preset"], {}).get("prompt"):
+        cfg["style_preset"] = "custom"
+    if not isinstance(cfg["model"], str) or len(cfg["model"]) > 200:
+        raise MangaError("图像 API 模型名称无效")
+    if cfg["provider"] == "openai-images":
+        from ..ai.settings import validate_url
+        cfg["base_url"] = validate_url(cfg["base_url"])
+        if not cfg["model"].strip():
+            raise MangaError("请填写图像 API 模型名称")
     if not isinstance(cfg["base_url"], str):
         raise MangaError("服务地址须为文本")
     try:
@@ -64,9 +87,10 @@ def validate_config(patch, old=None):
         if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or not low <= value <= high:
             raise MangaError(f"{key} 超出有效范围")
     for key in ["unet", "clip", "vae", "edit_lora", "sampler", "scheduler", "style", "negative"]:
-        if not isinstance(cfg[key], str) or not cfg[key].strip() or len(cfg[key]) > 2000:
+        required = cfg["provider"] != "openai-images" or key in {"style", "negative"}
+        if not isinstance(cfg[key], str) or (required and not cfg[key].strip()) or len(cfg[key]) > 2000:
             raise MangaError(f"{key} 须为非空文本（最多 2000 字符）")
-    if not ("9b" in cfg["clip"].lower()):
+    if cfg["provider"] == "comfyui" and not ("9b" in cfg["clip"].lower()):
         raise MangaError("当前 MOSS 模板使用 9B 编码器；小编码器需要独立适配器模板")
     for key in ("face_python", "face_models"):
         if not isinstance(cfg[key], str) or len(cfg[key]) > 1000:

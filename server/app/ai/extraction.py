@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from .. import db
@@ -78,7 +79,7 @@ def _character_public(row) -> dict[str, Any]:
     }
 
 
-def _merge_character(conn, book_id: str, candidate: dict[str, Any], chapter: int, source_text: str) -> str:
+def _merge_character(conn, book_id: str, candidate: dict[str, Any], chapter: int, source_text: str, *, commit=True) -> str:
     candidate = normalize_character(candidate, source_text, chapter)
     rows = conn.execute("SELECT * FROM characters WHERE book_id=? ORDER BY id", (book_id,)).fetchall()
     row = next((item for item in rows if _same_character(item, candidate["name"], candidate["aliases"])), None)
@@ -88,7 +89,7 @@ def _merge_character(conn, book_id: str, candidate: dict[str, Any], chapter: int
         card = dict(candidate["card"])
         card["evidence"] = list(candidate["evidence"])
         aliases = [alias for alias in candidate["aliases"] if normalize_name(alias) != normalize_name(candidate["name"])]
-        with conn:
+        with conn if commit else nullcontext():
             conn.execute(
                 """INSERT OR IGNORE INTO characters
                    (id,book_id,name,aliases_json,card_json,frozen,identity_block,identity_hash,version,first_chapter,created_at,updated_at)
@@ -104,7 +105,7 @@ def _merge_character(conn, book_id: str, candidate: dict[str, Any], chapter: int
         if normalize_name(alias) != normalize_name(row["name"]) and alias not in aliases:
             aliases.append(alias)
     # Frozen identity is immutable. A corrupted hash is surfaced to callers and cannot be silently fixed.
-    with conn:
+    with conn if commit else nullcontext():
         conn.execute(
             "UPDATE characters SET aliases_json=?, card_json=?, first_chapter=MIN(first_chapter,?), updated_at=? WHERE id=?",
             (stable_json(aliases), stable_json(merged), chapter, now, cid),

@@ -459,7 +459,8 @@ data: {"revision": 7, "count": 3}
 
 以下路径均以 `/api/books/{book_id}/manga` 为前缀，错误保持 `{"error":{"code","message"}}`。
 
-- `GET/PATCH /config`：图像 provider 配置；`provider=comfyui|mock`，包含 `base_url/unet/clip/vae/edit_lora/width/height/steps/cfg/sampler/scheduler/seed/style/negative/face_threshold/max_attempts/timeout/face_python/face_models`。宽高须为 16 的倍数；最多 3 次尝试；默认人脸阈值 0.55。校验器路径为空时使用环境变量或本机默认值。
+- `GET/PATCH /config`：图像 provider 配置；`provider=comfyui|openai-images|mock`，包含 `base_url/model/unet/clip/vae/edit_lora/width/height/steps/cfg/sampler/scheduler/seed/style_preset/style/negative/face_threshold/max_attempts/timeout/face_python/face_models`。宽高须为 16 的倍数；最多 3 次尝试；默认人脸阈值 0.55。校验器路径为空时使用环境变量或本机默认值。GET 另返回 `styles`（预设 id 到 `{label,prompt}` 的映射）。
+- `style_preset` 默认 `anime`，另支持 `manga/watercolor/chinese/semi_realistic/cinematic/custom`。显式选择预设时使用其固定提示词；只修改 `style` 时转为 custom。旧版内置半写实默认迁移为二次元；已有自定义风格保留。生成任务保存实际风格和预设快照。
 - `POST /probe`：检查节点和模型，返回 `{ok,provider,missing,models?,reference_mode}`。Mock 只验证流程，不代表人物一致性通过。
 - `GET /forms`：本书人物形态，含版本、冻结身份及 `refs[]`。基础形态从 M2 人物卡同步；修改基础身份沿用 M2 编辑/解冻/冻结接口。
 - `POST /forms`：`{character_id,form_key,label,card,start_ch?,start_para?,reversible?}` 新增形态；生效锚点为从 0 开始的章节、段落，重复锚点拒绝。`PATCH /forms/{id}` 编辑未冻结的派生形态，`POST /forms/{id}/actions/freeze|unfreeze` 冻结/解冻（解冻须 `confirm=true`，升版本并标旧结果过期）。
@@ -473,11 +474,24 @@ data: {"revision": 7, "count": 3}
 
 # 13. 上下文总结与提示词
 
-- `GET /api/ai/settings` 返回 `{settings:{base_url,model,enabled,key_configured}}`，不返回密钥。`PATCH /api/ai/settings` 接收 `{base_url?,model?,enabled?,api_key?}`；空密钥保留旧值。设置位于本机数据目录 `text-api.json`，Windows 使用当前用户 DPAPI 加密凭据，其他平台使用权限为 0600 的本地文件。远端地址只允许无凭据/查询参数的 HTTPS，本机可用 HTTP。已有密钥不会跟随 HTTP 重定向，也不会在配置并发切换后发送到旧地址。
+- `GET /api/ai/settings` 返回 `{settings:{base_url,model,enabled,auto_analyze,key_configured}}`，不返回密钥。`PATCH /api/ai/settings` 接收 `{base_url?,model?,enabled?,auto_analyze?,api_key?}`；同一地址下空密钥保留旧值，修改地址会清除旧密钥。设置位于本机数据目录 `text-api.json`，Windows 使用当前用户 DPAPI 加密凭据，其他平台使用权限为 0600 的本地文件。远端地址只允许无凭据/查询参数的 HTTPS，本机可用 HTTP。已有密钥不会跟随 HTTP 重定向，也不会在配置并发切换后发送到旧地址。
 - `GET /api/ai/models` 从已保存的地址读取模型名称；`POST /api/ai/probe` 发起小型 JSON 完成请求，返回 `{ok:true,model}`。
-- 默认文本模型 `gpt-oss-120b`，128K 上下文，只发送文字。请求按 UTF-8 字节数保守估算 token 上界，预留 3000 输出 token 和 1024 消息开销；这是保守预算，不是精确 tokenizer 计数。当前漫画上下文仍按下面的局部范围截取。模型具备工具调用能力，本流程由应用串联两阶段请求和 ComfyUI 队列，不向模型开放额外工具。
-- `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。先读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），再调用文本模型生成结构化中文总结和英文单格提示词。不会读取后续章节，也不把参考图发给文本模型。
+- 默认文本模型 `gpt-oss-120b`，128K 上下文，只发送文字。请求按 UTF-8 字节数保守估算 token 上界，预留 3000 输出 token 和 1024 消息开销；这是保守预算，不是精确 tokenizer 计数。整书按章节和分段处理，无需把全书一次塞入上下文。模型具备工具调用能力，本流程由应用串联请求和图像队列，不向模型开放额外工具。
+- `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。整书分析未完成时自动入队并返回 409 `book_analysis_pending`；暂停/失败任务需显式继续。读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），结合相关章节摘要和人物证据，调用文本模型生成结构化中文总结和英文单格提示词。生成目标章节时不引用未来章节资料，也不把参考图发给文本模型。
 - 总结字段为 `summary/location/time_of_day/moment/visible_action/emotion/key_props/continuity/uncertainties`。模型输出须通过 JSON、类型和长度校验；提示词夹带中文时最多纠正一次，失败返回 502，不提交出图任务。
 - `plan` 保存来源哈希、范围字符数、模型标识、总结和提示词；缓存键包括来源、地址、模型及方案版本。场景/人物/镜头/上下文在分析期间改变，或旧方案被用于新选择时，返回 409 `text_plan_stale`。
 - 有效 `plan_id` 的出图任务在快照中保存 `text_plan`，将英文提示词与冻结身份、参考图约束一起交给 MOSS。参考图确认、人物版本、生效段落和人脸阈值检查继续适用；执行前和完成时重新验证源上下文，换种子保留总结方案。
 - 本机共享文本 AI 启用后，仍使用默认 Mock 配置的 M2 书籍分析会使用共享 API；显式选择 provider 的请求继续遵循其选择。
+
+# 14. 整书阅读与通用图像 API
+
+- `GET /api/books/{book_id}/ai/analysis` 返回 `{analysis,chapters}`。analysis 含 `status/total/completed/current_chapter/current_part/total_parts/error/updated_at`；chapters 按章节排序，含 `chapter/title/summary/character_ids/entities/parts`。未开始时为 idle。
+- `POST /api/books/{book_id}/ai/analysis` 开始或继续，返回同样结构。只接收 TXT/EPUB。相同来源和模型的已完成任务直接复用；更改内容、模型、地址或分析版本会新建 run，复用仍有效的缓存。
+- `POST /api/books/{book_id}/ai/analysis/pause` 暂停 queued/running 任务；正在进行的 HTTP 请求可能完成，但晚到响应不会写入已暂停任务。状态为 `queued/running/done/paused/error`。关闭程序后 running 在下次启动恢复为 queued；已完成章节、分段和摘要合并结果持久化复用。
+- `auto_analyze` 默认 true；共享文本 AI 启用后，每 15 秒发现未分析的未归档小说并排队，含已有书库和后续导入。关闭自动发现不取消已创建任务；面板可以单独暂停、继续。API 错误或无效 JSON 停止任务，不静默跳章、不伪造完成、不自动无限重试。
+- 每段最多 6000 字符，包含超长单段的全部文字。多段章节按每组最多 8 份摘要递归合并，保留每章大意；前章摘要参与下一章阅读。人物视觉证据必须逐字出现在该段，章节编号由应用写入；人物卡与场景在同一事务落库，冻结身份不覆盖。新增人物卡仍需冻结并确认参考图后生成分镜。
+- 生成时按当前章人物、地点、道具匹配历史章节，最多选当前章及 8 个相关前章，序列化摘要最多 24000 UTF-8 字节，人物证据最多 4000 字节。来源哈希检查排除过期资料，`plan.scope.related_chapters` 标明引用章节（0-based）。人物外貌以指定的冻结形态和参考图为准。
+- 场景列表支持 `offset` 和 `limit`，返回 `has_more`；漫画面板加载全部有效场景后按章节选择，不受原默认 100 条限制。文本 AI 启用时，界面“加入生成队列”也会先补齐总结和提示词。
+- `GET/PATCH /api/image-ai/settings` 提供独立图像密钥；PATCH 只接收 `{base_url?,api_key?}`，Windows DPAPI 保存于 `image-api.json`，不与文本凭据共享。图像模型与地址在每本书的 `/manga/config` 配置。
+- `openai-images` 使用 OpenAI Images 兼容协议：参考图生成调用 `/images/generations`（JSON），带参考图的分镜调用 `/images/edits`（multipart PNG）。需要 `data[0].b64_json` 输出，返回 URL 的接口不在当前适配范围内。所选服务须支持相应模型、尺寸和编辑接口；`/probe` 只验证模型列表可访问，不能证明编辑能力。ComfyUI/MOSS 继续使用原有 HTTP API。
+- 图像 API 请求携带 Idempotency-Key，提交前持久化请求标识。服务中断/退出后无法确认同步请求结果时，续查不会再次提交；用户核对服务端记录后可显式换种子新建任务。实际图像仍须通过参考图及人脸检查，缺少校验或低分保留 needs_review。

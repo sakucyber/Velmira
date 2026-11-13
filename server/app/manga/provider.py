@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import urllib.error
 import urllib.parse
@@ -10,6 +11,60 @@ import uuid
 from PIL import Image, ImageDraw
 
 from .models import MangaError, build_workflow
+
+
+class ImageAPIProvider:
+    """OpenAI Images-compatible adapter. Uses edits for panels with a reference."""
+    def __init__(self, config):
+        self.config = config
+
+    def probe(self):
+        from ..ai.settings import api_key_for
+        from ..ai.providers import request_json
+        try:
+            data = request_json(self.config["base_url"] + "/models", api_key=api_key_for(self.config["base_url"], "image"))
+            found = any(m.get("id") == self.config["model"] for m in data.get("data", []) if isinstance(m, dict))
+            return {"ok": found, "provider": "openai-images", "missing": [] if found else ["model"],
+                    "note": "模型可访问；生图与参考图编辑能力会在实际请求时验证", "reference_mode": "images-edits"}
+        except Exception:
+            raise MangaError("图像 API 检测失败，请检查地址、模型与独立密钥", "image_api_failed", 502) from None
+
+    def generate(self, snapshot, ref_path, request_id):
+        from ..ai.settings import api_key_for
+        from ..ai.providers import _NoRedirect
+        cfg = self.config
+        body = {"model": cfg["model"], "prompt": snapshot["prompt"], "n": 1, "size": f'{cfg["width"]}x{cfg["height"]}'}
+        if not cfg["model"].lower().startswith("gpt-image"):
+            body["response_format"] = "b64_json"
+        if ref_path:
+            boundary = "velmira" + uuid.uuid4().hex
+            chunks = [(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode() for key, value in body.items()]
+            chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="image"; filename="reference.png"\r\nContent-Type: image/png\r\n\r\n').encode() + ref_path.read_bytes() + b"\r\n")
+            chunks.append(f"--{boundary}--\r\n".encode())
+            raw = b"".join(chunks); content_type = "multipart/form-data; boundary=" + boundary
+            endpoint = "/images/edits"
+        else:
+            raw = json.dumps(body).encode(); content_type = "application/json"; endpoint = "/images/generations"
+        try:
+            key = api_key_for(cfg["base_url"], "image")
+            req = urllib.request.Request(cfg["base_url"] + endpoint, data=raw,
+                headers={"Content-Type": content_type, "Idempotency-Key": request_id})
+            if key:
+                req.add_header("Authorization", "Bearer " + key)
+            with urllib.request.build_opener(_NoRedirect()).open(req, timeout=cfg["timeout"]) as response:
+                data = response.read(24 * 1024 * 1024 + 1)
+                if len(data) > 24 * 1024 * 1024:
+                    raise ValueError()
+            payload = json.loads(data)
+            encoded = payload["data"][0]["b64_json"]
+            image = base64.b64decode(encoded, validate=True)
+            if len(image) > 16 * 1024 * 1024:
+                raise ValueError()
+            return image
+        except urllib.error.HTTPError as exc:
+            raise MangaError(f"图像 API HTTP {exc.code}；请确认模型支持所选尺寸及参考图编辑", "image_api_failed", 502) from None
+        except Exception:
+            raise MangaError("图像 API 未返回有效 base64 图片，或连接中断；请检查接口兼容性与服务端任务记录", "image_api_failed", 502) from None
 
 
 class ComfyProvider:

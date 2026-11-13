@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse
 from .. import db
 from ..ai.models import CARD_FIELDS, identity_hash, render_identity, stable_json
 from ..manga import service as s
-from ..manga.models import MangaError, check_identity, validate_config
-from ..manga.provider import ComfyProvider
+from ..manga.models import MangaError, check_identity, validate_config, STYLE_PRESETS
+from ..manga.provider import ComfyProvider, ImageAPIProvider
 from ..manga.queue import valid_snapshot
 
 router = APIRouter(prefix="/api/books/{book_id}/manga")
@@ -50,7 +50,7 @@ def get_job(conn, book_id, job_id):
 @router.get("/config")
 def get_config(book_id: str):
     with connection(book_id) as conn:
-        return {"config": s.configuration(conn, book_id)}
+        return {"config": s.configuration(conn, book_id), "styles": STYLE_PRESETS}
 
 
 @router.patch("/config")
@@ -67,7 +67,7 @@ def probe(book_id: str):
         cfg = s.configuration(conn, book_id)
     if cfg["provider"] == "mock":
         return {"ok": True, "provider": "mock", "reference_mode": "mock", "missing": [], "note": "占位图仅供流程验证，不代表人物一致性通过"}
-    return ComfyProvider(cfg).probe()
+    return (ImageAPIProvider(cfg) if cfg["provider"] == "openai-images" else ComfyProvider(cfg)).probe()
 
 
 @router.get("/forms")

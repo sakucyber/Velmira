@@ -242,6 +242,8 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     clear(area);
     const scenes = (data && Array.isArray(data.scenes)) ? data.scenes : [];
     const characters = (data && Array.isArray(data.characters)) ? data.characters : [];
+    const wholeBook = el('button', 'btn btn-primary', '整书分析 · 人物卡与章节大意');
+    wholeBook.addEventListener('click', () => openManga('analysis')); area.appendChild(wholeBook);
     const extract = el('button', 'btn ai-extract', '准备片段并分析本章');
     extract.type = 'button';
     extract.addEventListener('click', async () => {
@@ -252,7 +254,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     area.appendChild(extract);
     const manga = el('button', 'btn ai-extract', '漫画生成');
     manga.type = 'button';
-    manga.addEventListener('click', openManga);
+    manga.addEventListener('click', () => openManga());
     area.appendChild(manga);
     area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个场景') : '尚未生成场景；可在漫画生成的出图设置中配置文本 AI，未配置时使用离线 Mock'));
     for (const scene of scenes) {
@@ -295,13 +297,13 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     renderAI(body, data, onExtract, onFreeze);
   }
 
-  function openManga() {
+  function openManga(initialTab = 'generate') {
     open('manga', '漫画生成', (area) => {
       const ac = new AbortController();
       disposePanel = () => ac.abort();
       area.appendChild(el('p', 'seg-note', '正在加载…'));
       import('./manga.js').then(({ mountManga }) => {
-        if (!ac.signal.aborted) mountManga({ area, bookId, signal: ac.signal });
+        if (!ac.signal.aborted) mountManga({ area, bookId, signal: ac.signal, initialTab });
       }).catch(() => { if (!ac.signal.aborted) area.textContent = '漫画面板加载失败，请重新打开'; });
     });
   }

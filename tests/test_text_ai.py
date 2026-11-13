@@ -53,7 +53,8 @@ class TextAITests(unittest.TestCase):
         return SimpleNamespace(complete=AsyncMock(side_effect=outputs if outputs is not None else [SUMMARY, {"visual_prompt": PROMPT}]))
 
     def plan(self, provider=None, payload=None, status=200):
-        with patch.object(director, "make_provider", return_value=provider or self.provider()):
+        # These tests isolate the director; whole-book readiness is covered separately.
+        with patch.object(director, "make_provider", return_value=provider or self.provider()), patch("server.app.ai.book_analysis.ensure_ready", return_value=True):
             result = self.client.post(self.base + "/plan", json=payload or self.payload)
         self.assertEqual(result.status_code, status, result.text)
         return result.json()

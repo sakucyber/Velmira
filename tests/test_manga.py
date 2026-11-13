@@ -58,7 +58,7 @@ class MangaTests(unittest.TestCase):
         return self.api("/jobs/" + job["id"], method="GET")["job"]
 
     def test_configuration_and_probe(self):
-        for payload in [{"provider": "unknown"}, {"width": 257}, {"steps": True}, {"clip": "qwen2b"}, {"base_url": "http://user:pass@host"}, {"face_threshold": -1}, {"unknown": 1}, {"base_url": 5}]:
+        for payload in [{"provider": "unknown"}, {"width": 257}, {"steps": True}, {"provider": "comfyui", "clip": "qwen2b"}, {"base_url": "http://user:pass@host"}, {"face_threshold": -1}, {"unknown": 1}, {"base_url": 5}]:
             self.api("/config", payload, "PATCH", 400)
         self.assertEqual(self.api("/probe")["provider"], "mock")
         self.assertEqual(self.client.get("/api/books/missing/manga/config").status_code, 404)

@@ -24,7 +24,15 @@ def book(conn, book_id):
 def configuration(conn, book_id):
     book(conn, book_id)
     row = conn.execute("SELECT config_json FROM render_configs WHERE book_id=?", (book_id,)).fetchone()
-    return {**DEFAULTS, **(json.loads(row[0]) if row else {})}
+    saved = json.loads(row[0]) if row else {}
+    if saved and "style_preset" not in saved:
+        # Migrate the previous built-in default to anime, preserving explicit custom styles.
+        from .models import STYLE_PRESETS
+        if saved.get("style") == STYLE_PRESETS["semi_realistic"]["prompt"]:
+            saved["style"] = DEFAULTS["style"]
+        else:
+            saved["style_preset"] = "custom"
+    return {**DEFAULTS, **saved}
 
 
 def form_row(conn, book_id, form_id):
