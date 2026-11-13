@@ -129,7 +129,7 @@ async function main() {
 
   await cdp.eval("document.querySelector('#btn-settings').click()");
   await sleep(500);
-  await cdp.eval("var size=document.querySelector('[aria-label=\"阅读字号\"]');size.value='2';size.dispatchEvent(new Event('change',{bubbles:true}));");
+  await cdp.eval("var size=document.querySelector('[aria-label=\"阅读字号\"]');size.value='22.5';size.dispatchEvent(new Event('change',{bubbles:true}));");
   await sleep(700);
   const afterFont = JSON.parse(await cdp.eval("JSON.stringify({marks:document.querySelectorAll('mark.ann').length,fontSize:getComputedStyle(document.querySelector('#reader-column')).fontSize})"));
   add("G6 改字号后 mark 重建", afterFont.marks === 4 ? "PASS" : "FAIL", j(afterFont));

@@ -57,7 +57,8 @@ export function fmtTime(sec) {
 
 /* ---------- 本地存储：只存 book/chapter/para/offset/theme/fontSize ---------- */
 const STORE_KEY = 'velmira.r1';
-const STORE_DEFAULTS = { book: null, chapter: 0, para: 0, offset: 0, theme: 'day', fontSize: 1 };
+export const FONT_SIZE = { min: 12, max: 48, step: .1, default: 19 };
+const STORE_DEFAULTS = { book: null, chapter: 0, para: 0, offset: 0, theme: 'day', fontSize: FONT_SIZE.default };
 
 export const store = {
   get() {
@@ -65,6 +66,10 @@ export const store = {
       const raw = localStorage.getItem(STORE_KEY);
       if (!raw) return { ...STORE_DEFAULTS };
       const obj = JSON.parse(raw);
+      // 旧版本保存 0–3 档位；新版保存实际像素，首次读取时保留原来的大小。
+      if (obj && Number.isInteger(obj.fontSize) && obj.fontSize >= 0 && obj.fontSize <= 3) {
+        obj.fontSize = [17, 19, 22, 25][obj.fontSize];
+      }
       return obj && typeof obj === 'object' ? { ...STORE_DEFAULTS, ...obj } : { ...STORE_DEFAULTS };
     } catch (e) { return { ...STORE_DEFAULTS }; }
   },
@@ -86,16 +91,20 @@ export const THEMES = [
   { id: 'night', name: '夜间', swatch: '#191b21' },
   { id: 'sepia', name: '羊皮纸', swatch: '#f2e6cd' },
 ];
-export const FONT_SIZES = [17, 19, 22, 25];
 
 export function applyTheme(theme) {
   document.documentElement.dataset.theme = THEMES.some(t => t.id === theme) ? theme : 'day';
 }
 
-export function applyFontSize(index) {
-  const i = clamp(Number(index) || 0, 0, FONT_SIZES.length - 1);
-  document.documentElement.style.setProperty('--reader-font-size', FONT_SIZES[i] + 'px');
-  return i;
+export function normalizeFontSize(value) {
+  const n = Number(value);
+  return Math.round(clamp(Number.isFinite(n) ? n : FONT_SIZE.default, FONT_SIZE.min, FONT_SIZE.max) * 10) / 10;
+}
+
+export function applyFontSize(value) {
+  const size = normalizeFontSize(value);
+  document.documentElement.style.setProperty('--reader-font-size', size + 'px');
+  return size;
 }
 
 /* ---------- 轻提示 ---------- */

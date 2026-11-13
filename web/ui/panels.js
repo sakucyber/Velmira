@@ -5,7 +5,7 @@
    按需懒加载（dynamic import），不影响首屏请求预算。
    搜索/片段/注释接口失败时静默降级，不阻塞阅读。
    ============================================================ */
-import { el, clear, debounce, apiGet, apiDelete, fmtTime } from '../util/core.js';
+import { el, clear, debounce, apiGet, apiDelete, fmtTime, normalizeFontSize, toast } from '../util/core.js';
 
 export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSelect, onNotesJump, onNotesChanged, onBookmarkJump, onBookmarkDelete }) {
   let shell = null;        // 当前抽屉
@@ -450,19 +450,34 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
         themes.append(button);
       }
       area.append(title, themes);
-      if (options.fontSizes) {
-        const label = el('label', 'settings-field', '字号');
-        const select = el('select', 'shelf-input'); select.setAttribute('aria-label', '阅读字号');
-        options.fontSizes.forEach((size, index) => {
-          const item = el('option', null, size + ' px'); item.value = index; select.append(item);
-        });
-        select.value = options.fontSize;
-        select.addEventListener('change', async () => {
-          select.disabled = true;
-          try { await options.onFont(Number(select.value)); }
-          finally { select.disabled = false; select.focus(); }
-        });
-        label.append(select); area.append(label);
+      if (options.fontRange) {
+        const group = el('div', 'settings-font');
+        const head = el('div', 'settings-font-head');
+        const valueLabel = el('label', 'settings-font-value');
+        const number = el('input', 'shelf-input'); number.type = 'number'; number.inputMode = 'decimal'; number.setAttribute('aria-label', '阅读字号');
+        const range = el('input', 'settings-font-range'); range.type = 'range'; range.setAttribute('aria-label', '调整阅读字号');
+        const limits = options.fontRange;
+        for (const input of [number, range]) { input.min = limits.min; input.max = limits.max; input.step = limits.step; input.value = options.fontSize; }
+        valueLabel.append(number, el('span', null, 'px'));
+        head.append(el('span', 'settings-label', '字号'), valueLabel);
+        let current = options.fontSize;
+        function update(value, syncNumber = true) {
+          current = normalizeFontSize(value); range.value = current;
+          range.setAttribute('aria-valuetext', current + ' 像素');
+          if (syncNumber) number.value = current;
+          options.onFont(current).catch(() => toast('字号调整失败，请重试'));
+        }
+        range.setAttribute('aria-valuetext', current + ' 像素');
+        range.addEventListener('input', () => update(range.value));
+        number.addEventListener('input', () => { if (number.value !== '' && number.validity.valid) update(number.value, false); });
+        number.addEventListener('change', () => update(number.value === '' ? current : number.value));
+        number.addEventListener('blur', () => { number.value = current; });
+        number.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); update(number.value === '' ? current : number.value); } });
+        const foot = el('div', 'settings-font-foot');
+        const reset = el('button', 'btn', '恢复默认'); reset.type = 'button';
+        reset.addEventListener('click', () => update(limits.default));
+        foot.append(el('span', 'settings-help', limits.min + '–' + limits.max + ' px · 可拖动或直接输入'), reset);
+        group.append(head, range, foot); area.append(group);
       }
       if (options.onFit) {
         const label = el('label', 'settings-field', '漫画显示');

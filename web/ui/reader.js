@@ -6,7 +6,7 @@
    ============================================================ */
 import {
   $, el, store, toast, debounce, clamp, intOrNull, fmtPercent,
-  THEMES, FONT_SIZES, applyTheme, applyFontSize,
+  THEMES, FONT_SIZE, applyTheme, applyFontSize, normalizeFontSize,
   apiGet, apiPut, apiPost, apiDelete,
 } from '../util/core.js';
 
@@ -635,17 +635,32 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   /* ================= 主题 / 字号 ================= */
+  let fontResize = null;
+  let pendingFontSize = null;
+  function changeFontSize(next) {
+    pendingFontSize = normalizeFontSize(next);
+    if (!fontResize) {
+      fontResize = (async () => {
+        // 拖动时合并连续输入，串行重排，避免旧测量覆盖新的字号。
+        while (pendingFontSize !== null) {
+          fontSize = applyFontSize(pendingFontSize); pendingFontSize = null;
+          persist();
+          await pager.relocate();
+        }
+        pager.reapplyAnnotations();
+      })().finally(() => { fontResize = null; });
+    }
+    return fontResize;
+  }
+
   async function openSettings() {
     if (annUI) annUI.hideMenu();
     const p = await ensurePanels();
-    p.openSettings({ themes: THEMES, theme, fontSizes: FONT_SIZES, fontSize,
+    p.openSettings({ themes: THEMES, theme, fontRange: FONT_SIZE, fontSize,
       onTheme: (next) => {
         theme = next; applyTheme(theme); persist(); pager.reapplyAnnotations();
       },
-      onFont: async (next) => {
-        fontSize = applyFontSize(next); persist();
-        await pager.relocate(); pager.reapplyAnnotations();
-      },
+      onFont: changeFontSize,
     });
   }
 
