@@ -59,6 +59,7 @@ def sync_base(conn, book_id):
 
 def stale(conn, form_id):
     conn.execute("UPDATE form_refs SET accepted=0 WHERE form_id=?", (form_id,))
+    conn.execute("DELETE FROM auto_manga_refs WHERE ref_id IN (SELECT id FROM form_refs WHERE form_id=?)", (form_id,))
     conn.execute("UPDATE render_jobs SET status='stale',error='人物身份已变化，请按新版重新生成',updated_at=? WHERE form_id=? AND status!='cancelled'", (int(time.time()), form_id))
 
 
@@ -86,7 +87,12 @@ def save_image(raw, asset_id):
 
 
 def public_ref(book_id, row):
-    return {key: row[key] for key in ["id", "form_id", "form_version", "identity_hash", "accepted", "created_at"]} | {"url": f"/api/books/{book_id}/manga/assets/{row['id']}"}
+    conn = db.get_conn()
+    try:
+        automatic = bool(conn.execute("SELECT 1 FROM auto_manga_refs WHERE ref_id=?", (row["id"],)).fetchone())
+    finally:
+        conn.close()
+    return {key: row[key] for key in ["id", "form_id", "form_version", "identity_hash", "accepted", "created_at"]} | {"automatic": automatic, "url": f"/api/books/{book_id}/manga/assets/{row['id']}"}
 
 
 def public_job(conn, row):
@@ -104,7 +110,7 @@ def public_job(conn, row):
     return result
 
 
-def enqueue(conn, book_id, payload):
+def enqueue(conn, book_id, payload, *, automatic=False):
     allowed = {"kind", "form_id", "character_id", "scene_id", "shot", "action", "seed", "flashback", "request_id", "para", "plan_id"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise MangaError("出图请求包含未知字段")
@@ -157,12 +163,26 @@ def enqueue(conn, book_id, payload):
     ref = None
     if kind == "panel":
         ref_row = conn.execute("SELECT * FROM form_refs WHERE form_id=? AND accepted=1 AND form_version=? AND identity_hash=? ORDER BY created_at DESC,id LIMIT 1", (form["id"], form["version"], form["identity_hash"])).fetchone()
+        if not ref_row and automatic:
+            ref_row = conn.execute("SELECT r.* FROM form_refs r JOIN auto_manga_refs a ON a.ref_id=r.id WHERE a.book_id=? AND r.form_id=? AND r.form_version=? AND r.identity_hash=? ORDER BY r.created_at,r.id LIMIT 1",
+                                   (book_id, form["id"], form["version"], form["identity_hash"])).fetchone()
         if not ref_row:
             raise MangaError("该形态尚无已确认且版本一致的参考图", "reference_required", 409)
         ref = dict(ref_row)
         if not asset_path(ref["path"]).is_file():
             raise MangaError("参考图文件不存在", "reference_missing", 409)
         ref["sha256"] = digest_bytes(asset_path(ref["path"]).read_bytes())
+    elif automatic:
+        # New outfits/ages keep the character's previous face as an editing reference.
+        previous_ref = conn.execute("""SELECT r.* FROM form_refs r JOIN character_forms f ON f.id=r.form_id
+            LEFT JOIN auto_manga_refs a ON a.ref_id=r.id
+            WHERE f.character_id=? AND f.id!=? AND f.locked=1 AND f.start_ch<=?
+            AND r.form_version=f.version AND r.identity_hash=f.identity_hash AND (r.accepted=1 OR a.book_id=?)
+            ORDER BY f.start_ch DESC,f.start_para DESC,r.created_at DESC,r.id LIMIT 1""",
+            (form["character_id"], form["id"], chapter, book_id)).fetchone()
+        if previous_ref:
+            ref = dict(previous_ref)
+            ref["sha256"] = digest_bytes(asset_path(ref["path"]).read_bytes())
     text_plan = None
     if payload.get("plan_id"):
         from ..ai.director import resolve_plan
@@ -174,6 +194,8 @@ def enqueue(conn, book_id, payload):
                 "seed": seed, "prompt": prompt, "prompt_hash": identity_hash(prompt), "flashback": flashback}
     if text_plan:
         snapshot["text_plan"] = text_plan
+    if automatic:
+        snapshot["automatic_draft"] = True
     request_id = payload.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 100):
         raise MangaError("request_id 须为 1–100 字符")

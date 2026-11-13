@@ -327,3 +327,36 @@ CREATE TABLE IF NOT EXISTS manga_exports (
   created_at INTEGER NOT NULL,
   UNIQUE(book_id,fingerprint)
 );
+
+-- Opt-in automatic comics: resumable orchestration and separately labelled drafts.
+CREATE TABLE IF NOT EXISTS auto_manga (
+  book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  epoch INTEGER NOT NULL DEFAULT 0,
+  start_chapter INTEGER NOT NULL,
+  chapter INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  message TEXT NOT NULL DEFAULT '',
+  source_hash TEXT NOT NULL,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auto_manga_refs (
+  ref_id TEXT PRIMARY KEY REFERENCES form_refs(id) ON DELETE CASCADE,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS auto_manga_pages (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  scene_id TEXT NOT NULL,
+  chapter INTEGER NOT NULL,
+  ordinal INTEGER NOT NULL,
+  spec_json TEXT NOT NULL,
+  sources_json TEXT NOT NULL,
+  image_path TEXT NOT NULL,
+  image_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(book_id,run_id,scene_id)
+);

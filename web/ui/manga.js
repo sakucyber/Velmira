@@ -181,9 +181,9 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     const refs = el('div', 'manga-refs'); content.appendChild(refs);
     for (const r of f.refs) {
       const card = el('article', 'manga-ref'); refs.appendChild(card); image(card, r.url, f.label + '参考图');
-      card.appendChild(el('p', 'manga-note', (r.accepted ? '已确认' : '未确认') + ' · v' + r.form_version));
-      const b = button(card, r.accepted ? '撤销确认' : '确认参考图', async () => {
-        await apiPatch(base + '/manga/refs/' + r.id, { accepted: !r.accepted }); await load(); render(); await refreshJobs();
+      card.appendChild(el('p', 'manga-note', (r.accepted ? '人工已确认' : r.automatic ? '自动选用 · 未人工复核' : '未确认') + ' · v' + r.form_version));
+      const b = button(card, r.accepted ? '撤销确认' : r.automatic ? '撤销自动选用' : '确认参考图', async () => {
+        await apiPatch(base + '/manga/refs/' + r.id, { accepted: !(r.accepted || r.automatic) }); await load(); render(); await refreshJobs();
       });
       b.disabled = !f.locked || r.form_version !== f.version;
     }

@@ -93,6 +93,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Manga fixture setup failed' }
             node tests/cdp_manga.mjs --base http://127.0.0.1:8876
             if ($LASTEXITCODE -ne 0) { throw 'Manga browser regression failed' }
+            node tests/cdp_automatic.mjs --base http://127.0.0.1:8876
+            if ($LASTEXITCODE -ne 0) { throw 'Automatic comic browser regression failed' }
           } finally {
             taskkill /PID $backend.Id /T /F
           }

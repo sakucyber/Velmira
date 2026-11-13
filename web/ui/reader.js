@@ -7,7 +7,7 @@
 import {
   $, el, store, toast, debounce, clamp, intOrNull, fmtPercent,
   THEMES, FONT_SIZE, applyTheme, applyFontSize, normalizeFontSize,
-  apiGet, apiPut, apiPost, apiDelete,
+  apiGet, apiPut, apiPost, apiDelete, apiPatch,
 } from '../util/core.js';
 
 export async function mountReader({ bookId, params, debug }) {
@@ -164,6 +164,47 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   bindEvents();
+  // Start after the reading viewport is ready; controls also remain available on phones.
+  const autoToggle = el('button', 'btn btn-tool auto-manga-toggle', '自动漫画');
+  autoToggle.type = 'button'; autoToggle.setAttribute('role', 'switch');
+  autoToggle.setAttribute('aria-label', '自动生成连贯漫画'); autoToggle.setAttribute('aria-checked', 'false'); autoToggle.disabled = true;
+  const autoView = el('button', 'btn btn-tool auto-manga-view', '漫画进度'); autoView.type = 'button';
+  dom.settingsBtn.parentElement.prepend(autoToggle, autoView);
+  let autoStatus = null, autoBusy = false, autoTimer;
+  const autoAc = new AbortController();
+  function showAuto(value) {
+    autoStatus = value;
+    autoToggle.setAttribute('aria-checked', String(value.enabled));
+    autoToggle.classList.toggle('active', value.enabled);
+    autoToggle.textContent = value.enabled ? '自动漫画 · 开' : '自动漫画';
+    autoToggle.disabled = autoBusy;
+    autoToggle.title = value.message;
+    autoView.textContent = value.pages ? '漫画 · ' + value.pages + ' 页' : value.status === 'error' ? '漫画 · 已中断' : '漫画进度';
+  }
+  async function openAuto() {
+    const p = await ensurePanels();
+    p.openAutomatic({ chapter: () => state.chapter, onChange: showAuto });
+  }
+  autoView.addEventListener('click', openAuto);
+  autoToggle.addEventListener('click', async () => {
+    if (autoBusy || !autoStatus) return;
+    autoBusy = true; autoToggle.disabled = true;
+    try {
+      const result = await apiPatch('/api/books/' + encodeURIComponent(bookId) + '/manga/auto', { enabled: !autoStatus.enabled, chapter: state.chapter });
+      showAuto(result.auto);
+      if (result.auto.enabled) await openAuto();
+    } catch (err) { toast(err.message, 6000); await openAuto(); }
+    finally { autoBusy = false; autoToggle.disabled = false; }
+  });
+  async function refreshAuto() {
+    try {
+      const result = await apiGet('/api/books/' + encodeURIComponent(bookId) + '/manga/auto', autoAc.signal);
+      if (!autoAc.signal.aborted && !autoBusy) showAuto(result.auto);
+    } catch { /* Reading remains usable when the status service is temporarily unavailable. */ }
+    if (!autoAc.signal.aborted) autoTimer = setTimeout(refreshAuto, 5000);
+  }
+  setTimeout(refreshAuto, 800);
+  window.addEventListener('pagehide', () => { autoAc.abort(); clearTimeout(autoTimer); }, { once: true });
   updatePercentFromUrl();
   updateDebug();
 

@@ -308,6 +308,16 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     });
   }
 
+  function openAutomatic(options) {
+    open('automatic', '自动漫画', (area) => {
+      const ac = new AbortController();
+      disposePanel = () => ac.abort();
+      import('./automatic.js').then(({ mountAutomatic }) => {
+        if (!ac.signal.aborted) mountAutomatic({ area, bookId, signal: ac.signal, ...options, onSettings: () => openManga('config') });
+      }).catch(() => { if (!ac.signal.aborted) area.textContent = '自动漫画面板加载失败，请重新打开'; });
+    });
+  }
+
   /* ---------------- 书签抽屉（数据由 reader 持有并拉取） ---------------- */
   function renderBookmarks(area, bookmarks, current) {
     clear(area);
@@ -547,6 +557,6 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   return {
     openToc, openSearch, openSegments, updateSegments, openTheme, openSettings,
     openBookmarks, updateBookmarks, openNotes, updateNote, openAI, updateAI,
-    close, isOpen, isSegmentsOpen,
+    close, isOpen, isSegmentsOpen, openAutomatic,
   };
 }

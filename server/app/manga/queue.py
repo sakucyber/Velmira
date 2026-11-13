@@ -63,7 +63,8 @@ def valid_snapshot(conn, job, snap):
     ref = snap.get("reference")
     if ref:
         row = conn.execute("SELECT accepted FROM form_refs WHERE id=?", (ref["id"],)).fetchone()
-        if not row or not row[0] or digest_bytes(asset_path(ref["path"]).read_bytes()) != ref["sha256"]:
+        automatic = snap.get("automatic_draft") and conn.execute("SELECT 1 FROM auto_manga_refs WHERE ref_id=? AND book_id=?", (ref["id"], job["book_id"])).fetchone()
+        if not row or (not row[0] and not automatic) or digest_bytes(asset_path(ref["path"]).read_bytes()) != ref["sha256"]:
             raise MangaError("参考图已撤销或文件发生变化", "render_stale", 409)
     if job["scene_id"]:
         scene = conn.execute("SELECT plan_json,status FROM scenes WHERE id=?", (job["scene_id"],)).fetchone()

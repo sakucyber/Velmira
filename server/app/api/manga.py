@@ -182,6 +182,8 @@ def review_ref(book_id: str, ref_id: str, payload: dict = Body(...)):
             if form["version"] != row["form_version"] or form["identity_hash"] != row["identity_hash"]:
                 raise MangaError("参考图与当前身份版本不一致", "reference_stale", 409)
         else:
+            if conn.execute("DELETE FROM auto_manga_refs WHERE ref_id=?", (ref_id,)).rowcount:
+                conn.execute("UPDATE render_jobs SET status='stale',error='自动参考图已被撤销' WHERE id IN (SELECT job_id FROM render_attempts WHERE id=?)", (ref_id,))
             jobs = conn.execute("SELECT id,snapshot_json FROM render_jobs WHERE form_id=? AND status!='cancelled'", (form["id"],)).fetchall()
             for job in jobs:
                 if (json.loads(job["snapshot_json"]).get("reference") or {}).get("id") == ref_id:

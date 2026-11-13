@@ -103,8 +103,13 @@ def check_identity(form):
         raise MangaError("形态身份须先冻结，且身份哈希校验通过", "identity_not_frozen", 409)
 
 
+def form_order(form):
+    # The initial base is a fallback when a timeline form starts at chapter zero.
+    return (form["start_ch"], form["start_para"], form.get("form_key") != "base", form["id"])
+
+
 def resolve_form(forms, chapter, para, explicit=None, flashback=False):
-    ordered = sorted(forms, key=lambda f: (f["start_ch"], f["start_para"], f["id"]))
+    ordered = sorted(forms, key=form_order)
     available = [f for f in ordered if (f["start_ch"], f["start_para"]) <= (chapter, para)]
     if not available:
         raise MangaError("该段落还没有生效的人物形态", "form_not_active", 409)

@@ -493,6 +493,15 @@ data: {"revision": 7, "count": 3}
 - 生成时按当前章人物、地点、道具匹配历史章节，最多选当前章及 8 个相关前章，序列化摘要最多 24000 UTF-8 字节，人物证据最多 4000 字节。来源哈希检查排除过期资料，`plan.scope.related_chapters` 标明引用章节（0-based）。人物外貌以指定的冻结形态和参考图为准。
 - 场景列表支持 `offset` 和 `limit`，返回 `has_more`；漫画面板加载全部有效场景后按章节选择，不受原默认 100 条限制。文本 AI 启用时，界面“加入生成队列”也会先补齐总结和提示词。
 - `GET/PATCH /api/image-ai/settings` 提供独立图像密钥；PATCH 只接收 `{base_url?,api_key?}`，Windows DPAPI 保存于 `image-api.json`，不与文本凭据共享。图像模型与地址在每本书的 `/manga/config` 配置。
+
+### 自动漫画
+
+- `GET /api/books/{book_id}/manga/auto` 返回 `{auto}`：开关、阶段、起始/当前章节、已完成章节和页数、待处理分格、错误提示。
+- `PATCH .../auto` 接收 `{enabled:boolean,chapter?:number}`。首次开启从当前章开始；暂停后开启恢复原 run 和起点。完成后重新开启创建新 run，历史草稿可继续查看。仅支持 TXT/EPUB，使用已配置的文本及图像 API。
+- 后台先完成整书分析，再按章节及原文片段顺序编排 1–4 格一页的连续分镜；把上一页/格内容带入下一次编排和总结。对白校验为原文逐字引用，人物必须来自片段；没有具名人物的片段生成过渡旁白页。
+- 依照当前章节以前的外貌证据创建冻结形态，复用同一形态的参考图。自动选用的参考图记录于 `auto_manga_refs`，不把 `accepted` 写成人工确认。撤销自动参考会使相关任务失效，不能由后台重新选回。
+- 自动页写入独立的 `auto_manga_pages`，明确标为草稿，`needs_review` 和真实人脸分数保持不变；不绕过 M4 正式拼页/导出的复核门槛。`GET .../auto/pages?offset=0&limit=12&run_id=...` 分页读取草稿（最多30页），省略 run_id 取本次；`GET .../auto/runs` 查看历史记录，`GET .../auto/pages/{id}/image` 读取页图。
+- 关闭开关后不再创建下一张任务，已提交的一张保留；自动流程自行启动的整书分析也暂停。状态写入 SQLite，重启可续跑；重复开启幂等。模型异常停机并显示可处理错误，不无限重试；章节、人物、参考图变化会阻止旧快照继续。中途修改模型/画风须恢复当前页原配置后继续。
 - `openai-images` 使用 OpenAI Images 兼容协议：参考图生成调用 `/images/generations`（JSON），带参考图的分镜调用 `/images/edits`（multipart PNG）。需要 `data[0].b64_json` 输出，返回 URL 的接口不在当前适配范围内。所选服务须支持相应模型、尺寸和编辑接口；`/probe` 只验证模型列表可访问，不能证明编辑能力。ComfyUI/MOSS 继续使用原有 HTTP API。
 - 图像 API 请求携带 Idempotency-Key，提交前持久化请求标识。服务中断/退出后无法确认同步请求结果时，续查不会再次提交；用户核对服务端记录后可显式换种子新建任务。实际图像仍须通过参考图及人脸检查，缺少校验或低分保留 needs_review。
 

@@ -25,13 +25,15 @@ log = logging.getLogger("velmira.server")
 async def _lifespan(app: FastAPI):
     # 幂等建库：冷启动（无 data/）也能直接服务
     init_db()
-    from .manga import queue
+    from .manga import queue, automatic
     from .ai import book_analysis
     queue.start()
     book_analysis.start()
+    automatic.start()
     try:
         yield
     finally:
+        await automatic.stop()
         await book_analysis.stop()
         await queue.stop()
 
@@ -70,6 +72,8 @@ def create_app() -> FastAPI:
     app.include_router(manga_router)
     from .api.manga_pages import router as manga_pages_router
     app.include_router(manga_pages_router)
+    from .api.auto_manga import router as auto_manga_router
+    app.include_router(auto_manga_router)
     from .api.text_ai import router as text_ai_router
     app.include_router(text_ai_router)
 
