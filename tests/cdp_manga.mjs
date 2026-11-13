@@ -111,7 +111,7 @@ try {
   const novelLink = await evaluate('[...document.querySelectorAll("a")].find(a=>a.textContent==="小说").href');
   assert.ok(novelLink.includes('book=' + id));
   await send('Page.navigate', { url: novelLink + '&debug=1' });
-  await waitFor('!!document.querySelector("#btn-ai") && !document.querySelector("#btn-ai").disabled');
+  await waitFor('!!window.__velmira && !!document.querySelector("#btn-ai") && !document.querySelector("#btn-ai").disabled');
   await waitFor('[...document.querySelectorAll("a")].some(a=>a.textContent==="漫画")');
   await evaluate('document.querySelector("#btn-ai").click()'); await waitFor('!!document.querySelector(".drawer-ai.open")');
   await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs")');
