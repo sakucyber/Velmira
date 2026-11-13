@@ -22,6 +22,8 @@ router = APIRouter(prefix="/api/books/{book_id}/manga")
 def connection(book_id):
     conn = db.get_conn()
     try:
+        # Parallel UI loads all synchronize identities; keep check + insert atomic.
+        conn.execute("BEGIN IMMEDIATE")
         s.book(conn, book_id)
         s.sync_base(conn, book_id)
         yield conn

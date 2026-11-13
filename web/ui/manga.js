@@ -118,7 +118,7 @@ export async function mountManga({ area, bookId, signal }) {
     }
     const editor = el('details', 'manga-editor'); editor.appendChild(el('summary', null, '编辑身份 / 添加新形态')); content.appendChild(editor);
     editor.appendChild(el('p', 'manga-note', '外貌描述建议使用英文。保存会冻结新版本，旧版图片将标为过期。新增形态按章节、段落生效。'));
-    const label = field(editor, '形态名称', f.label);
+    const label = field(editor, f.form_key === 'base' ? '人物名称' : '形态名称', f.form_key === 'base' ? f.character_name : f.label);
     const values = {};
     for (const [key, title] of Object.entries(APPEARANCE)) values[key] = field(editor, title, f.card[key] || '');
     const mode = select(editor, '保存方式', [['edit', '修改当前身份并升版'], ['new', '添加新形态']], 'edit');
@@ -132,7 +132,7 @@ export async function mountManga({ area, bookId, signal }) {
         await apiPost(base + '/manga/forms/' + result.id + '/actions/freeze', {}); selected = result.id;
       } else if (f.form_key === 'base') {
         if (f.locked) await apiPost(base + '/ai/characters/' + f.character_id + '/unfreeze', { confirm: true });
-        await apiPatch(base + '/ai/characters/' + f.character_id, { card });
+        await apiPatch(base + '/ai/characters/' + f.character_id, { name: label.value, card });
         await apiPost(base + '/ai/characters/' + f.character_id + '/freeze', {});
       } else {
         if (f.locked) await apiPost(base + '/manga/forms/' + f.id + '/actions/unfreeze', { confirm: true });
@@ -170,7 +170,9 @@ export async function mountManga({ area, bookId, signal }) {
     for (const job of data.jobs) {
       const card = el('article', 'manga-job'); card.dataset.job = job.id; jobsArea.appendChild(card);
       card.appendChild(el('h4', null, (job.kind === 'reference' ? '参考图' : '分镜') + ' · ' + (STATES[job.status] || job.status)));
-      image(card, job.url, job.kind === 'reference' ? '参考图候选' : '生成的分镜');
+      // Each attempt has an immutable asset URL, avoiding a stale preview during retries.
+      const latestImage = [...job.history].reverse().find(h => h.url);
+      image(card, latestImage?.url || job.url, job.kind === 'reference' ? '参考图候选' : '生成的分镜');
       card.appendChild(el('p', 'manga-note', job.face_score == null ? '尚无有效人脸相似度' : '人脸相似度 ' + job.face_score.toFixed(3) + ' / 阈值 ' + job.snapshot.config.face_threshold));
       if (job.error) card.appendChild(el('p', 'manga-note', job.error));
       const actions = el('div', 'manga-actions'); card.appendChild(actions);

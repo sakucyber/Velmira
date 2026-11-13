@@ -505,9 +505,22 @@ export async function mountReader({ bookId, params, debug }) {
     if (!state.segments) {
       try { await refreshSegments(); } catch (err) { /* handled by refreshSegments */ }
     }
-    const ids = (state.segments || []).filter((seg) => seg.selected !== 0).map((seg) => seg.id);
-    if (!ids.length) { toast('当前章节没有 selected 片段'); return; }
     try {
+      let ids = (state.segments || []).filter((seg) => seg.selected !== 0).map((seg) => seg.id);
+      if (!ids.length) {
+        const existing = await apiGet('/api/books/' + encodeURIComponent(bookId) + '/segments?limit=1');
+        if (existing && existing.segments && existing.segments.length) {
+          toast('当前章节没有入选片段，请切换到有候选片段的章节');
+          return;
+        }
+        toast('正在准备候选片段…');
+        await apiPost('/api/books/' + encodeURIComponent(bookId) + '/segment', { per_chapter: 1 });
+        state.segmentsAvailable = true;
+        dom.segmentsBtn.hidden = false;
+        await refreshSegments();
+        ids = (state.segments || []).filter((seg) => seg.selected !== 0).map((seg) => seg.id);
+      }
+      if (!ids.length) { toast('当前章节太短，尚无可分析的候选片段'); return; }
       const result = await apiPost('/api/books/' + encodeURIComponent(bookId) + '/ai/extract', { segment_ids: ids });
       toast(result && result.needs_review ? 'AI 完成，部分片段待复核' : 'AI scene 抽取完成');
       const [sceneData, characterData] = await Promise.all([

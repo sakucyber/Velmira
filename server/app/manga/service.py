@@ -42,10 +42,10 @@ def sync_base(conn, book_id):
         if existing:
             if existing["identity_hash"] != (char["identity_hash"] or "") or existing["version"] != char["version"] or existing["locked"] != int(locked):
                 stale(conn, form_id)
-                conn.execute("UPDATE character_forms SET card_json=?,identity_block=?,identity_hash=?,version=?,locked=? WHERE id=?",
-                             (char["card_json"], char["identity_block"] or "", char["identity_hash"] or "", char["version"], int(locked), form_id))
+                conn.execute("UPDATE character_forms SET label=?,card_json=?,identity_block=?,identity_hash=?,version=?,locked=? WHERE id=?",
+                             (char["name"] + " · 基础形态", char["card_json"], char["identity_block"] or "", char["identity_hash"] or "", char["version"], int(locked), form_id))
         else:
-            conn.execute("INSERT INTO character_forms(id,character_id,form_key,label,card_json,identity_block,identity_hash,version,locked) VALUES(?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT OR IGNORE INTO character_forms(id,character_id,form_key,label,card_json,identity_block,identity_hash,version,locked) VALUES(?,?,?,?,?,?,?,?,?)",
                          (form_id, char["id"], "base", char["name"] + " · 基础形态", char["card_json"], char["identity_block"] or "", char["identity_hash"] or "", char["version"], int(locked)))
 
 

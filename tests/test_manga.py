@@ -63,6 +63,15 @@ class MangaTests(unittest.TestCase):
         self.assertEqual(self.api("/probe")["provider"], "mock")
         self.assertEqual(self.client.get("/api/books/missing/manga/config").status_code, 404)
 
+    def test_parallel_first_load_creates_only_one_base_form(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.sql("DELETE FROM character_forms")
+        def load(i):
+            return self.client.get(self.base + ("/forms" if i % 2 else "/config")).status_code
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            self.assertEqual(list(pool.map(load, range(24))), [200] * 24)
+        self.assertEqual(len(self.sql("SELECT id FROM character_forms WHERE character_id='m3-char'")), 1)
+
     def test_reference_is_a_required_manual_gate(self):
         self.api("/jobs", {"scene_id": "m3-scene", "character_id": "m3-char"}, status=409)
         self.reference(False)

@@ -242,12 +242,12 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     clear(area);
     const scenes = (data && Array.isArray(data.scenes)) ? data.scenes : [];
     const characters = (data && Array.isArray(data.characters)) ? data.characters : [];
-    const extract = el('button', 'btn ai-extract', '分析当前候选片段');
+    const extract = el('button', 'btn ai-extract', '准备片段并分析本章');
     extract.type = 'button';
     extract.addEventListener('click', async () => {
       extract.disabled = true;
       extract.textContent = '分析中…';
-      try { await onExtract(); } finally { extract.disabled = false; extract.textContent = '分析当前候选片段'; }
+      try { await onExtract(); } finally { extract.disabled = false; extract.textContent = '准备片段并分析本章'; }
     });
     area.appendChild(extract);
     const manga = el('button', 'btn ai-extract', '漫画生成');
