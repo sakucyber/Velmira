@@ -266,6 +266,8 @@ def get_book(book_id: str):
         if row is None:
             return _error(404, "book_not_found", f"书籍不存在：{book_id}")
         book = importer.book_to_dict(row)
+        from ..manga.pages import edition_links
+        book["reading_links"] = edition_links(conn, book_id)
         if (row["format"] or "txt") == "cbz":
             # 契约 7.3：cbz 详情给 page_count（book_to_dict 已含，这里兜底）
             book["page_count"] = int(row["chapter_count"] or 0)

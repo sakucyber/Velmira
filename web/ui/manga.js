@@ -1,5 +1,6 @@
 import { el, apiGet, apiPost, apiPatch, toast } from '../util/core.js';
 import { mountBookAnalysis } from './book-analysis.js';
+import { mountMangaPages } from './manga-pages.js';
 
 const STATES = { queued: '排队中', running: '生成中', needs_review: '待复核', done: '相似度通过', approved: '人工已确认', error: '生成失败', stale: '已过期，需重新生成', cancelled: '已取消' };
 const SHOTS = { portrait: '正面特写', medium: '中景', wide: '全身远景', three_quarter: '侧面近景', reaction: '表情特写' };
@@ -67,7 +68,7 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     if (signal.aborted) return;
     analysisAbort?.abort();
     tabs.replaceChildren(); content.replaceChildren();
-    for (const [id, label] of [['analysis', '整书分析'], ['generate', '分镜'], ['refs', '人物与参考图'], ['config', '出图设置']]) {
+    for (const [id, label] of [['analysis', '整书分析'], ['generate', '分镜'], ['refs', '人物与参考图'], ['pages', '拼页与导出'], ['config', '出图设置']]) {
       const tab = button(tabs, label, async () => { await load(); active = id; render(); });
       tab.setAttribute('aria-pressed', String(active === id));
     }
@@ -75,6 +76,11 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     if (active === 'refs') renderRefs();
     if (active === 'config') renderConfig();
     if (active === 'analysis') { analysisAbort = new AbortController(); mountBookAnalysis({ area: content, bookId, signal: analysisAbort.signal }); }
+    if (active === 'pages') {
+      const controller = new AbortController(); analysisAbort = controller;
+      mountMangaPages({ area: content, bookId, signal: controller.signal }).catch(err => { if (!controller.signal.aborted) toast(err.message, 5000); });
+    }
+    jobsHead.hidden = jobsArea.hidden = active === 'pages' || active === 'analysis';
   }
   function renderGenerate() {
     if (!scenes.length || !forms.length) { content.appendChild(el('p', 'manga-note', '还没有场景或人物卡。请在“整书分析”中查看阅读进度或开始分析。')); return; }

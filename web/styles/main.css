@@ -651,6 +651,19 @@ a { color: var(--accent); }
 .manga-note { color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
 .manga-field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; }
 .manga-field[hidden] { display: none; }
+.page-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 12px; }
+.page-slot, .page-card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 12px 0; min-width: 0; }
+.page-slot h4, .page-card h4 { margin: 4px 0 12px; }
+.page-slot-image { display: block; width: 120px; max-height: 150px; object-fit: contain; margin: 8px auto; }
+.page-preview { display: block; width: 100%; max-width: 480px; height: auto; margin: 0 auto; background: white; }
+.page-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.page-candidate { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.page-candidate-image { width: 100%; max-height: 200px; object-fit: contain; }
+.page-select { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.6; margin: 8px 0; }
+.page-select input { flex: 0 0 auto; width: 22px; height: 22px; }
+.page-studio input, .page-studio textarea { max-width: 100%; }
+.page-studio button, .page-studio a { min-height: 40px; }
+@media (max-width: 440px) { .page-controls, .page-candidates { grid-template-columns: minmax(0, 1fr); } }
 .manga-field input, .manga-field select, .manga-field textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--surface); color: var(--text); font: inherit; }
 .manga-field input[type="checkbox"] { width: 24px; min-height: 24px; }
 .manga-field textarea { min-height: 80px; resize: vertical; }

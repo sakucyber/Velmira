@@ -68,6 +68,8 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=exc.status, content={"error": {"code": exc.code, "message": str(exc)}})
 
     app.include_router(manga_router)
+    from .api.manga_pages import router as manga_pages_router
+    app.include_router(manga_pages_router)
     from .api.text_ai import router as text_ai_router
     app.include_router(text_ai_router)
 

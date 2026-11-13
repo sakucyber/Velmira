@@ -495,3 +495,12 @@ data: {"revision": 7, "count": 3}
 - `GET/PATCH /api/image-ai/settings` 提供独立图像密钥；PATCH 只接收 `{base_url?,api_key?}`，Windows DPAPI 保存于 `image-api.json`，不与文本凭据共享。图像模型与地址在每本书的 `/manga/config` 配置。
 - `openai-images` 使用 OpenAI Images 兼容协议：参考图生成调用 `/images/generations`（JSON），带参考图的分镜调用 `/images/edits`（multipart PNG）。需要 `data[0].b64_json` 输出，返回 URL 的接口不在当前适配范围内。所选服务须支持相应模型、尺寸和编辑接口；`/probe` 只验证模型列表可访问，不能证明编辑能力。ComfyUI/MOSS 继续使用原有 HTTP API。
 - 图像 API 请求携带 Idempotency-Key，提交前持久化请求标识。服务中断/退出后无法确认同步请求结果时，续查不会再次提交；用户核对服务端记录后可显式换种子新建任务。实际图像仍须通过参考图及人脸检查，缺少校验或低分保留 needs_review。
+
+# 15. M4 拼页与漫画版
+
+- `GET /api/books/{book_id}/manga/page-panels` 返回本书分镜候选；只有 `done` 或 `approved` 且源快照仍有效的分镜可以成页。
+- `GET/POST /api/books/{book_id}/manga/pages` 列出或创建页面；页面设置包含七种模板、尺寸、白边、字体和 1–6 个分格。`PATCH /pages/{id}` 使用 `revision` 乐观锁，`PUT /pages/order` 要求整组页 ID 和版本一致。
+- `DELETE /pages/{id}?revision=N` 是软删除，`POST /pages/{id}/restore` 恢复；`GET /pages/{id}/image?revision=N` 只返回指定版本的不可变 PNG。
+- `POST /api/books/{book_id}/manga/pages/auto` 接收 1–120 个分镜 ID，按章节分组并保留勾选顺序，不跨章节合并。
+- `POST /api/books/{book_id}/manga/exports` 校验所有有效页并生成 CBZ，包含 `ComicInfo.xml` 与 `pages/0001.png` 等有序文件；`GET /exports/{id}/download` 下载。导出快照记录页 revision、图片哈希、章节和段落定位，后续编辑不会改变旧漫画版。
+- 书籍详情中的 `reading_links` 提供小说与漫画版的双向关系及页到章节／段落映射；漫画版继续使用普通书籍进度接口，和原小说进度分开保存。

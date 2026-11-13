@@ -167,6 +167,10 @@ docs/                   架构、计划、契约、截图
 2. ComfyUI / MOSS 出图 + 参考图注入 + 人脸校验已接入，真实 10 格中 8 格达到 0.55（[M3 报告](docs/M3-REPORT.md)）
 3. AI 阅读助手（docs/AI-READER-ASSISTANT.md）
 
+## M4 成页与 CBZ
+
+七种拼页模板、Pillow 中文排版、可编辑旁白／对白、revision 冲突保护、软删除恢复和 CBZ 导出已经接入“漫画生成 → 拼页与导出”。导出的漫画会加入书架，并可从小说阅读页和漫画阅读页互相跳转。验证记录见 [M4 报告](docs/M4-REPORT.md)。
+
 ## 文档与证据
 
 - docs/M0-PLAN.md · docs/M1-PLAN.md · docs/API-CONTRACT.md（v0.4）

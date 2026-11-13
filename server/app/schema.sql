@@ -301,3 +301,29 @@ CREATE TABLE IF NOT EXISTS panel_forms (
   source TEXT NOT NULL,
   flashback INTEGER NOT NULL DEFAULT 0
 );
+
+-- M4: editable pages point at immutable compositions; published editions never change.
+CREATE TABLE IF NOT EXISTS manga_pages (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  spec_json TEXT NOT NULL,
+  sources_json TEXT NOT NULL,
+  image_path TEXT NOT NULL,
+  image_hash TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_manga_pages ON manga_pages(book_id,deleted,position,id);
+CREATE TABLE IF NOT EXISTS manga_exports (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id),
+  fingerprint TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  archive_path TEXT NOT NULL,
+  comic_book_id TEXT NOT NULL REFERENCES books(id),
+  created_at INTEGER NOT NULL,
+  UNIQUE(book_id,fingerprint)
+);

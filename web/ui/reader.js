@@ -104,6 +104,8 @@ export async function mountReader({ bookId, params, debug }) {
     return;
   }
   state.book = bookData.book;
+  const comicLink = state.book.reading_links?.comic_book_id ? el('a', 'btn btn-tool', '漫画') : null;
+  if (comicLink) { comicLink.title = '切换到已导出的漫画'; dom.aiBtn.parentElement.appendChild(comicLink); }
   state.chapterCount = Math.max(1, state.book.chapter_count || 1);
   document.title = state.book.title + ' · Velmira';   // 契约 7.1：<书名> · Velmira
   dom.title.textContent = state.book.title;
@@ -384,6 +386,16 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   function updateProgressUI() {
+    if (comicLink) {
+      const links = state.book.reading_links;
+      // Match the latest source paragraph at or before the reading position.
+      let page = 0, best = null;
+      links.pages.forEach((p, idx) => {
+        if (p.chapter > state.chapter || (p.chapter === state.chapter && p.para > state.para)) return;
+        if (!best || p.chapter > best.chapter || (p.chapter === best.chapter && p.para > best.para)) { page = idx; best = p; }
+      });
+      comicLink.href = '/?book=' + encodeURIComponent(links.comic_book_id) + '&ch=' + page;
+    }
     const pct = clamp(state.percent, 0, 1);
     dom.progressFill.style.width = (pct * 100).toFixed(2) + '%';
     dom.progressTrack.setAttribute('aria-valuenow', String(Math.round(pct * 100)));

@@ -90,6 +90,8 @@ export async function mountComic(opts = {}) {
   const settingsBtn = el('button', 'comic-fit', '⚙');
   settingsBtn.type = 'button'; settingsBtn.title = '阅读设置'; settingsBtn.setAttribute('aria-label', '阅读设置');
   tools.append(jump, fitBtn, settingsBtn);
+  const sourceLink = book.reading_links?.source_book_id ? el('a', 'comic-fit', '小说') : null;
+  if (sourceLink) { sourceLink.title = '切换到对应小说情节'; tools.appendChild(sourceLink); }
   const top = el('header', 'comic-top');
   top.append(back, meta, tools);
 
@@ -228,6 +230,10 @@ export async function mountComic(opts = {}) {
 
   /* ================== 页面切换 ================== */
   function updateChrome() {
+    if (sourceLink) {
+      const links = book.reading_links, locator = links.pages[page] || { chapter: 0, para: 0 };
+      sourceLink.href = '/?book=' + encodeURIComponent(links.source_book_id) + '&ch=' + locator.chapter + '&para=' + locator.para;
+    }
     const label = '第 ' + (page + 1) + ' / ' + count + ' 页';
     countLabel.textContent = (page + 1) + ' / ' + count + ' 页';
     pageLabel.textContent = label;
