@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -48,12 +49,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	baseURL, stop, err := ensureBackend(root, backendPort())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	baseURL, stop, wait, err := startBackend(root, backendPort())
 	if err != nil {
 		showFatal(err)
 		return
 	}
-	mygo.App.OnQuit(stop)
+	defer stop()
+	mygo.App.OnQuit(func() { cancel(); stop() })
+	ready := make(chan error, 1)
+	go func() { ready <- wait(ctx) }()
 	// The desktop shell has no native menu; all user actions live in the web UI.
 	mygo.App.SetMenu(nil)
 
@@ -71,12 +77,38 @@ func main() {
 		win.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
 			e.PreventDefault()
 		})
-		if err := win.Page().LoadURL(baseURL + "/"); err != nil {
-			log.Printf("load %s: %v", baseURL, err)
-		}
-
-		if *flagScreenshot != "" {
-			go func() {
+		// WebView2 and the backend initialize in parallel. The same window remains
+		// responsive during startup and displays any error without opening another.
+		win.Page().LoadHTML(startupHTML, "")
+		go func() {
+			if err := <-ready; err != nil {
+				if ctx.Err() == nil {
+					win.Page().LoadHTML(fatalHTML(err), "")
+				}
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if err := win.Page().LoadURL(baseURL + "/"); err != nil {
+				win.Page().LoadHTML(fatalHTML(err), "")
+				return
+			}
+			if *flagScreenshot != "" {
+				// LoadURL queues navigation; capture only once the shelf is mounted.
+				captureCtx, captureCancel := context.WithTimeout(ctx, 20*time.Second)
+				defer captureCancel()
+				for captureCtx.Err() == nil {
+					value, _ := win.Page().EvalContext(captureCtx, `!!document.querySelector('#library-view:not([hidden])') && document.querySelector('#lib-skeleton')?.hidden`)
+					if value == true {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+				if captureCtx.Err() != nil {
+					mygo.App.Quit()
+					return
+				}
 				time.Sleep(*flagWait)
 				png, err := win.CapturePage()
 				if err != nil {
@@ -87,8 +119,8 @@ func main() {
 					log.Printf("screenshot: %s", *flagScreenshot)
 				}
 				mygo.App.Quit()
-			}()
-		}
+			}
+		}()
 	})
 
 	if err := mygo.App.Run(); err != nil {
@@ -137,11 +169,15 @@ func sidecarPath(root string) string {
 		fileName += ".exe"
 	}
 	oneFile := filepath.Join(root, "backend", fileName)
+	directory := filepath.Join(root, "backend", name, fileName)
+	if _, err := os.Stat(directory); err == nil {
+		return directory
+	}
+	// Directory-mode PyInstaller builds avoid extracting the backend on every launch.
 	if _, err := os.Stat(oneFile); err == nil {
 		return oneFile
 	}
-	// Directory-mode PyInstaller builds avoid extracting the backend on every launch.
-	return filepath.Join(root, "backend", name, fileName)
+	return directory
 }
 
 func backendPort() int {
@@ -156,9 +192,17 @@ func backendPort() int {
 	return 8765
 }
 
-func healthAt(port int) (health, bool) {
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/health", port))
+// Local probes must bypass proxies and promptly retry a port that is not yet open.
+var healthClient = &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{
+	DialContext: (&net.Dialer{Timeout: 100 * time.Millisecond}).DialContext,
+}}
+
+func healthAt(ctx context.Context, port int) (health, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/health", port), nil)
+	if err != nil {
+		return health{}, false
+	}
+	resp, err := healthClient.Do(req)
 	if err != nil {
 		return health{}, false
 	}
@@ -182,14 +226,14 @@ func freePort() int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func ensureBackend(root string, port int) (baseURL string, stop func(), err error) {
-	// Reuse a server that is already running (dev convenience).
-	if h, ok := healthAt(port); ok && h.Name == "Velmira" {
-		return fmt.Sprintf("http://127.0.0.1:%d", port), func() {}, nil
-	}
-	// Pick a free port when the preferred one is taken by something else.
+func startBackend(root string, port int) (baseURL string, stop func(), wait func(context.Context) error, err error) {
+	// A bind check avoids waiting for a failed TCP connection on every fresh launch.
 	listener, listenErr := net.Listen("tcp", net.JoinHostPort(*flagBind, strconv.Itoa(port)))
 	if listenErr != nil {
+		// Probe an occupied port long enough to reuse an existing local server.
+		if h, ok := healthAt(context.Background(), port); ok && h.Name == "Velmira" {
+			return fmt.Sprintf("http://127.0.0.1:%d", port), func() {}, func(context.Context) error { return nil }, nil
+		}
 		port = freePort()
 	} else {
 		listener.Close()
@@ -197,7 +241,7 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 
 	cmd, err := backendCommand(root, port)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	logPath := backendLogPath()
@@ -218,7 +262,7 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 		if logFile != nil {
 			logFile.Close()
 		}
-		return "", nil, fmt.Errorf("启动后台服务失败：%v（日志：%s）", err, logPath)
+		return "", nil, nil, fmt.Errorf("启动后台服务失败：%v（日志：%s）", err, logPath)
 	}
 
 	exited := make(chan error, 1)
@@ -236,21 +280,33 @@ func ensureBackend(root string, port int) (baseURL string, stop func(), err erro
 		})
 	}
 
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		if h, ok := healthAt(port); ok && h.OK && h.Name == "Velmira" {
-			return fmt.Sprintf("http://127.0.0.1:%d", port), stopFn, nil
+	wait = func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 150*time.Millisecond)
+			h, ok := healthAt(probeCtx, port)
+			probeCancel()
+			if ok && h.Name == "Velmira" {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				stopFn()
+				if ctx.Err() == context.Canceled {
+					return ctx.Err()
+				}
+				return fmt.Errorf("后台服务启动超时（60s），见日志：%s", logPath)
+			case werr := <-exited:
+				stopFn()
+				return fmt.Errorf("后台服务提前退出（%v），见日志：%s", werr, logPath)
+			case <-ticker.C:
+			}
 		}
-		select {
-		case werr := <-exited:
-			stopFn()
-			return "", nil, fmt.Errorf("后台服务提前退出（%v），见日志：%s", werr, logPath)
-		default:
-		}
-		time.Sleep(250 * time.Millisecond)
 	}
-	stopFn()
-	return "", nil, fmt.Errorf("后台服务启动超时（60s），见日志：%s", logPath)
+	return fmt.Sprintf("http://127.0.0.1:%d", port), stopFn, wait, nil
 }
 
 func backendCommand(root string, port int) (*exec.Cmd, error) {
@@ -308,7 +364,21 @@ func dataDir(root string) string {
 func showFatal(err error) {
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{Title: "Velmira", Width: 720, Height: 420})
-		html := fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><style>
+		win.Page().LoadHTML(fatalHTML(err), "")
+	})
+	if err := mygo.App.Run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+const startupHTML = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>
+html,body{height:100%;margin:0;background:#f6f3ec;color:#38332b;font:15px system-ui,"Microsoft YaHei",sans-serif}
+body{display:grid;place-content:center;text-align:center}h1{font-size:28px;letter-spacing:.04em;margin:0 0 14px}p{color:#796d5c}
+@media(prefers-color-scheme:dark){html,body{background:#171614;color:#efe7d8}p{color:#b9ae9d}}
+</style><title>Velmira</title><h1>Velmira</h1><p role="status">正在打开书架…</p></html>`
+
+func fatalHTML(err error) string {
+	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><style>
 		html,body{height:100%%;margin:0;background:#171614;color:#efe7d8;font:15px/1.7 system-ui,"Microsoft YaHei",sans-serif}
 		main{max-width:600px;margin:0 auto;padding:56px 32px}h1{font-size:26px;margin:0 0 6px}
 		p{color:#b9ae9d}code{background:#26302b;padding:2px 6px;border-radius:4px;color:#d8c7a8}
@@ -316,11 +386,6 @@ func showFatal(err error) {
 		<p>%s</p>
 		<p>请确认桌面分发包已完整解压、内置 backend 文件夹存在，且后台端口可用。源码运行需要 Python 3.11+。启动日志在 <code>%%LOCALAPPDATA%%\Velmira\backend.log</code>。</p>
 		</main></body></html>`, htmlEscape(err.Error()))
-		win.Page().LoadHTML(html, "")
-	})
-	if err := mygo.App.Run(); err != nil {
-		log.Fatal(err)
-	}
 }
 
 func htmlEscape(s string) string {

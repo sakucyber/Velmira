@@ -6,7 +6,7 @@
 
 Velmira 的界面是零依赖原生 ESM，后端是 Python（FastAPI + SQLite）。桌面端把两者装进一个窗口：
 
-- 启动时自动在空闲端口拉起内置后端（源码开发也可用 `python -m uvicorn server.app.main:app`），等 `/api/health` 就绪后把窗口导航过去；
+- 启动时并行初始化 WebView2 和内置后端，窗口先显示“正在打开书架”，`/api/health` 就绪后在同一窗口进入书架；启动中关闭也会结束自己启动的后端。源码开发也可用 `python -m uvicorn server.app.main:app`；
 - 退出时杀掉后端进程树，不留孤儿服务；
 - 已有开发服务（8765）在跑时直接复用，方便调试；
 - 窗口 1280×860（最小 900×600），系统标题栏；桌面壳不显示原生菜单。
@@ -57,6 +57,16 @@ desktop\Velmira.exe -screenshot docs\screenshots\desktop-app.png -wait 6s
 环境变量：`VELMIRA_ROOT`、`VELMIRA_PORT`、`VELMIRA_PYTHON`、`DATA_DIR`（传给后端）。
 
 后端日志：`%LOCALAPPDATA%\Velmira\backend.log`。
+
+隔离启动测试（使用临时书库和 WebView 配置，不读取实际书库）：
+
+~~~powershell
+node scripts/measure-startup.mjs --exe desktop/Velmira.exe
+node scripts/measure-startup.mjs --scenario early-close
+node scripts/measure-startup.mjs --scenario failure
+~~~
+
+输出进程启动至 WebView 可连接、书架可操作的毫秒数。首次磁盘读取、杀毒扫描和已有书库大小都会影响结果；比较时使用相同机器、后端和测试条件。异常场景使用临时假后端验证报错和退出清理。
 
 ## 开发
 

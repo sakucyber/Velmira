@@ -61,7 +61,7 @@ desktop\Velmira.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-bundle.ps1
 ~~~
 
-- 启动时自动在空闲端口拉起后端，健康检查通过后导航到界面；退出时结束后端进程树；
+- 启动时并行初始化窗口和本地后端，健康检查通过后进入书架；退出时结束自己启动的后端进程树；
 - 已有开发服务（8765）在跑时直接复用，方便调试；
 - 1280×860 窗口、系统标题栏与窗口控件；桌面壳不显示原生菜单；
 - `-screenshot` 参数可截图窗口后退出，用于验收与 CI。

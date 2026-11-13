@@ -1,10 +1,87 @@
 package main
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 )
+
+func TestDirectorySidecarWinsOverLegacySingleFile(t *testing.T) {
+	root := t.TempDir()
+	directory := sidecarPath(root)
+	if err := os.MkdirAll(filepath.Dir(directory), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, "backend", filepath.Base(directory))
+	if err := os.WriteFile(legacy, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := sidecarPath(root); got != directory {
+		t.Fatalf("legacy extracting backend selected: %s", got)
+	}
+	if err := os.Remove(directory); err != nil {
+		t.Fatal(err)
+	}
+	if got := sidecarPath(root); got != legacy {
+		t.Fatalf("legacy fallback unavailable: %s", got)
+	}
+}
+
+func TestReuseBackendDoesNotStopExternalServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/health" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"ok":true,"name":"Velmira"}`))
+	}))
+	defer server.Close()
+	_, portText, _ := net.SplitHostPort(server.Listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	url, stop, wait, err := startBackend(t.TempDir(), port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url != server.URL {
+		t.Fatalf("external server not reused: %s", url)
+	}
+	if err := wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if _, ok := healthAt(context.Background(), port); !ok {
+		t.Fatal("external service was stopped")
+	}
+}
+
+func TestHealthProbeIsBoundedAndCancellable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer server.Close()
+	_, portText, _ := net.SplitHostPort(server.Listener.Addr().String())
+	port, _ := strconv.Atoi(portText)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, ok := healthAt(ctx, port); ok {
+		t.Fatal("cancelled probe succeeded")
+	}
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer probeCancel()
+	if _, ok := healthAt(probeCtx, port); ok {
+		t.Fatal("unresponsive service succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("probe stalled startup: %v", elapsed)
+	}
+}
 
 func TestBackendCommandPrefersSidecar(t *testing.T) {
 	root := t.TempDir()

@@ -23,8 +23,7 @@ log = logging.getLogger("velmira.server")
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # 幂等建库：冷启动（无 data/）也能直接服务
-    init_db()
+    # create_app() 已完成建库；这里避免启动阶段再次读 schema、做迁移事务。
     from .manga import queue, automatic
     from .ai import book_analysis
     queue.start()
