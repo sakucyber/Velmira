@@ -96,7 +96,7 @@ jobs:
         run: ./scripts/build-android.ps1
 
       - name: Upload desktop and Android artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: velmira-v0.4.0-windows-android
           path: |
