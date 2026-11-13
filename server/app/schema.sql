@@ -195,6 +195,16 @@ CREATE TABLE IF NOT EXISTS scenes (
 );
 CREATE INDEX IF NOT EXISTS idx_scenes_book ON scenes(book_id, chapter_id, segment_id);
 
+-- Text-model director plans contain summaries/prompts, never API credentials.
+CREATE TABLE IF NOT EXISTS manga_text_plans (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  cache_key TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(book_id, cache_key)
+);
+
 -- M3: versioned identities, reviewed references, reproducible single-panel jobs.
 CREATE TABLE IF NOT EXISTS render_configs (
   book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,

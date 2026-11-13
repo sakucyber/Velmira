@@ -254,7 +254,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     manga.type = 'button';
     manga.addEventListener('click', openManga);
     area.appendChild(manga);
-    area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个 scene') : '尚未生成 scene；默认使用离线 Mock provider'));
+    area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个场景') : '尚未生成场景；可在漫画生成的出图设置中配置文本 AI，未配置时使用离线 Mock'));
     for (const scene of scenes) {
       const card = el('article', 'ai-scene-card');
       card.appendChild(el('div', 'ai-scene-title', '第 ' + ((scene.chapter_id | 0) + 1) + ' 章 · ' + ((scene.plan && scene.plan.summary) || '未命名场景')));

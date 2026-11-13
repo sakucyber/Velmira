@@ -69,6 +69,12 @@ def valid_snapshot(conn, job, snap):
         scene = conn.execute("SELECT plan_json,status FROM scenes WHERE id=?", (job["scene_id"],)).fetchone()
         if not scene or scene["status"] == "needs_review" or digest(json.loads(scene[0])) != snap["scene_hash"]:
             raise MangaError("场景已改变", "render_stale", 409)
+    if snap.get("text_plan"):
+        from ..ai.director import prepare_material
+        payload = {"scene_id": job["scene_id"], "form_id": job["form_id"], "para": snap["para"],
+                   "shot": snap["shot"], "action": snap["action"], "flashback": snap["flashback"]}
+        if digest(prepare_material(conn, job["book_id"], payload, snap["config"])) != snap["text_plan"]["source_hash"]:
+            raise MangaError("用于总结的章节上下文已变化", "render_stale", 409)
 
 
 def process(job_id):

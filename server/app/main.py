@@ -65,6 +65,8 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=exc.status, content={"error": {"code": exc.code, "message": str(exc)}})
 
     app.include_router(manga_router)
+    from .api.text_ai import router as text_ai_router
+    app.include_router(text_ai_router)
 
     # 契约 8.2：v0.3 实时书库 SSE；模块异常不得拖垮 app
     try:

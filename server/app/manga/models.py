@@ -98,15 +98,19 @@ def resolve_form(forms, chapter, para, explicit=None, flashback=False):
     return active
 
 
-def build_prompt(config, identity, scene, shot, action, reference=False):
+def build_prompt(config, identity, scene, shot, action, reference=False, visual_prompt=None):
     if shot not in SHOTS:
         raise MangaError("不支持的镜头")
     sections = [config["style"], identity]
     if reference:
         sections.append("same character and face as reference, new pose and shot, preserve identity")
-    sections.extend([str(scene.get("location", "")), str(scene.get("time_of_day", "")),
-                     str(scene.get("summary", "")), SHOTS[shot], action,
-                     ", ".join(map(str, scene.get("key_props", []))), "single comic panel, no text, solo, exactly one person, no other people in background"])
+    if visual_prompt:
+        sections.extend([visual_prompt, SHOTS[shot]])
+    else:
+        sections.extend([str(scene.get("location", "")), str(scene.get("time_of_day", "")),
+                         str(scene.get("summary", "")), SHOTS[shot], action,
+                         ", ".join(map(str, scene.get("key_props", [])))])
+    sections.append("single comic panel, no text, solo, exactly one person, no other people in background")
     prompt = ". ".join(s.strip() for s in sections if s and s.strip())
     if len(prompt) > 4000:
         raise MangaError("提示词过长，请精简场景或风格")

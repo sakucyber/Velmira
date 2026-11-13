@@ -132,6 +132,10 @@ async def extract_ai(book_id: str, payload: dict | None = Body(default=None)):
             return _error(404, "book_not_found", f"书籍不存在: {book_id}")
         config_row = _config_row(conn, book_id)
         config = _config_public(config_row)
+        from ..ai.settings import load_settings
+        shared = load_settings()
+        if config["provider"] in {"mock", "offline"} and shared["enabled"]:
+            config.update(provider="openai-compatible", base_url=shared["base_url"], model=shared["model"], api_key_env="", local_settings=True)
         requested_provider = payload.get("provider")
         provider_name = str(requested_provider or config["provider"] or "mock").lower()
         if not config["enabled"] and not requested_provider:

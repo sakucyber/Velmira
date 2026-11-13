@@ -6,7 +6,7 @@ const APPEARANCE = { age: '年龄', gender: '性别', hair_style: '发型', hair
 
 export async function mountManga({ area, bookId, signal }) {
   const base = '/api/books/' + encodeURIComponent(bookId);
-  let forms = [], scenes = [], config, selected = '', timer, busy = false;
+  let forms = [], scenes = [], config, textSettings, selected = '', timer, busy = false;
   const root = el('div', 'manga-studio');
   area.replaceChildren(root);
   const note = el('p', 'manga-note', '每格使用一个人物的一张已确认参考图。先在 AI 面板分析片段并冻结人物身份。');
@@ -48,8 +48,8 @@ export async function mountManga({ area, bookId, signal }) {
     const img = el('img'); img.src = url; img.alt = alt; img.loading = 'lazy'; link.appendChild(img); parent.appendChild(link);
   }
   async function load() {
-    const [f, c, sc] = await Promise.all([apiGet(base + '/manga/forms', signal), apiGet(base + '/manga/config', signal), apiGet(base + '/ai/scenes', signal)]);
-    forms = f.forms; config = c.config; scenes = sc.scenes;
+    const [f, c, sc, text] = await Promise.all([apiGet(base + '/manga/forms', signal), apiGet(base + '/manga/config', signal), apiGet(base + '/ai/scenes', signal), apiGet('/api/ai/settings', signal)]);
+    forms = f.forms; config = c.config; scenes = sc.scenes; textSettings = text.settings;
     if (!forms.some(f => f.id === selected)) selected = forms[0]?.id || '';
   }
   function render() {
@@ -71,18 +71,54 @@ export async function mountManga({ area, bookId, signal }) {
     const update = () => {
       selected = form.value;
       const f = forms.find(f => f.id === selected), sc = scenes.find(s => s.id === scene.value);
-      hint.textContent = !f?.locked ? '人物身份尚未冻结' : !f.refs.some(r => r.accepted && r.form_version === f.version) ? '请先在“人物与参考图”中确认一张参考图' : sc?.plan.character_ids?.length > 1 ? '此场景有多个人物，请先拆成单人场景' : '已准备好。生成后会与所选参考图比较人物相似度。';
+      hint.textContent = !f?.locked ? '人物身份尚未冻结' : !f.refs.some(r => r.accepted && r.form_version === f.version) ? '请先在“人物与参考图”中确认一张参考图' : sc?.plan.character_ids?.length > 1 ? 'AI 会聚焦所选人物写成单人镜头；直接生成前请先拆分场景。' : '已准备好。生成后会与所选参考图比较人物相似度。';
     };
     scene.addEventListener('change', update); form.addEventListener('change', update); update();
     const shot = select(content, '镜头', Object.entries(SHOTS), 'medium');
     const action = field(content, '动作与表情', '', 'textarea'); action.maxLength = 1200;
     const para = field(content, '场景内段落（可选，从 1 开始）', '', 'number'); para.min = '1'; para.step = '1';
     const flash = field(content, '回忆 / 闪回（允许使用较早形态）', '', 'checkbox');
-    button(content, '加入生成队列', async () => {
-      const payload = { scene_id: scene.value, form_id: form.value, shot: shot.value, action: action.value, flashback: flash.checked, request_id: crypto.randomUUID() };
+    let plan = null;
+    const planArea = el('div', 'manga-plan');
+    const payloadFor = () => {
+      const payload = { scene_id: scene.value, form_id: form.value, shot: shot.value, action: action.value, flashback: flash.checked };
       if (para.value) payload.para = Number(para.value) - 1;
-      await apiPost(base + '/manga/jobs', payload); toast('已加入生成队列'); await refreshJobs();
+      return payload;
+    };
+    const invalidate = () => { plan = null; planArea.replaceChildren(); };
+    for (const input of [scene, form, shot, action, para, flash]) input.addEventListener('input', invalidate);
+    content.appendChild(el('p', 'manga-note', textSettings.enabled ? ('文本 AI：' + textSettings.model + ' · 当前片段、本章上下文及上一章末尾 → 总结 → 英文提示词 → MOSS') : '请先在“出图设置”中启用文本 AI，即可根据上下文总结后自动出图。'));
+    const prepare = async () => {
+      const payload = payloadFor();
+      const f = forms.find(f => f.id === form.value);
+      if (!f?.locked || !f.refs.some(r => r.accepted && r.form_version === f.version)) throw new Error('请先冻结人物身份并确认参考图');
+      planArea.replaceChildren(el('p', 'manga-note', '正在总结上下文并编写提示词…'));
+      try {
+        const result = await apiPost(base + '/manga/plan', payload);
+        if (signal.aborted) return null;
+        if (JSON.stringify(payload) !== JSON.stringify(payloadFor())) throw new Error('镜头选择已变化，请重新分析');
+        plan = result.plan;
+        planArea.replaceChildren();
+        planArea.appendChild(el('h4', null, '上下文总结'));
+        planArea.appendChild(el('p', 'manga-note', plan.summary.summary));
+        planArea.appendChild(el('h4', null, '生图提示词'));
+        planArea.appendChild(el('p', 'manga-note', plan.visual_prompt));
+        return payload;
+      } catch (err) { plan = null; planArea.replaceChildren(el('p', 'manga-note', err.message || '文本 AI 分析失败')); throw err; }
+    };
+    button(content, 'AI 总结并生成漫画', async () => {
+      const payload = await prepare();
+      if (!payload || signal.aborted) return;
+      await apiPost(base + '/manga/jobs', { ...payload, plan_id: plan.id, request_id: crypto.randomUUID() });
+      toast('总结与提示词已完成，漫画已加入队列'); await refreshJobs();
     }, 'btn-primary');
+    button(content, '仅生成总结与提示词', prepare);
+    button(content, '加入生成队列', async () => {
+      const payload = { ...payloadFor(), request_id: crypto.randomUUID() };
+      if (plan) payload.plan_id = plan.id;
+      await apiPost(base + '/manga/jobs', payload); toast('已加入生成队列'); await refreshJobs();
+    });
+    content.appendChild(planArea);
   }
   function renderRefs() {
     if (!forms.length) { content.appendChild(el('p', 'manga-note', '尚无人物卡，请先在 AI 面板分析片段。')); return; }
@@ -143,6 +179,36 @@ export async function mountManga({ area, bookId, signal }) {
     });
   }
   function renderConfig() {
+    const textPanel = el('details', 'manga-editor'); textPanel.appendChild(el('summary', null, '文本 AI：上下文总结与提示词'));
+    textPanel.open = true; content.appendChild(textPanel);
+    textPanel.appendChild(el('p', 'manga-note', '将当前片段、本章上下文和上一章末尾发送到下方 API。图片由本机 ComfyUI 生成。设置适用于本机所有书籍。'));
+    const enabled = field(textPanel, '启用上下文 AI', '', 'checkbox'); enabled.checked = textSettings.enabled;
+    const address = field(textPanel, '文本 API 地址', textSettings.base_url);
+    const model = field(textPanel, '文本模型', textSettings.model);
+    const capabilities = el('p', 'manga-note'); textPanel.appendChild(capabilities);
+    const describeModel = () => {
+      capabilities.textContent = model.value.trim().toLowerCase().split('/').pop() === 'gpt-oss-120b'
+        ? 'gpt-oss-120b：128K 上下文，支持工具调用，仅接收文本。本流程发送小说文字；参考图由 MOSS 使用。'
+        : '本流程使用文本模型总结上下文并编写提示词；参考图交给图像后端。';
+    };
+    model.addEventListener('input', describeModel); describeModel();
+    const key = field(textPanel, 'API 密钥（留空保留已保存的密钥）', '', 'password'); key.autocomplete = 'off';
+    const feedbackText = el('p', 'manga-note', textSettings.key_configured ? '已保存本机密钥' : '尚未保存密钥'); textPanel.appendChild(feedbackText);
+    const saveText = async () => {
+      const result = await apiPatch('/api/ai/settings', { base_url: address.value, model: model.value, enabled: enabled.checked, api_key: key.value });
+      textSettings = result.settings; key.value = ''; feedbackText.textContent = '文本 AI 设置已保存';
+    };
+    button(textPanel, '保存文本 AI 设置', saveText);
+    button(textPanel, '读取模型列表', async () => {
+      await saveText();
+      const result = await apiGet('/api/ai/models', signal);
+      const list = el('datalist'); list.id = 'manga-text-models';
+      for (const id of result.models) { const option = el('option'); option.value = id; list.appendChild(option); }
+      textPanel.querySelector('datalist')?.remove(); textPanel.appendChild(list); model.setAttribute('list', list.id);
+      feedbackText.textContent = '已读取 ' + result.models.length + ' 个模型，点击模型输入框选择或输入名称';
+    });
+    button(textPanel, '检测文本 AI', async () => { await saveText(); const result = await apiPost('/api/ai/probe', {}); feedbackText.textContent = result.model + ' 连接正常'; });
+    content.appendChild(el('h3', 'ai-section-title', '图像生成设置'));
     const provider = select(content, '图像后端', [['comfyui', 'ComfyUI / MOSS'], ['mock', '占位图（仅验证流程）']], config.provider);
     const inputs = {};
     const labels = { base_url: '服务地址', unet: '绘图模型', clip: '9B 文本编码器', vae: '图像解码模型', edit_lora: '参考图编辑模型', width: '宽度', height: '高度', steps: '采样步数', cfg: '提示词强度', sampler: '采样器', scheduler: '调度器', seed: '基础种子', face_threshold: '相似度阈值', max_attempts: '最多生成次数', timeout: '等待超时（秒）', style: '画风', negative: '排除内容', face_python: '人脸校验 Python 路径（可选）', face_models: '人脸模型目录（可选）' };
@@ -187,7 +253,14 @@ export async function mountManga({ area, bookId, signal }) {
         button(actions, label, async () => { await apiPost(base + '/manga/jobs/' + job.id + '/' + action, {}); await refreshJobs(); });
       }
       const detail = el('details', 'manga-snapshot'); detail.appendChild(el('summary', null, '提示词、种子与生成记录'));
-      detail.appendChild(el('pre', null, JSON.stringify({ seed: job.snapshot.seed, prompt: job.snapshot.prompt, config_hash: job.config_hash, attempts: job.history.map(h => ({ seed: h.seed, result: h.result, prompt_id: h.prompt_id, error: h.error })) }, null, 2)));
+      if (job.snapshot.text_plan) {
+        const p = job.snapshot.text_plan;
+        detail.appendChild(el('h4', null, '上下文总结 · ' + p.provider.model));
+        detail.appendChild(el('p', 'manga-note', p.summary.summary));
+        detail.appendChild(el('h4', null, '模型生成的提示词'));
+        detail.appendChild(el('p', 'manga-note', p.visual_prompt));
+      }
+      detail.appendChild(el('pre', null, JSON.stringify({ seed: job.snapshot.seed, prompt: job.snapshot.prompt, text_plan: job.snapshot.text_plan, config_hash: job.config_hash, attempts: job.history.map(h => ({ seed: h.seed, result: h.result, prompt_id: h.prompt_id, error: h.error })) }, null, 2)));
       card.appendChild(detail);
     }
     if (!data.jobs.length) jobsArea.appendChild(el('p', 'manga-note', '尚无生成任务'));

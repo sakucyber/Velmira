@@ -242,6 +242,8 @@ def job_action(book_id: str, job_id: str, action: str, payload: dict = Body(defa
             request = {"kind": row["kind"], "form_id": row["form_id"], "shot": snap["shot"], "action": snap["action"], "flashback": snap["flashback"], "seed": payload.get("seed", (snap["seed"] + 7919) % (2**53))}
             if row["scene_id"]:
                 request.update(scene_id=row["scene_id"], para=snap["para"])
+            if snap.get("text_plan"):
+                request["plan_id"] = snap["text_plan"]["id"]
             return {"job": s.public_job(conn, s.enqueue(conn, book_id, request))}
         elif action == "reference":
             if row["status"] not in {"done", "needs_review", "approved"} or not row["image_path"]:

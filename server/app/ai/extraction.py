@@ -22,8 +22,9 @@ from .prompts import PROMPT_VERSION, SCENE_SYSTEM, build_scene_user
 from .providers import TextProvider
 
 
-def input_hash(segment_text: str, prompt_version: int) -> str:
-    return hashlib.sha256(f"{segment_text}\n\0prompt:{int(prompt_version)}".encode("utf-8")).hexdigest()
+def input_hash(segment_text: str, prompt_version: int, provider_config=None) -> str:
+    fingerprint = stable_json(provider_config) if provider_config else ""
+    return hashlib.sha256(f"{segment_text}\n\0prompt:{int(prompt_version)}\n{fingerprint}".encode("utf-8")).hexdigest()
 
 
 def character_id(book_id: str, name: str) -> str:
@@ -162,7 +163,7 @@ async def extract_segments(
     for segment in segments:
         segment_id = str(segment["id"])
         source_text = str(segment.get("text") or "")
-        digest = input_hash(source_text, prompt_version)
+        digest = input_hash(source_text, prompt_version, config_snapshot)
         cached = conn.execute(
             "SELECT result_json,status,error FROM ai_extractions WHERE book_id=? AND segment_id=? AND prompt_version=? AND input_hash=?",
             (book_id, segment_id, prompt_version, digest),

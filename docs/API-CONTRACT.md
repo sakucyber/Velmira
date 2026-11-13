@@ -441,7 +441,7 @@ data: {"revision": 7, "count": 3}
 - `POST /api/books/{book_id}/ai/extract` body `{segment_ids?: string[], provider?: string, force?: boolean, prompt_version?: number}` → scene/人物卡抽取统计。省略 `segment_ids` 时只处理 `selected=1` 的候选片段；默认 Mock 离线可运行。
 - `GET /api/books/{book_id}/ai/scenes`、`GET /api/books/{book_id}/ai/characters` → 结构化 scene 与人物卡；scene 只包含 `summary/location/time_of_day/characters/key_props/drawable/reason/continuity`。
 - `GET/PATCH /api/books/{book_id}/ai/characters/{id}` → 人工查看/编辑；`POST .../{id}/freeze` 固定确定性英文 `identity_block` 并保存 `identity_hash`；`POST .../{id}/unfreeze` 必须 `confirm=true`，升版本并保留旧身份快照。
-- 自动抽取幂等键为 `(book_id, segment_id, prompt_version, sha256(segment_text + prompt_version))`；provider 输出非法时只将该片段标为 `needs_review`，不会中断整批。
+- 自动抽取幂等键包含书籍、片段、提示词版本以及正文和 provider 配置的哈希；切换模型后重新抽取。provider 输出非法时只将该片段标为 `needs_review`，不会中断整批。
 - 人物卡视觉字段必须有原文 `evidence[{field,value,quote,ch}]`；冻结后自动流程不覆盖 identity 字段，只能追加证据/变体。
 
 # 11. 书架管理与阅读设置增量
@@ -464,9 +464,20 @@ data: {"revision": 7, "count": 3}
 - `GET /forms`：本书人物形态，含版本、冻结身份及 `refs[]`。基础形态从 M2 人物卡同步；修改基础身份沿用 M2 编辑/解冻/冻结接口。
 - `POST /forms`：`{character_id,form_key,label,card,start_ch?,start_para?,reversible?}` 新增形态；生效锚点为从 0 开始的章节、段落，重复锚点拒绝。`PATCH /forms/{id}` 编辑未冻结的派生形态，`POST /forms/{id}/actions/freeze|unfreeze` 冻结/解冻（解冻须 `confirm=true`，升版本并标旧结果过期）。
 - `POST /forms/{id}/refs`：原始图片字节，最大 16 MB，转换为本地 PNG，默认未确认。`PATCH /refs/{id}` `{accepted:boolean}` 人工确认/撤销；卡版本不一致时拒绝确认，撤销使使用该参考图的任务过期。
-- `POST /jobs`：`{kind?:panel|reference,form_id?,character_id?,scene_id?,shot?,action?,seed?,flashback?,para?,request_id?}`，201 返回 `{job}`。单人格必须属于所选 M2 场景，身份须冻结，参考图须已确认且版本一致。多人场景拒绝并要求拆格。显式旧形态须标记闪回，未生效形态始终拒绝。`request_id` 为书内幂等键，重复键搭配不同快照返回 409。
+- `POST /jobs`：`{kind?:panel|reference,form_id?,character_id?,scene_id?,shot?,action?,seed?,flashback?,para?,request_id?,plan_id?}`，201 返回 `{job}`。单人格必须属于所选 M2 场景，身份须冻结，参考图须已确认且版本一致。多人场景直接生成时拒绝；提供有效 `plan_id` 时使用总结聚焦所选人物的单人镜头。显式旧形态须标记闪回，未生效形态始终拒绝。`request_id` 为书内幂等键，重复键搭配不同快照返回 409。
 - `GET /jobs?limit=30` 和 `GET /jobs/{id}`：返回配置快照、prompt、config hash、每次尝试的 seed/workflow/prompt id/score/图片 URL。
 - `POST /jobs/{id}/cancel|retry|reroll|approve|reference`：取消、续查失败任务、换种子新建任务、人工确认分镜、存为参考图候选。`reroll` 可传 `{seed}`；`reference` 创建的候选仍须确认。
 - `GET /assets/{id}`：本书内图片。拒绝跨书访问，不接受任意文件路径。
 
 任务状态：`queued → running → done|needs_review|error|stale|cancelled`。仅单人脸测量分数达到阈值才标 `done`；无人脸、多人脸或校验器不可用都进入 `needs_review`，人工确认后为独立状态 `approved`，不虚构分数。参考图候选始终需要人工确认。进程重启将 `running` 恢复入队，有 prompt id 时续查原任务；ComfyUI 提交前保存 UUID，避免超时后无记录地重复提交。部署使用一个后端进程和一个串行生成队列。
+
+# 13. 上下文总结与提示词
+
+- `GET /api/ai/settings` 返回 `{settings:{base_url,model,enabled,key_configured}}`，不返回密钥。`PATCH /api/ai/settings` 接收 `{base_url?,model?,enabled?,api_key?}`；空密钥保留旧值。设置位于本机数据目录 `text-api.json`，Windows 使用当前用户 DPAPI 加密凭据，其他平台使用权限为 0600 的本地文件。远端地址只允许无凭据/查询参数的 HTTPS，本机可用 HTTP。已有密钥不会跟随 HTTP 重定向，也不会在配置并发切换后发送到旧地址。
+- `GET /api/ai/models` 从已保存的地址读取模型名称；`POST /api/ai/probe` 发起小型 JSON 完成请求，返回 `{ok:true,model}`。
+- 默认文本模型 `gpt-oss-120b`，128K 上下文，只发送文字。请求按 UTF-8 字节数保守估算 token 上界，预留 3000 输出 token 和 1024 消息开销；这是保守预算，不是精确 tokenizer 计数。当前漫画上下文仍按下面的局部范围截取。模型具备工具调用能力，本流程由应用串联两阶段请求和 ComfyUI 队列，不向模型开放额外工具。
+- `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。先读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），再调用文本模型生成结构化中文总结和英文单格提示词。不会读取后续章节，也不把参考图发给文本模型。
+- 总结字段为 `summary/location/time_of_day/moment/visible_action/emotion/key_props/continuity/uncertainties`。模型输出须通过 JSON、类型和长度校验；提示词夹带中文时最多纠正一次，失败返回 502，不提交出图任务。
+- `plan` 保存来源哈希、范围字符数、模型标识、总结和提示词；缓存键包括来源、地址、模型及方案版本。场景/人物/镜头/上下文在分析期间改变，或旧方案被用于新选择时，返回 409 `text_plan_stale`。
+- 有效 `plan_id` 的出图任务在快照中保存 `text_plan`，将英文提示词与冻结身份、参考图约束一起交给 MOSS。参考图确认、人物版本、生效段落和人脸阈值检查继续适用；执行前和完成时重新验证源上下文，换种子保留总结方案。
+- 本机共享文本 AI 启用后，仍使用默认 Mock 配置的 M2 书籍分析会使用共享 API；显式选择 provider 的请求继续遵循其选择。

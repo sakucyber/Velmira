@@ -12,6 +12,33 @@ from typing import Any, Protocol
 
 from .models import CARD_FIELDS
 
+GPT_OSS_CONTEXT_TOKENS = 128000
+MAX_OUTPUT_TOKENS = 3000
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def request_json(url, *, api_key="", body=None):
+    request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None)
+    request.add_header("Content-Type", "application/json")
+    request.add_header("User-Agent", "Velmira/0.4")
+    if api_key:
+        request.add_header("Authorization", "Bearer " + api_key)
+    try:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=120) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise RuntimeError("文本 API 返回内容过大")
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # Do not persist arbitrary gateway error bodies, which may echo credentials.
+        raise RuntimeError(f"文本 API 请求失败（HTTP {exc.code}）") from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise RuntimeError("文本 API 连接失败或返回格式无效，请检查连接、模型和密钥") from None
+
 
 class TextProvider(Protocol):
     async def complete(self, *, system: str, user: str, schema: dict | None = None, temperature: float = 0.2) -> dict | str:
@@ -116,11 +143,20 @@ class OpenAICompatProvider:
     model: str
     api_key_env: str = ""
     name: str = "openai-compatible"
+    local_settings: bool = False
 
     async def complete(self, *, system: str, user: str, schema: dict | None = None, temperature: float = 0.2) -> dict | str:
         return await asyncio.to_thread(self._complete_sync, system, user, schema, temperature)
 
     def _complete_sync(self, system: str, user: str, schema: dict | None, temperature: float) -> dict | str:
+        if not isinstance(system, str) or not isinstance(user, str):
+            raise ValueError("文本模型仅接受文字输入")
+        # UTF-8 byte count is a conservative upper bound for this byte-level tokenizer.
+        # Reserve output and message framing without requiring tokenizer weights locally.
+        if self.model.lower().split("/")[-1] == "gpt-oss-120b":
+            input_bound = len(system.encode("utf-8")) + len(user.encode("utf-8")) + 1024
+            if input_bound + MAX_OUTPUT_TOKENS > GPT_OSS_CONTEXT_TOKENS:
+                raise ValueError("文本上下文超过 gpt-oss-120b 的保守 128K 预算，请缩小片段范围")
         url = self.base_url.rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
@@ -128,19 +164,16 @@ class OpenAICompatProvider:
             "model": self.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "temperature": max(0.0, min(2.0, float(temperature))),
+            "max_tokens": MAX_OUTPUT_TOKENS,
         }
         if schema:
             body["response_format"] = {"type": "json_object"}
-        request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), method="POST")
-        request.add_header("Content-Type", "application/json")
-        api_key = os.environ.get(self.api_key_env, "") if self.api_key_env else ""
-        if api_key:
-            request.add_header("Authorization", f"Bearer {api_key}")
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError(f"文本 provider 请求失败：{exc}") from exc
+        if self.local_settings:
+            from .settings import api_key_for
+            key = api_key_for(self.base_url)
+        else:
+            key = os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+        payload = request_json(url, api_key=key, body=body)
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -163,7 +196,7 @@ def make_provider(config: dict[str, Any], requested: str | None = None) -> TextP
         model = str(config.get("model") or "").strip()
         if not base_url or not model:
             raise ValueError("openai-compatible provider 需要 base_url 和 model")
-        return OpenAICompatProvider(base_url=base_url, model=model, api_key_env=str(config.get("api_key_env") or ""))
+        return OpenAICompatProvider(base_url=base_url, model=model, api_key_env=str(config.get("api_key_env") or ""), local_settings=bool(config.get("local_settings")))
     raise ValueError(f"不支持的文本 provider: {provider}")
 
 

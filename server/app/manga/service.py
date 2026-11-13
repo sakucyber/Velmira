@@ -97,12 +97,12 @@ def public_job(conn, row):
 
 
 def enqueue(conn, book_id, payload):
-    allowed = {"kind", "form_id", "character_id", "scene_id", "shot", "action", "seed", "flashback", "request_id", "para"}
+    allowed = {"kind", "form_id", "character_id", "scene_id", "shot", "action", "seed", "flashback", "request_id", "para", "plan_id"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise MangaError("出图请求包含未知字段")
     cfg = validate_config({}, configuration(conn, book_id))
     sync_base(conn, book_id)
-    for key in ("form_id", "character_id", "scene_id"):
+    for key in ("form_id", "character_id", "scene_id", "plan_id"):
         if key in payload and (not isinstance(payload[key], str) or len(payload[key]) > 200):
             raise MangaError(key + " 须为字符串")
     kind = payload.get("kind", "panel")
@@ -126,7 +126,7 @@ def enqueue(conn, book_id, payload):
         if scene_row["status"] == "needs_review":
             raise MangaError("该场景须先复核", "scene_needs_review", 409)
         scene = json.loads(scene_row["plan_json"])
-        if len(scene.get("characters", [])) > 1:
+        if len(scene.get("characters", [])) > 1 and not payload.get("plan_id"):
             raise MangaError("当前单参考模板每格支持一个人物，请先拆成单人镜头", "split_required", 409)
         chapter = scene_row["chapter_id"] or 0
         segment = conn.execute("SELECT start_para,end_para FROM segments WHERE id=? AND book_id=?", (scene_row["segment_id"], book_id)).fetchone()
@@ -140,6 +140,8 @@ def enqueue(conn, book_id, payload):
         forms = [dict(r) for r in conn.execute("SELECT f.* FROM character_forms f JOIN characters c ON c.id=f.character_id WHERE c.book_id=? AND f.character_id=?", (book_id, char_id)).fetchall()]
         form = resolve_form(forms, chapter, para, payload.get("form_id"), flashback)
     else:
+        if payload.get("plan_id"):
+            raise MangaError("参考图任务不使用场景总结方案")
         form = dict(form_row(conn, book_id, payload.get("form_id")))
         check_identity(form)
         chapter, para = form["start_ch"], form["start_para"]
@@ -153,10 +155,17 @@ def enqueue(conn, book_id, payload):
         if not asset_path(ref["path"]).is_file():
             raise MangaError("参考图文件不存在", "reference_missing", 409)
         ref["sha256"] = digest_bytes(asset_path(ref["path"]).read_bytes())
-    prompt = build_prompt(cfg, form["identity_block"], scene, shot, action, ref is not None)
+    text_plan = None
+    if payload.get("plan_id"):
+        from ..ai.director import resolve_plan
+        text_plan = resolve_plan(conn, book_id, payload["plan_id"], {**payload, "form_id": form["id"]}, cfg)
+    prompt = build_prompt(cfg, form["identity_block"], scene, shot, action, ref is not None,
+                          visual_prompt=text_plan["visual_prompt"] if text_plan else None)
     snapshot = {"version": 1, "config": cfg, "form": dict(form), "reference": ref, "scene": scene,
                 "scene_hash": digest(scene), "chapter": chapter, "para": para, "shot": shot, "action": action,
                 "seed": seed, "prompt": prompt, "prompt_hash": identity_hash(prompt), "flashback": flashback}
+    if text_plan:
+        snapshot["text_plan"] = text_plan
     request_id = payload.get("request_id")
     if request_id is not None and (not isinstance(request_id, str) or not 1 <= len(request_id) <= 100):
         raise MangaError("request_id 须为 1–100 字符")
