@@ -25,7 +25,12 @@ log = logging.getLogger("velmira.server")
 async def _lifespan(app: FastAPI):
     # 幂等建库：冷启动（无 data/）也能直接服务
     init_db()
-    yield
+    from .manga import queue
+    queue.start()
+    try:
+        yield
+    finally:
+        await queue.stop()
 
 
 def create_app() -> FastAPI:
@@ -52,6 +57,14 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(books_router)
+    from .api.manga import router as manga_router
+    from .manga.models import MangaError
+
+    @app.exception_handler(MangaError)
+    async def manga_error(request, exc):
+        return JSONResponse(status_code=exc.status, content={"error": {"code": exc.code, "message": str(exc)}})
+
+    app.include_router(manga_router)
 
     # 契约 8.2：v0.3 实时书库 SSE；模块异常不得拖垮 app
     try:

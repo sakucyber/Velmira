@@ -1,0 +1,2 @@
+# API integration tests only; heavy face models remain optional and local.
+httpx>=0.28,<1

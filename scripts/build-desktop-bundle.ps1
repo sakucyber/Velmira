@@ -46,6 +46,7 @@ try {
   --paths $root `
   --add-data ($root + '\web;web') `
   --add-data ($root + '\server\app\schema.sql;server/app') `
+  --add-data ($root + '\server\app\manga\face_worker.py;server/app/manga') `
     (Join-Path $root 'server\launcher.py')
   if ($LASTEXITCODE -ne 0) { throw 'PyInstaller 构建后端失败' }
 } finally {

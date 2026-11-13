@@ -15,6 +15,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   let popover = null;
   let popoverOff = null;
   let returnFocus = null;
+  let disposePanel = null;
 
   layer.addEventListener('click', (e) => { if (e.target === layer) close(); });
 
@@ -24,6 +25,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   }
 
   function close(restoreFocus = true) {
+    if (disposePanel) { disposePanel(); disposePanel = null; }
     removePopover();
     if (fetchAc) { fetchAc.abort(); fetchAc = null; }
     notes = [];            // 抽屉关闭即释放全书注释列表（内存约束）
@@ -248,6 +250,10 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       try { await onExtract(); } finally { extract.disabled = false; extract.textContent = '分析当前候选片段'; }
     });
     area.appendChild(extract);
+    const manga = el('button', 'btn ai-extract', '漫画生成');
+    manga.type = 'button';
+    manga.addEventListener('click', openManga);
+    area.appendChild(manga);
     area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个 scene') : '尚未生成 scene；默认使用离线 Mock provider'));
     for (const scene of scenes) {
       const card = el('article', 'ai-scene-card');
@@ -287,6 +293,17 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   function updateAI(data, onExtract, onFreeze) {
     if (!shell || kind !== 'ai') return;
     renderAI(body, data, onExtract, onFreeze);
+  }
+
+  function openManga() {
+    open('manga', '漫画生成', (area) => {
+      const ac = new AbortController();
+      disposePanel = () => ac.abort();
+      area.appendChild(el('p', 'seg-note', '正在加载…'));
+      import('./manga.js').then(({ mountManga }) => {
+        if (!ac.signal.aborted) mountManga({ area, bookId, signal: ac.signal });
+      }).catch(() => { if (!ac.signal.aborted) area.textContent = '漫画面板加载失败，请重新打开'; });
+    });
   }
 
   /* ---------------- 书签抽屉（数据由 reader 持有并拉取） ---------------- */

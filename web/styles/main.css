@@ -644,6 +644,25 @@ a { color: var(--accent); }
 .ai-character-state { color: var(--accent); font-size: 11px; }
 .ai-character-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
 
+.drawer-manga { width: min(680px, 100vw); }
+.manga-studio { min-width: 0; }
+.manga-tabs, .manga-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.manga-tabs [aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.manga-note { color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.manga-field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; }
+.manga-field input, .manga-field select, .manga-field textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 42px; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--surface); color: var(--text); font: inherit; }
+.manga-field input[type="checkbox"] { width: 24px; min-height: 24px; }
+.manga-field textarea { min-height: 80px; resize: vertical; }
+.manga-field :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.manga-refs { display: grid; grid-template-columns: repeat(auto-fit,minmax(130px,1fr)); gap: 10px; }
+.manga-ref, .manga-job { padding: 12px; margin: 12px 0; border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.manga-job h4 { margin: 0 0 10px; font-size: 14px; }
+.manga-preview { display: block; }
+.manga-preview img { display: block; max-width: 100%; max-height: 360px; border-radius: 6px; object-fit: contain; }
+.manga-editor, .manga-snapshot { margin-top: 16px; font-size: 12px; }
+.manga-editor summary, .manga-snapshot summary { cursor: pointer; padding: 10px 0; }
+.manga-snapshot pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow-y: auto; }
+
 /* 书签 */
 .bm-item {
   display: flex; align-items: center; gap: 6px;

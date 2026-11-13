@@ -454,3 +454,19 @@ data: {"revision": 7, "count": 3}
 - 书架密度与排序存在独立本机键 `velmira.shelf`；阅读主题与字号继续使用 `velmira.r1`，漫画适页/适宽继续使用 `velmira.comic.fit`。不改变阅读位置与注释坐标契约。
 - 阅读“设置”集中显示主题、字号与当前模式实际支持的快捷键，打开时暂停翻页快捷键；关闭可用 Escape 并恢复触发按钮焦点。移除底部常驻快捷键提示，保留页码与全书进度。
 - `velmira.r1.fontSize` 现在保存实际像素值（12–48，精度 0.1，默认 19）。读取旧值 0/1/2/3 时自动转换为 17/19/22/25 px，后续保存使用像素值，不改变主题或阅读坐标。字号支持连续滑块、数值输入与恢复默认；连续输入合并并串行重排，完成后重建批注。
+
+# 12. M3 单格出图
+
+以下路径均以 `/api/books/{book_id}/manga` 为前缀，错误保持 `{"error":{"code","message"}}`。
+
+- `GET/PATCH /config`：图像 provider 配置；`provider=comfyui|mock`，包含 `base_url/unet/clip/vae/edit_lora/width/height/steps/cfg/sampler/scheduler/seed/style/negative/face_threshold/max_attempts/timeout/face_python/face_models`。宽高须为 16 的倍数；最多 3 次尝试；默认人脸阈值 0.55。校验器路径为空时使用环境变量或本机默认值。
+- `POST /probe`：检查节点和模型，返回 `{ok,provider,missing,models?,reference_mode}`。Mock 只验证流程，不代表人物一致性通过。
+- `GET /forms`：本书人物形态，含版本、冻结身份及 `refs[]`。基础形态从 M2 人物卡同步；修改基础身份沿用 M2 编辑/解冻/冻结接口。
+- `POST /forms`：`{character_id,form_key,label,card,start_ch?,start_para?,reversible?}` 新增形态；生效锚点为从 0 开始的章节、段落，重复锚点拒绝。`PATCH /forms/{id}` 编辑未冻结的派生形态，`POST /forms/{id}/actions/freeze|unfreeze` 冻结/解冻（解冻须 `confirm=true`，升版本并标旧结果过期）。
+- `POST /forms/{id}/refs`：原始图片字节，最大 16 MB，转换为本地 PNG，默认未确认。`PATCH /refs/{id}` `{accepted:boolean}` 人工确认/撤销；卡版本不一致时拒绝确认，撤销使使用该参考图的任务过期。
+- `POST /jobs`：`{kind?:panel|reference,form_id?,character_id?,scene_id?,shot?,action?,seed?,flashback?,para?,request_id?}`，201 返回 `{job}`。单人格必须属于所选 M2 场景，身份须冻结，参考图须已确认且版本一致。多人场景拒绝并要求拆格。显式旧形态须标记闪回，未生效形态始终拒绝。`request_id` 为书内幂等键，重复键搭配不同快照返回 409。
+- `GET /jobs?limit=30` 和 `GET /jobs/{id}`：返回配置快照、prompt、config hash、每次尝试的 seed/workflow/prompt id/score/图片 URL。
+- `POST /jobs/{id}/cancel|retry|reroll|approve|reference`：取消、续查失败任务、换种子新建任务、人工确认分镜、存为参考图候选。`reroll` 可传 `{seed}`；`reference` 创建的候选仍须确认。
+- `GET /assets/{id}`：本书内图片。拒绝跨书访问，不接受任意文件路径。
+
+任务状态：`queued → running → done|needs_review|error|stale|cancelled`。仅单人脸测量分数达到阈值才标 `done`；无人脸、多人脸或校验器不可用都进入 `needs_review`，人工确认后为独立状态 `approved`，不虚构分数。参考图候选始终需要人工确认。进程重启将 `running` 恢复入队，有 prompt id 时续查原任务；ComfyUI 提交前保存 UUID，避免超时后无记录地重复提交。部署使用一个后端进程和一个串行生成队列。

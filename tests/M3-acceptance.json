@@ -1,0 +1,80 @@
+{
+  "panels": [
+    {
+      "id": "render_00e14e2e52c6726e69bec668",
+      "status": "done",
+      "score": 0.7961737513542175,
+      "seed": 424300,
+      "attempts": 1
+    },
+    {
+      "id": "render_c1244c9650140eab77e7f9e3",
+      "status": "needs_review",
+      "score": null,
+      "seed": 425309,
+      "attempts": 3
+    },
+    {
+      "id": "render_d469d696d0bd81f63d5f856c",
+      "status": "done",
+      "score": 0.715614914894104,
+      "seed": 426318,
+      "attempts": 1
+    },
+    {
+      "id": "render_4bbae6f26b9511789e0fdbf1",
+      "status": "done",
+      "score": 0.9696922898292542,
+      "seed": 427327,
+      "attempts": 2
+    },
+    {
+      "id": "render_71ddc05e4f36577ac88b93b7",
+      "status": "done",
+      "score": 0.9695046544075012,
+      "seed": 428336,
+      "attempts": 1
+    },
+    {
+      "id": "render_a5f8a581562c3b8a48a3aa0e",
+      "status": "done",
+      "score": 0.568227231502533,
+      "seed": 429345,
+      "attempts": 3
+    },
+    {
+      "id": "render_2f8be8f20146243117b9436c",
+      "status": "done",
+      "score": 0.6620659828186035,
+      "seed": 430354,
+      "attempts": 1
+    },
+    {
+      "id": "render_cead9c5da17df93d02172524",
+      "status": "done",
+      "score": 0.7050449848175049,
+      "seed": 431363,
+      "attempts": 2
+    },
+    {
+      "id": "render_597f172a02c866898268fa35",
+      "status": "done",
+      "score": 0.7473927736282349,
+      "seed": 432372,
+      "attempts": 1
+    },
+    {
+      "id": "render_0ecce5a5d932f5dc210d9f2d",
+      "status": "needs_review",
+      "score": null,
+      "seed": 433381,
+      "attempts": 3
+    }
+  ],
+  "threshold": 0.55,
+  "passed": 8,
+  "total": 10,
+  "accepted": true,
+  "provider": "comfyui",
+  "reference": "ref_ef4b8067151649a0b39b"
+}

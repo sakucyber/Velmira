@@ -194,3 +194,69 @@ CREATE TABLE IF NOT EXISTS scenes (
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_scenes_book ON scenes(book_id, chapter_id, segment_id);
+
+-- M3: versioned identities, reviewed references, reproducible single-panel jobs.
+CREATE TABLE IF NOT EXISTS render_configs (
+  book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  config_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS character_forms (
+  id TEXT PRIMARY KEY,
+  character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  form_key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  card_json TEXT NOT NULL,
+  identity_block TEXT NOT NULL,
+  identity_hash TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 0,
+  start_ch INTEGER NOT NULL DEFAULT 0,
+  start_para INTEGER NOT NULL DEFAULT 0,
+  reversible INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(character_id, form_key)
+);
+CREATE TABLE IF NOT EXISTS form_refs (
+  id TEXT PRIMARY KEY,
+  form_id TEXT NOT NULL REFERENCES character_forms(id) ON DELETE CASCADE,
+  form_version INTEGER NOT NULL,
+  identity_hash TEXT NOT NULL,
+  path TEXT NOT NULL,
+  accepted INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS render_jobs (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  form_id TEXT REFERENCES character_forms(id),
+  scene_id TEXT REFERENCES scenes(id),
+  snapshot_json TEXT NOT NULL,
+  config_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  image_path TEXT,
+  face_score REAL,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_render_jobs_queue ON render_jobs(status, created_at);
+CREATE TABLE IF NOT EXISTS render_attempts (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES render_jobs(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  seed INTEGER NOT NULL,
+  prompt_id TEXT,
+  workflow_json TEXT,
+  image_path TEXT,
+  result_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'running',
+  error TEXT,
+  UNIQUE(job_id, idx)
+);
+CREATE TABLE IF NOT EXISTS panel_forms (
+  panel_id TEXT PRIMARY KEY REFERENCES render_jobs(id) ON DELETE CASCADE,
+  form_id TEXT NOT NULL REFERENCES character_forms(id),
+  source TEXT NOT NULL,
+  flashback INTEGER NOT NULL DEFAULT 0
+);

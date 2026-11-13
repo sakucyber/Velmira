@@ -294,6 +294,11 @@ def patch_ai_character(book_id: str, character_id: str, payload: dict | None = B
         if row["frozen"] and any(field in incoming_card and incoming_card[field] != old_card.get(field) for field in CARD_FIELDS):
             return _error(409, "character_frozen", "人物卡 identity 已冻结，请先显式解冻并升版本")
         merged = merge_card(old_card, incoming_card, frozen=bool(row["frozen"]))
+        # Manual edits must replace known values; automatic extraction remains fill-only.
+        if not row["frozen"]:
+            for field in CARD_FIELDS:
+                if field in incoming_card:
+                    merged[field] = incoming_card[field]
         aliases = payload.get("aliases", _json(row["aliases_json"], []))
         if not isinstance(aliases, list):
             return _error(400, "invalid_character", "aliases 必须是数组")
