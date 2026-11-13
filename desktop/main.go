@@ -55,6 +55,8 @@ func main() {
 		return
 	}
 	mygo.App.OnQuit(stop)
+	// The desktop shell has no native menu; all user actions live in the web UI.
+	mygo.App.SetMenu(nil)
 
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{
@@ -70,7 +72,6 @@ func main() {
 		win.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
 			e.PreventDefault()
 		})
-		installMenu(root, win)
 		if err := win.Page().LoadURL(baseURL + "/"); err != nil {
 			log.Printf("load %s: %v", baseURL, err)
 		}
@@ -84,7 +85,7 @@ func main() {
 				} else if err := os.WriteFile(*flagScreenshot, png, 0o644); err != nil {
 					log.Printf("write screenshot: %v", err)
 				} else {
-					fmt.Println("screenshot:", *flagScreenshot)
+					log.Printf("screenshot: %s", *flagScreenshot)
 				}
 				mygo.App.Quit()
 			}()
@@ -297,42 +298,6 @@ func dataDir(root string) string {
 		}
 	}
 	return filepath.Join(root, "data")
-}
-
-func openPath(path string) {
-	var cmd *exec.Cmd
-	switch {
-	case os.PathSeparator == '\\':
-		cmd = exec.Command("explorer", path)
-	default:
-		cmd = exec.Command("xdg-open", path)
-	}
-	_ = cmd.Start()
-}
-
-func installMenu(root string, win *mygo.Window) {
-	mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
-		{Label: "文件", Submenu: []*mygo.MenuItem{
-			{Label: "打开数据目录", Click: func(*mygo.MenuItem, *mygo.Window) { openPath(dataDir(root)) }},
-			mygo.Separator(),
-			{Role: mygo.RoleQuit},
-		}},
-		{Label: "视图", Submenu: []*mygo.MenuItem{
-			{Role: mygo.RoleReload},
-			{Role: mygo.RoleForceReload},
-			mygo.Separator(),
-			{Role: mygo.RoleToggleDevTools},
-			mygo.Separator(),
-			{Role: mygo.RoleZoomIn},
-			{Role: mygo.RoleZoomOut},
-			{Role: mygo.RoleResetZoom},
-		}},
-		{Label: "窗口", Submenu: []*mygo.MenuItem{
-			{Role: mygo.RoleMinimize},
-			{Role: mygo.RoleClose},
-		}},
-	}))
-	_ = win
 }
 
 func showFatal(err error) {

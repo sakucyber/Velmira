@@ -5,7 +5,7 @@
 ## 1. 原生桌面端
 
 - 框架：[MyGo](https://github.com/egoist/mygo)（Go；MIT），窗口使用系统 WebView2。
-- 结构：Go 壳（desktop/）负责窗口、菜单、生命周期；启动时在空闲端口拉起 Python 后端，健康检查通过后导航到界面；退出时结束后端进程树；已有开发服务时直接复用。
+- 结构：Go 壳（desktop/）负责窗口、生命周期；启动时在空闲端口拉起 Python 后端，健康检查通过后导航到界面；退出时结束后端进程树；已有开发服务时直接复用。
 - 构建：`scripts/build-desktop.ps1`（Go 1.27+，无需 Bun）；产物 `desktop/Velmira.exe`（约 9 MB）。
 - 细节：desktop/README.md；窗口证据：docs/screenshots/desktop-window.png；内容证据：desktop-app.png。
 - 限制：Python 边车未打包（目标机需 Python 3.11+）；仅测 Windows/WebView2。

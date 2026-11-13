@@ -23,7 +23,8 @@ $env:CGO_ENABLED = '0'
 
 Push-Location (Join-Path $root 'desktop')
 try {
-  & $go build -trimpath -ldflags '-s -w' -o Velmira.exe .
+  # windowsgui prevents Windows from allocating a console window for the desktop shell.
+  & $go build -trimpath -ldflags '-H=windowsgui -s -w' -o Velmira.exe .
   if ($LASTEXITCODE -ne 0) { throw "go build 失败（exit $LASTEXITCODE）" }
   $exe = Get-Item Velmira.exe
   Write-Host ("构建完成：" + $exe.FullName + "（" + [math]::Round($exe.Length / 1MB, 1) + " MB）")

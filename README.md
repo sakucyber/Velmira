@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop-bundle
 
 - 启动时自动在空闲端口拉起后端，健康检查通过后导航到界面；退出时结束后端进程树；
 - 已有开发服务（8765）在跑时直接复用，方便调试；
-- 原生菜单（文件 / 视图 / 窗口）、1280×860 窗口、系统标题栏与窗口控件；
+- 1280×860 窗口、系统标题栏与窗口控件；桌面壳不显示原生菜单；
 - `-screenshot` 参数可截图窗口后退出，用于验收与 CI。
 - 桌面窗口禁用浏览器默认右键菜单；小说文件可拖到书架任意位置导入，拖入时显示提示。
 
@@ -111,7 +111,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 ## 目录
 
 ~~~text
-desktop/                MyGo 桌面壳（Go）：窗口、菜单、后端进程管理
+desktop/                MyGo 桌面壳（Go）：窗口、后端进程管理
 server/
   app/importer*.py      格式识别（magic）+ TXT / EPUB / CBZ 解析
   app/api/books.py      books / toc / chapters / progress / bookmarks
