@@ -127,17 +127,19 @@ async function main() {
   const fsReqs = txtState.firstScreen.length;
   add("G5 文本首屏请求 ≤9", fsReqs + 1 <= 9 ? "PASS" : "FAIL", "resource=" + fsReqs + " +document=" + (fsReqs + 1) + " list=" + j(txtState.firstScreen));
 
-  await cdp.eval("document.querySelector('#btn-font').click()");
+  await cdp.eval("document.querySelector('#btn-settings').click()");
+  await sleep(500);
+  await cdp.eval("var size=document.querySelector('[aria-label=\"阅读字号\"]');size.value='2';size.dispatchEvent(new Event('change',{bubbles:true}));");
   await sleep(700);
   const afterFont = JSON.parse(await cdp.eval("JSON.stringify({marks:document.querySelectorAll('mark.ann').length,fontSize:getComputedStyle(document.querySelector('#reader-column')).fontSize})"));
   add("G6 改字号后 mark 重建", afterFont.marks === 4 ? "PASS" : "FAIL", j(afterFont));
-  await cdp.eval("document.querySelector('#btn-theme').click()");
+  await cdp.eval("document.querySelector('[data-theme-choice=night]').click()");
   await sleep(900);
-  const themeBtns = await cdp.eval("document.querySelectorAll('.popover button').length");
-  await cdp.eval("var b=document.querySelectorAll('.popover button'); if(b.length>1) b[1].click();");
+  const themeBtns = await cdp.eval("document.querySelectorAll('.settings-theme').length");
   await sleep(700);
   const afterTheme = JSON.parse(await cdp.eval("JSON.stringify({marks:document.querySelectorAll('mark.ann').length,theme:document.documentElement.dataset.theme,popover:document.querySelectorAll('.popover').length})"));
   add("G7 换主题后 mark 重建", afterTheme.marks === 4 && afterTheme.theme !== "day" ? "PASS" : "FAIL", "popup_options=" + themeBtns + " " + j(afterTheme));
+  await cdp.eval("document.querySelector('.drawer-settings .drawer-close').click()");
   await cdp.eval("window.__velmira.goChapter(6)");
   await sleep(1200);
   const ch6 = JSON.parse(await cdp.eval("JSON.stringify({ch:window.__velmira.state.chapter,marks:document.querySelectorAll('mark.ann').length,anns:window.__velmira.annotations().length})"));

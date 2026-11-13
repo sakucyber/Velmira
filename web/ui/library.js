@@ -10,12 +10,13 @@
    · 状态点：连接中 / 实时 / 轮询 / 离线；骨架屏 / 行内错误条
    ============================================================ */
 import {
-  $, el, clear, store, toast, fmtChars, fmtPercent, apiGet, uploadBook,
+  $, el, store, toast, fmtChars, apiGet, uploadBook,
 } from '../util/core.js';
+import { readingState, readingLabel, coverHue, shelfPreferences, saveShelfPreferences, openBookDetails } from './library-tools.js';
 
 const EMPTY_TEXT = '拖入或选择 TXT / EPUB / CBZ 文件，导入后在这里开始阅读。';
 const POLL_MS = 5000;          // 契约 8.3：5 秒轮询兜底（SSE 重连也复用该周期）
-const LIVE_TEXT = { connecting: '连接中', live: '实时', polling: '轮询', offline: '离线' };
+const LIVE_TEXT = { connecting: '连接中', live: '自动更新', polling: '定时更新', offline: '离线' };
 const FORMAT_LABEL = { txt: 'TXT', epub: 'EPUB', cbz: 'CBZ' };
 
 export async function mountLibrary() {
@@ -42,6 +43,15 @@ export async function mountLibrary() {
   const navLibrary = $('#nav-library');
   const navContinue = $('#nav-continue');
   const debug = new URLSearchParams(location.search).get('debug') === '1';
+  const formatFilter = $('#lib-format');
+  const statusFilter = $('#lib-status');
+  const sortSelect = $('#lib-sort');
+  const clearSearch = $('#lib-clear');
+  const prefs = shelfPreferences();
+  let density = prefs.density === 'compact' ? 'compact' : 'standard';
+  sortSelect.value = ['added', 'read', 'title', 'progress'].includes(prefs.sort) ? prefs.sort : 'added';
+  let archivedBooks = [];
+  let archivedRequest = 0;
 
   let importing = false;
   let books = [];              // 最近一次书目快照（全量）
@@ -67,14 +77,14 @@ export async function mountLibrary() {
     liveEl.dataset.state = state;
     const label = liveEl.querySelector('.live-text');
     if (label) label.textContent = text || LIVE_TEXT[state] || state;
-    liveEl.title = '书库更新：' + (LIVE_TEXT[state] || state);
+    liveEl.title = '书库内容变化会自动刷新列表；连接中断时每 5 秒重试。不监视电脑文件夹。当前：' + (LIVE_TEXT[state] || state);
   }
 
   /* ---------------- 数据指纹 / 元信息 ---------------- */
   function fingerprintOf(list) {
     return JSON.stringify(list.map((b) => [
       b.id, b.title, b.format, b.chapter_count, b.page_count, b.total_chars,
-      b.last_chapter, Math.round((Number(b.percent) || 0) * 10000),
+      b.last_chapter, b.has_progress, b.last_read_at, Math.round((Number(b.percent) || 0) * 1000000),
     ]));
   }
 
@@ -89,36 +99,36 @@ export async function mountLibrary() {
     let meta;
     if (format === 'cbz') {
       meta = Number(book.page_count || book.chapter_count || 0) + ' 页 · 漫画';
-    } else if (format === 'epub') {
-      meta = (book.chapter_count || 0) + ' 章 · EPUB 文本';
     } else {
       meta = (book.chapter_count || 0) + ' 章 · ' + fmtCount(book.total_chars);
     }
     return { format, label, meta };
   }
 
-  function initialOf(title) {
-    const t = String(title || '').trim();
-    if (!t) return '书';
-    const ch = Array.from(t)[0];
-    if (/[a-z]/.test(ch)) return ch.toUpperCase();
-    return ch;
-  }
-
   function visibleBooks() {
-    let list = books;
+    let list = statusFilter.value === 'archived' ? archivedBooks : books;
     if (viewMode === 'reading') {
-      list = list.filter((b) => (Number(b.percent) || 0) > 0 || Number(b.last_chapter) > 0);
+      list = list.filter((b) => readingState(b) === 'reading');
     }
+    if (formatFilter.value !== 'all') list = list.filter((b) => b.format === formatFilter.value);
+    if (!['all', 'archived'].includes(statusFilter.value)) list = list.filter((b) => readingState(b) === statusFilter.value);
     const q = filterText.trim().toLowerCase();
     if (q) list = list.filter((b) => String(b.title || '').toLowerCase().indexOf(q) >= 0);
-    return list;
+    return list.slice().sort((a, b) => {
+      const mode = sortSelect.value;
+      const n = mode === 'title' ? String(a.title).localeCompare(String(b.title), 'zh-CN', { numeric: true })
+        : mode === 'read' ? (b.last_read_at || 0) - (a.last_read_at || 0)
+          : mode === 'progress' ? (b.has_progress ? b.percent : 0) - (a.has_progress ? a.percent : 0)
+            : (b.created_at || 0) - (a.created_at || 0);
+      return n || String(a.id).localeCompare(String(b.id));
+    });
   }
 
   /* ---------------- 卡片 ---------------- */
   function createCard(book) {
-    const card = el('a', 'book-card');
+    const card = el('li', 'book-card');
     card.dataset.id = book.id;
+    const link = el('a', 'book-open');
     const cover = el('div', 'book-cover');
     const badge = el('span', 'fmt-badge');
     const initial = el('span', 'cover-initial');
@@ -130,18 +140,29 @@ export async function mountLibrary() {
     const info = el('div', 'book-info');
     const title = el('div', 'book-title');
     const meta = el('div', 'book-meta');
-    info.append(title, meta);
-    card.append(cover, info);
-    card._refs = { cover, badge, initial, stateBadge, progress, fill, title, meta, href: '' };
+    const position = el('div', 'book-position');
+    info.append(title, meta, position);
+    link.append(cover, info);
+    const more = el('button', 'book-more', '⋯');
+    more.type = 'button';
+    more.addEventListener('click', () => {
+      const current = card._book;
+      openBookDetails(current, fmtInfo(current).meta, async () => {
+        await refreshBooks({ force: true });
+      });
+    });
+    card.append(link, more);
+    card._refs = { link, cover, badge, initial, stateBadge, progress, fill, title, meta, position, more, href: '' };
     return card;
   }
 
   function updateCard(card, book) {
     const refs = card._refs;
+    card._book = book;
     const info = fmtInfo(book);
-    const href = '/?book=' + encodeURIComponent(book.id)
-      + (Number(book.last_chapter) > 0 ? '&ch=' + book.last_chapter : '');
-    if (refs.href !== href) { card.href = href; refs.href = href; }
+    // 交给阅读器恢复段落/字符位置，避免只传章节导致从章首重读。
+    const href = '/?book=' + encodeURIComponent(book.id);
+    if (refs.href !== href) { refs.link.href = href; refs.href = href; }
     const titleText = book.title || '未命名';
     if (refs.title.textContent !== titleText) {
       refs.title.textContent = titleText;
@@ -150,35 +171,39 @@ export async function mountLibrary() {
     const coverCls = 'book-cover cover-' + info.format;
     if (refs.cover.className !== coverCls) refs.cover.className = coverCls;
     if (refs.badge.textContent !== info.label) refs.badge.textContent = info.label;
-    const initial = initialOf(titleText);
+    const initial = titleText;
     if (refs.initial.textContent !== initial) refs.initial.textContent = initial;
+    refs.cover.style.setProperty('--book-hue', coverHue(book));
+    refs.more.setAttribute('aria-label', titleText + '，更多操作');
     if (refs.meta.textContent !== info.meta) refs.meta.textContent = info.meta;
     const pct = Math.max(0, Math.min(1, Number(book.percent) || 0));
-    const finished = pct >= 0.999;      // 文本/漫画统一：进度 100% 视为已读完
-    refs.progress.hidden = pct <= 0;
+    const status = readingState(book);
+    const finished = status === 'finished';
+    refs.progress.hidden = status === 'unread';
     const width = (finished ? 100 : pct * 100).toFixed(1) + '%';
     if (refs.fill.style.width !== width) refs.fill.style.width = width;
-    const stateText = finished ? '已读完' : (pct > 0 ? '继续' : '开始');
+    const stateText = finished ? '已读完' : (status === 'reading' ? '继续' : '未读');
     if (refs.stateBadge.textContent !== stateText) refs.stateBadge.textContent = stateText;
-    card.classList.toggle('is-reading', pct > 0 && !finished);
+    card.classList.toggle('is-reading', status === 'reading');
     card.classList.toggle('is-finished', finished);
-    card.setAttribute('aria-label', titleText + '，' + info.meta + (finished ? '，已读完' : (pct > 0 ? '，已读 ' + fmtPercent(pct) : '')));
+    refs.position.textContent = book.archived_at ? '已移出 · 可恢复' : readingLabel(book);
+    refs.link.setAttribute('aria-label', titleText + '，' + info.meta + '，' + readingLabel(book));
   }
 
   function updateCounts(visible) {
     const total = books.length + ' 本';
     for (const node of countEls) if (node && node.textContent !== total) node.textContent = total;
-    const filtering = !!filterText.trim();
+    const filtering = !!filterText.trim() || formatFilter.value !== 'all' || statusFilter.value !== 'all';
     // 内容区标题只在「继续阅读」或搜索过滤时出现；默认不重复静态计数
-    const showHead = books.length > 0 && (viewMode === 'reading' || filtering);
+    const showHead = statusFilter.value === 'archived' || books.length > 0 && (viewMode === 'reading' || filtering);
     if (shelfHeadEl) shelfHeadEl.hidden = !showHead;
     if (appMain) appMain.classList.toggle('no-shelf-head', !showHead);
     if (shelfTitleEl) {
-      shelfTitleEl.textContent = viewMode === 'reading' ? '继续阅读' : (filtering ? '匹配结果' : '全部书目');
+      shelfTitleEl.textContent = statusFilter.value === 'archived' ? '已移出的书籍' : viewMode === 'reading' ? '继续阅读' : (filtering ? '筛选结果' : '全部书目');
     }
     if (shelfCountEl) {
       shelfCountEl.hidden = !showHead;
-      const meta = viewMode === 'reading'
+      const meta = statusFilter.value === 'archived' ? visible.length + ' 本可恢复' : viewMode === 'reading'
         ? visible.length + ' 本阅读中'
         : (filtering ? visible.length + ' / ' + books.length + ' 本' : '');
       if (meta && shelfCountEl.textContent !== meta) shelfCountEl.textContent = meta;
@@ -193,9 +218,17 @@ export async function mountLibrary() {
     if (libView) libView.classList.toggle('is-lib-empty', !hasBooks);
     emptyEl.hidden = hasBooks || !loadedOnce;
     if (emptyTextEl) emptyTextEl.textContent = EMPTY_TEXT;
-    noresultEl.hidden = !(hasBooks && visible.length === 0);
+    const isArchive = statusFilter.value === 'archived';
+    emptyEl.hidden = isArchive || hasBooks || !loadedOnce;
+    noresultEl.hidden = !((hasBooks || isArchive) && visible.length === 0);
+    noresultEl.textContent = isArchive ? '没有已移出的书籍' : '没有符合条件的书籍';
+    libView.classList.toggle('has-books', hasBooks);
+    libView.classList.toggle('shelf-compact', density === 'compact');
+    clearSearch.hidden = !filterText;
+    filterInput.parentElement.classList.toggle('has-query', !!filterText);
+    $('#density-standard').setAttribute('aria-pressed', String(density === 'standard'));
+    $('#density-compact').setAttribute('aria-pressed', String(density === 'compact'));
 
-    const prevIds = new Set((listEl._prevIds || []));
     const scrollTop = appMain ? appMain.scrollTop : 0;
     const existing = new Map();
     for (const node of Array.from(listEl.children)) {
@@ -267,6 +300,21 @@ export async function mountLibrary() {
     renderShelf();
   }
 
+  async function loadArchived() {
+    const request = ++archivedRequest;
+    try {
+      const data = await apiGet('/api/books?archived=true');
+      if (request !== archivedRequest || destroyed) return;
+      archivedBooks = data.books || [];
+      hideError();
+      renderShelf();
+    } catch (err) {
+      if (request !== archivedRequest || destroyed) return;
+      showError(err);
+      toast('已移出列表加载失败：' + err.message);
+    }
+  }
+
   function showError(err) {
     if (!errorEl) return;
     errorEl.hidden = false;
@@ -282,6 +330,7 @@ export async function mountLibrary() {
       hideError();
       applyBooks((data && data.books) || [], { force: !!opts.force });
       loadedOnce = true;
+      if (statusFilter.value === 'archived') await loadArchived();
       if (pollFailures) pollFailures = 0;
     } catch (err) {
       if (destroyed) return;
@@ -318,6 +367,7 @@ export async function mountLibrary() {
       hideError();
       applyBooks((data && data.books) || []);
       loadedOnce = true;
+      if (statusFilter.value === 'archived') await loadArchived();
       if (skeletonEl && !loadedOnce) skeletonEl.hidden = true;
       if (es && es.readyState === 1) setLiveState('live');
       else if (liveState === 'offline') setLiveState('polling');
@@ -397,8 +447,8 @@ export async function mountLibrary() {
 
   /* ---------------- 视图切换 / 过滤 ---------------- */
   function setViewMode(mode) {
-    if (viewMode === mode) return;
     viewMode = mode;
+    statusFilter.value = 'all';
     const reading = mode === 'reading';
     navLibrary.classList.toggle('is-active', !reading);
     navContinue.classList.toggle('is-active', reading);
@@ -418,8 +468,9 @@ export async function mountLibrary() {
     setImporting(0, file.name);
     try {
       const res = await uploadBook(file, (p) => setImporting(p, file.name));
-      store.set({ book: res.book.id, chapter: 0, para: 0, offset: 0 });
-      toast(res.deduped ? '这本书已在书架中' : '导入成功 · ' + res.book.chapter_count + ' 章');
+      // 去重/恢复沿用本机或服务端的阅读位置；只有新书从开头开始。
+      if (!res.deduped) store.set({ book: res.book.id, chapter: 0, para: 0, offset: 0 });
+      toast(res.restored ? '已恢复到书架' : res.deduped ? '这本书已在书架中' : '导入成功');
       setImporting(1, file.name);
       setTimeout(() => {
         // 返回书架时页面可能由 bfcache 恢复，不能残留“正在导入”锁。
@@ -505,6 +556,24 @@ export async function mountLibrary() {
   if ($('#lib-error-retry')) $('#lib-error-retry').addEventListener('click', () => refreshBooks({ manual: true, force: true }));
   if (navLibrary) navLibrary.addEventListener('click', () => setViewMode('all'));
   if (navContinue) navContinue.addEventListener('click', () => setViewMode('reading'));
+  for (const select of [formatFilter, statusFilter, sortSelect]) select.addEventListener('change', () => {
+    if (select === statusFilter) {
+      viewMode = 'all'; navContinue.classList.remove('is-active'); navContinue.removeAttribute('aria-current');
+      navLibrary.classList.add('is-active'); navLibrary.setAttribute('aria-current', 'page');
+      if (statusFilter.value === 'archived') loadArchived();
+    }
+    saveShelfPreferences({ sort: sortSelect.value, density });
+    renderShelf();
+  });
+  for (const value of ['standard', 'compact']) $('#density-' + value).addEventListener('click', () => {
+    density = value; saveShelfPreferences({ sort: sortSelect.value, density }); renderShelf();
+  });
+  clearSearch.addEventListener('click', () => { filterInput.value = ''; filterText = ''; renderShelf(); filterInput.focus(); });
+  document.addEventListener('keydown', (e) => {
+    if (libView.hidden || e.altKey || e.ctrlKey || e.metaKey || document.querySelector('dialog[open]')) return;
+    if (e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (e.key === '/') { e.preventDefault(); filterInput.focus(); }
+  });
   if (filterInput) {
     filterInput.addEventListener('input', () => {
       filterText = filterInput.value || '';

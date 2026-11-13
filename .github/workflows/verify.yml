@@ -70,7 +70,7 @@ jobs:
           GOPROXY: https://goproxy.cn,direct
         run: ./scripts/build-desktop-bundle.ps1
 
-      - name: Verify packaged backend, annotations and library file drops
+      - name: Verify packaged backend, annotations, bookshelf and settings
         shell: pwsh
         run: |
           $env:DATA_DIR = Join-Path $env:RUNNER_TEMP 'velmira-data'
@@ -87,6 +87,8 @@ jobs:
             if (-not $ready) { throw 'Packaged backend did not become ready' }
             node tests/cdp_annotations.mjs --base http://127.0.0.1:8876
             if ($LASTEXITCODE -ne 0) { throw 'Annotation browser regression failed' }
+            node tests/cdp_library_settings.mjs --base http://127.0.0.1:8876
+            if ($LASTEXITCODE -ne 0) { throw 'Bookshelf/settings browser regression failed' }
           } finally {
             taskkill /PID $backend.Id /T /F
           }

@@ -36,3 +36,15 @@ Windows 原生桌面窗口另通过实际右键输入确认：搜索框和书架
 边界：Android 7 的 Safe Browsing API 判断已修正并编译，尚无 Android 7 设备实测；其他机型、其他 WebView 版本尚未覆盖。CI 工作流已添加并本地核对配置，远端执行状态以 GitHub Actions 为准；本报告中的通过项均为本地执行结果。桌面包在本机实测，尚未覆盖全新 Windows 虚拟机。
 
 复现：`scripts/verify_m1.ps1`、`scripts/verify.ps1`、`go test ./...`（desktop 目录）；启动隔离服务后运行 `node tests/cdp_annotations.mjs --base http://127.0.0.1:<端口>`。
+
+## 2026-11-13 书架管理与阅读设置
+
+- Python 单元测试：46 项通过，其中新增 5 项覆盖书名校验、旧数据库幂等升级、移出恢复、相同文件重新导入恢复，以及未读漫画的状态判定。移出恢复前后正文、进度、批注与 M2 人物卡记录逐行一致。
+- 9 个前端 JS 文件语法通过，总量 146,911 字节；`git diff --check` 通过，Go 桌面壳测试通过。
+- 新增 `cdp_library_settings.mjs`：真实 API 与 Edge 检查同名 TXT/EPUB 封面区分、章节/字数/漫画页数、极小进度可见性、筛选与排序、继续阅读状态切换、密度保存、搜索与清空、详情重命名、移出刷新与恢复。另用实际文件选择器输入重新导入已移出的同一文件，确认从服务端保存的第 3 章继续，原书 ID 和批注均保留。
+- 阅读设置检查通过：主题/字号保存，改字号后批注仍在，设置内暂停翻页，Escape 关闭并恢复焦点，T/F 保持有效，底部无常驻快捷键提示。390×844 手机书架/详情/设置无横向溢出，漫画主题与显示方式设置可用，全程无 JS 异常。
+- 原有批注与整页文件拖放专项 14 项再次通过。上述两套浏览器专项均在源码服务及最终 PyInstaller 目录模式后端通过，数据目录完全隔离。
+- 重新构建 Windows 自包含包，并实际运行 `Velmira.exe -screenshot ... -wait 3s`，窗口截图成功、退出码 0。桌面原生 WebView2 与 Edge 中均检查了书架布局；手机使用浏览器设备模拟，本轮未新增安卓真机验证。Android 客户端从服务端加载界面，无需更换 APK 即可使用本轮 Web 改动。
+- CI 已加入书架与设置专项，远端执行结果以 GitHub Actions 为准。
+
+复现：以独立 `DATA_DIR` 启动源码服务或打包后端，再执行 `node tests/cdp_annotations.mjs --base <地址>` 和 `node tests/cdp_library_settings.mjs --base <地址>`。专项会导入中性样例，仅用于隔离书库。

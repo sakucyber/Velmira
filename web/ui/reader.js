@@ -25,8 +25,7 @@ export async function mountReader({ bookId, params, debug }) {
     progressTrack: $('#progress-track'),
     segmentsBtn: $('#btn-segments'),
     aiBtn: $('#btn-ai'),
-    themeBtn: $('#btn-theme'),
-    fontBtn: $('#btn-font'),
+    settingsBtn: $('#btn-settings'),
     bookmarkBtn: $('#btn-bookmark'),
     main: $('#reader-main'),
     layer: $('#drawer-layer'),
@@ -636,24 +635,18 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   /* ================= 主题 / 字号 ================= */
-  async function openThemeMenu() {
+  async function openSettings() {
     if (annUI) annUI.hideMenu();
     const p = await ensurePanels();
-    p.openTheme(dom.themeBtn, THEMES, theme, (next) => {
-      theme = next;
-      applyTheme(theme);
-      persist();
-      pager.reapplyAnnotations();   // 契约：换主题后按注释列表重建高亮
+    p.openSettings({ themes: THEMES, theme, fontSizes: FONT_SIZES, fontSize,
+      onTheme: (next) => {
+        theme = next; applyTheme(theme); persist(); pager.reapplyAnnotations();
+      },
+      onFont: async (next) => {
+        fontSize = applyFontSize(next); persist();
+        await pager.relocate(); pager.reapplyAnnotations();
+      },
     });
-  }
-
-  async function cycleFontSize() {
-    fontSize = (fontSize + 1) % FONT_SIZES.length;
-    applyFontSize(fontSize);
-    persist();
-    toast('字号 ' + (fontSize + 1) + '/' + FONT_SIZES.length + ' · ' + FONT_SIZES[fontSize] + 'px');
-    await pager.relocate(); // 字号变化后保持阅读位置
-    pager.reapplyAnnotations(); // 契约：改字号后重建高亮
   }
 
   /* ================= 面板 ================= */
@@ -700,8 +693,7 @@ export async function mountReader({ bookId, params, debug }) {
       if (!state.segments) refreshSegments(); // 按需拉取，不在切章时浪费请求
     });
     if (dom.aiBtn) dom.aiBtn.addEventListener('click', loadAIStudio);
-    dom.themeBtn.addEventListener('click', openThemeMenu);
-    dom.fontBtn.addEventListener('click', cycleFontSize);
+    dom.settingsBtn.addEventListener('click', openSettings);
 
     // 桌面端左右翻页按钮（阻止 click 冒泡到 1/3 热区，避免一次点击翻两页）
     if (dom.pagePrevBtn) dom.pagePrevBtn.addEventListener('click', (e) => { e.stopPropagation(); pagePrev(); });
@@ -773,6 +765,7 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   function onKeydown(e) {
+    if (panels && panels.isOpen()) return;
     const t = e.target;
     if (t && t.closest && t.closest('.ann-float') && e.key !== 'Escape') return;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;

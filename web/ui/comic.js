@@ -7,7 +7,7 @@
    - 键盘 ←/→/空格、上下页按钮、左右点击区、触摸滑动 40px
    - 适页 / 适宽（localStorage 记忆）；?debug=1 显示 heap/DOM/img
    ============================================================ */
-import { el, debounce, clamp, intOrNull, apiGet, toast } from '../util/core.js';
+import { el, debounce, clamp, intOrNull, apiGet, toast, THEMES, store, applyTheme } from '../util/core.js';
 
 const FIT_KEY = 'velmira.comic.fit';
 const SAVE_MS = 900;      /* 约束：≥800ms，禁止每页都 PUT */
@@ -87,7 +87,9 @@ export async function mountComic(opts = {}) {
   fitBtn.title = '切换适宽 / 适页';
 
   const tools = el('div', 'comic-tools');
-  tools.append(jump, fitBtn);
+  const settingsBtn = el('button', 'comic-fit', '⚙');
+  settingsBtn.type = 'button'; settingsBtn.title = '阅读设置'; settingsBtn.setAttribute('aria-label', '阅读设置');
+  tools.append(jump, fitBtn, settingsBtn);
   const top = el('header', 'comic-top');
   top.append(back, meta, tools);
 
@@ -145,6 +147,17 @@ export async function mountComic(opts = {}) {
   let swipeSuppressClickUntil = 0;
   let debugEl = null;
   let debugTimer = 0;
+  let settingsPanels = null;
+  settingsBtn.addEventListener('click', async () => {
+    if (!settingsPanels) {
+      const { createPanels } = await import('./panels.js');
+      settingsPanels = createPanels({ layer: document.getElementById('drawer-layer'), bookId });
+    }
+    settingsPanels.openSettings({ themes: THEMES, theme: store.get().theme, comic: true, fit,
+      onTheme: (theme) => { applyTheme(theme); store.set({ theme }); },
+      onFit: (next) => { applyFit(next); saveFit(next); },
+    });
+  });
   const metaCache = new Map();   /* 只保留当前页 ±1 的元数据 */
 
   const scheduleSave = debounce(saveProgress, SAVE_MS);
@@ -289,6 +302,7 @@ export async function mountComic(opts = {}) {
 
   /* ================== 交互：键盘 / 点击区 / 按钮 / 触摸 / 跳转 ================== */
   function onKeydown(e) {
+    if (settingsPanels?.isOpen()) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (e.altKey || e.ctrlKey || e.metaKey) return;

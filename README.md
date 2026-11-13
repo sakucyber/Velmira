@@ -88,12 +88,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 | 全文检索 | FTS5 trigram（≥3 字 bm25 / 2 字 LIKE / 1 字兜底），命中可跳转并高亮 |
 | 分段选片 | 段落窗口 + 7 特征打分 + 语料百分位，每章选 1 个高分片段（为后续漫改准备） |
 | 书库实时同步 | SSE 推送 + 5 秒轮询兜底；导入新书后书架自动出现，保留滚动位置、不整页刷新 |
+| 书架管理 | 书名与格式生成稳定配色封面；统一章节/页数与进度；标准/紧凑密度、格式/阅读状态筛选、排序；详情、重命名、移出与恢复 |
+| 阅读设置 | 右上角齿轮集中管理主题、字号与快捷键说明；漫画提供主题与适页/适宽；偏好在本机保存 |
+
+书架按 `/` 可聚焦书名搜索，支持一键清空。卡片的 `⋯` 打开详情；移出书架后，可在“状态 → 已移出”中恢复，也可重新导入同一文件恢复原书，正文、进度、书签、批注和 AI 数据都会保留。
+
+阅读页底部保留页码和全书进度，快捷键说明移至“设置”。`← / → / 空格 / T / F / B` 等操作继续有效；设置打开或正在输入时，翻页快捷键暂停。桌面侧抽屉与手机底部面板使用相同设置。
 
 ## 书库实时同步怎么工作
 
 - 后端 GET /api/events：SSE 长连接，导入新书后推送 books_changed（revision / count），15 秒心跳保活
 - 前端：书库页订阅事件流，收到后重新拉取列表并原地更新；事件流不可用时自动退化为 5 秒轮询
-- 书架标题旁的状态点：连接中 / 实时 / 轮询 / 离线；离开书库即关闭连接
+- 书架状态点：连接中 / 自动更新 / 定时更新 / 离线；导入与管理操作会更新列表，不监视电脑文件夹；离开书库即关闭连接
 - 另提供 GET /api/events/status（revision / subscribers）便于排障
 
 ## 技术选型
@@ -101,7 +107,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 阅读内核 | 自研分页内核（CSS 多列 + translateX） | 无 iframe / blob 累积，行为可预测 |
-| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 120KB，首屏请求 9（文本）/ 10–11（漫画），无 node_modules |
+| 前端 | 原生 ES Module + 原生 CSS，零依赖零构建 | JS 约 146.9KB，设置面板按需加载，无 node_modules |
 | 后端 | Python 3.11 + FastAPI + SQLite(WAL) | 单机 all-in-one，后续接 ComfyUI 同栈 |
 | EPUB | 只取文本、不渲染内嵌样式 | 与阅读器统一排版与高亮坐标，兼容性最好 |
 | CBZ | 单个 img 换 src，不预加载 | 漫画原图 2–4MB / 页，单图 + immutable 缓存 |
@@ -128,6 +134,7 @@ web/
   ui/comic.js           CBZ 漫画模式（单 img）
   ui/panels.js          目录过滤 / 书签 / 笔记 / 搜索 / 片段抽屉
   ui/library.js         多格式导入 + 实时书库
+  ui/library-tools.js   进度与封面规则、书籍详情与可恢复管理
 samples/                中性示例（demo-text.txt / demo-comic.cbz）
 tests/                  断言脚本、CDP 探针、验收报告
 scripts/                run.ps1 / verify.ps1 / verify_m1.ps1
@@ -140,7 +147,7 @@ docs/                   架构、计划、契约、截图
 | --- | --- |
 | TXT 导入（234 章 / 51.6 万字） | 27ms |
 | EPUB 导入（234 章） | ~140ms |
-| 前端 JS 总量 | 约 124.8KB（预算 150KB，v0.4.0 实测） |
+| 前端 JS 总量 | 约 146.9KB（预算 150KB，含书架管理与阅读设置） |
 | 首屏请求 | 文本 9 / 漫画 10–11 |
 | 单章 DOM | 不超过 256（含高亮）；漫画模式 94 |
 | 翻页 | 0.075ms / 次（只改 transform）；漫画翻页 0–4ms |

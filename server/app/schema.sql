@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS chapters (
   paras_json TEXT NOT NULL,
   UNIQUE(book_id, idx)
 );
+
+-- 可恢复的书架移除状态；不删除书籍或其派生数据，兼容已有数据库。
+CREATE TABLE IF NOT EXISTS library_state (
+  book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  archived_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_chapters_book ON chapters(book_id, idx);
 
 CREATE TABLE IF NOT EXISTS progress (

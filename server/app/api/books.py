@@ -131,7 +131,7 @@ def _publish_books_changed() -> None:
     """
     conn = get_conn()
     try:
-        count = conn.execute("SELECT COUNT(*) AS c FROM books").fetchone()["c"]
+        count = conn.execute("SELECT COUNT(*) AS c FROM books WHERE id NOT IN (SELECT book_id FROM library_state)").fetchone()["c"]
     finally:
         conn.close()
     revision = events_bus.publish_books_changed(int(count))
@@ -153,8 +153,15 @@ async def create_book(
         return _error(exc.status_code, exc.code, exc.message)
     except Exception as exc:  # 兜底，避免把堆栈直接抛给前端
         return _error(500, "internal_error", f"导入失败：{exc}")
-    # 契约 8.2：只有真正入库/重建才广播；去重命中（force=0）不广播
-    if not result["deduped"]:
+    # 重新导入已移出的书，恢复原书及其所有阅读数据。
+    conn = get_conn()
+    try:
+        with conn:
+            restored = conn.execute("DELETE FROM library_state WHERE book_id=?", (result["book"]["id"],)).rowcount > 0
+    finally:
+        conn.close()
+    result["restored"] = restored
+    if not result["deduped"] or restored:
         try:
             _publish_books_changed()
         except Exception as exc:  # 广播失败不影响导入结果
@@ -168,17 +175,20 @@ async def create_book(
 # ---------------------------------------------------------------------------
 
 @router.get("/api/books")
-def list_books():
+def list_books(archived: bool = False):
     conn = get_conn()
     try:
         rows = conn.execute(
             """
             SELECT b.id, b.title, b.format, b.total_chars, b.chapter_count, b.created_at,
-                   p.chapter AS last_chapter, p.percent AS percent
+                   p.chapter AS last_chapter, p.percent AS percent, p.updated_at AS last_read_at,
+                   s.archived_at
             FROM books b
             LEFT JOIN progress p ON p.book_id = b.id
+            LEFT JOIN library_state s ON s.book_id = b.id
+            WHERE (s.book_id IS NOT NULL) = ?
             ORDER BY b.created_at DESC, b.id ASC
-            """
+            """, (int(archived),)
         ).fetchall()
     finally:
         conn.close()
@@ -203,11 +213,49 @@ def list_books():
             "created_at": r["created_at"],
             "last_chapter": r["last_chapter"] if r["last_chapter"] is not None else 0,
             "percent": percent,
+            "has_progress": r["last_read_at"] is not None,
+            "last_read_at": r["last_read_at"] or 0,
+            "archived_at": r["archived_at"],
         }
         if fmt == "cbz":
             item["page_count"] = chapter_count
         books.append(item)
     return {"books": books}
+
+
+@router.patch("/api/books/{book_id}")
+async def update_book(book_id: str, request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return _error(400, "invalid_json", "需要 JSON 对象")
+    if not isinstance(body, dict) or not body or set(body) - {"title", "archived"}:
+        return _error(400, "invalid_fields", "仅支持 title 和 archived")
+    title = body.get("title")
+    if "title" in body and (not isinstance(title, str) or not title.strip() or len(title.strip()) > 200):
+        return _error(400, "invalid_title", "书名须为 1–200 个字符")
+    if "archived" in body and not isinstance(body["archived"], bool):
+        return _error(400, "invalid_archived", "archived 必须为布尔值")
+    conn = get_conn()
+    try:
+        if _book_row(conn, book_id) is None:
+            return _error(404, "book_not_found", "书籍不存在")
+        with conn:
+            if "title" in body:
+                conn.execute("UPDATE books SET title=? WHERE id=?", (title.strip(), book_id))
+            if "archived" in body:
+                if body["archived"]:
+                    conn.execute("INSERT INTO library_state(book_id,archived_at) VALUES(?,?) ON CONFLICT(book_id) DO NOTHING", (book_id, int(time.time())))
+                else:
+                    conn.execute("DELETE FROM library_state WHERE book_id=?", (book_id,))
+        book = importer.book_to_dict(_book_row(conn, book_id))
+    finally:
+        conn.close()
+    try:
+        _publish_books_changed()
+    except Exception as exc:
+        log.warning("books_changed 广播失败：%s", exc)
+    return {"book": book}
 
 
 @router.get("/api/books/{book_id}")

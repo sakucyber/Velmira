@@ -14,6 +14,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   let fetchAc = null;      // 搜索/注释请求
   let popover = null;
   let popoverOff = null;
+  let returnFocus = null;
 
   layer.addEventListener('click', (e) => { if (e.target === layer) close(); });
 
@@ -22,7 +23,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     if (popoverOff) { document.removeEventListener('mousedown', popoverOff, true); popoverOff = null; }
   }
 
-  function close() {
+  function close(restoreFocus = true) {
     removePopover();
     if (fetchAc) { fetchAc.abort(); fetchAc = null; }
     notes = [];            // 抽屉关闭即释放全书注释列表（内存约束）
@@ -38,6 +39,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     setTimeout(() => {
       if (dying.parentNode) dying.parentNode.removeChild(dying);
       if (!shell) layer.hidden = true;
+      if (!shell && restoreFocus && returnFocus?.isConnected) returnFocus.focus();
     }, 240);
   }
 
@@ -45,11 +47,22 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   function isSegmentsOpen() { return kind === 'segments'; }
 
   function open(nextKind, title, build) {
-    close();
+    const trigger = shell ? returnFocus : document.activeElement;
+    close(false);
+    returnFocus = trigger;
     kind = nextKind;
     shell = el('aside', 'drawer drawer-' + nextKind);
     shell.setAttribute('role', 'dialog');
     shell.setAttribute('aria-label', title);
+    shell.setAttribute('aria-modal', 'true');
+    shell.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+      if (e.key !== 'Tab') return;
+      const items = [...shell.querySelectorAll('button, input, select, textarea, a[href], [tabindex="0"]')].filter((n) => !n.disabled && n.getClientRects().length);
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    });
     const head = el('div', 'drawer-head');
     head.appendChild(el('h2', 'drawer-title', title));
     const x = el('button', 'btn btn-icon drawer-close', '✕');
@@ -68,6 +81,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       if (!shell) return;
       layer.classList.add('open');
       shell.classList.add('open');
+      x.focus();
     });
   }
 
@@ -416,6 +430,57 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     renderNotes(body, notesChapter);
   }
 
+  function openSettings(options) {
+    open('settings', '阅读设置', (area) => {
+      area.append(el('h3', 'settings-heading', '阅读显示'));
+      area.append(el('p', 'settings-help', '设置即时生效，并在本机记住。'));
+      const title = el('div', 'settings-label', '主题');
+      const themes = el('div', 'settings-themes');
+      themes.setAttribute('role', 'group'); themes.setAttribute('aria-label', '阅读主题');
+      for (const theme of options.themes) {
+        const button = el('button', 'btn settings-theme', theme.name);
+        button.type = 'button'; button.dataset.themeChoice = theme.id;
+        button.setAttribute('aria-pressed', String(theme.id === options.theme));
+        const swatch = el('i', 'settings-swatch'); swatch.style.background = theme.swatch;
+        button.prepend(swatch);
+        button.addEventListener('click', () => {
+          options.onTheme(theme.id);
+          for (const b of themes.children) b.setAttribute('aria-pressed', String(b === button));
+        });
+        themes.append(button);
+      }
+      area.append(title, themes);
+      if (options.fontSizes) {
+        const label = el('label', 'settings-field', '字号');
+        const select = el('select', 'shelf-input'); select.setAttribute('aria-label', '阅读字号');
+        options.fontSizes.forEach((size, index) => {
+          const item = el('option', null, size + ' px'); item.value = index; select.append(item);
+        });
+        select.value = options.fontSize;
+        select.addEventListener('change', async () => {
+          select.disabled = true;
+          try { await options.onFont(Number(select.value)); }
+          finally { select.disabled = false; select.focus(); }
+        });
+        label.append(select); area.append(label);
+      }
+      if (options.onFit) {
+        const label = el('label', 'settings-field', '漫画显示');
+        const select = el('select', 'shelf-input'); select.setAttribute('aria-label', '漫画显示方式');
+        for (const [value, name] of [['page', '适页'], ['width', '适宽']]) { const item = el('option', null, name); item.value = value; select.append(item); }
+        select.value = options.fit; select.addEventListener('change', () => options.onFit(select.value));
+        label.append(select); area.append(label);
+      }
+      area.append(el('h3', 'settings-heading', '快捷键'));
+      const shortcuts = options.comic
+        ? [['← / Page Up', '上一页'], ['→ / Page Down / 空格', '下一页'], ['Esc', '关闭设置']]
+        : [['← / Page Up', '上一页'], ['→ / Page Down / 空格', '下一页'], ['Shift + 空格', '上一页'], ['T', '打开目录'], ['F', '搜索正文'], ['B', '添加或取消当前段书签'], ['Esc', '关闭面板或批注弹层']];
+      const list = el('dl', 'settings-shortcuts');
+      for (const [keys, action] of shortcuts) { const term = el('dt'); term.append(el('kbd', null, keys)); list.append(term, el('dd', null, action)); }
+      area.append(list, el('p', 'settings-help', '输入文字或打开设置时，翻页快捷键暂停。触屏可左右滑动翻页，点击批注文字可查看内容。'));
+    });
+  }
+
   /* ---------------- 主题菜单（小弹出层） ---------------- */
   function openTheme(anchor, themes, current, onChange) {
     removePopover();
@@ -446,7 +511,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   }
 
   return {
-    openToc, openSearch, openSegments, updateSegments, openTheme,
+    openToc, openSearch, openSegments, updateSegments, openTheme, openSettings,
     openBookmarks, updateBookmarks, openNotes, updateNote, openAI, updateAI,
     close, isOpen, isSegmentsOpen,
   };

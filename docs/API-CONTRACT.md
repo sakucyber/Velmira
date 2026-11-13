@@ -443,3 +443,13 @@ data: {"revision": 7, "count": 3}
 - `GET/PATCH /api/books/{book_id}/ai/characters/{id}` → 人工查看/编辑；`POST .../{id}/freeze` 固定确定性英文 `identity_block` 并保存 `identity_hash`；`POST .../{id}/unfreeze` 必须 `confirm=true`，升版本并保留旧身份快照。
 - 自动抽取幂等键为 `(book_id, segment_id, prompt_version, sha256(segment_text + prompt_version))`；provider 输出非法时只将该片段标为 `needs_review`，不会中断整批。
 - 人物卡视觉字段必须有原文 `evidence[{field,value,quote,ch}]`；冻结后自动流程不覆盖 identity 字段，只能追加证据/变体。
+
+# 11. 书架管理与阅读设置增量
+
+- `GET /api/books` 默认仅返回在架书籍；`GET /api/books?archived=true` 仅返回已移出书籍。列表额外提供 `has_progress:boolean`、`last_read_at:int`（未读为 0）、`archived_at:int|null`。漫画默认第一页的百分比不代表已读，阅读状态以 `has_progress` 为准。
+- `PATCH /api/books/{book_id}` 接收非空 JSON 对象 `{title?: string, archived?: boolean}`。书名去首尾空白后须为 1–200 字符，`archived` 仅接受布尔值，未知字段返回 400；书籍不存在返回 404。成功返回 200 `{"book": {...}}`，与详情端点的 book 字段一致。
+- 新增幂等表 `library_state(book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE, archived_at INTEGER NOT NULL)`；有记录表示已移出。移出/恢复只改变此表，正文、进度、书签、注释与 M2 记录均保留。旧数据库启动时自动添加此表。
+- 重新导入已移出的相同文件会删除移出标记，返回额外的 `restored:true`，保留原书 ID 与阅读数据；正常导入返回 `restored:false`。原有去重和 `force` 语义不变。
+- 成功重命名、移出、恢复、重新导入恢复均广播 `books_changed`；事件的 `count` 为在架书籍数，广播失败不影响已提交的操作。
+- 书架密度与排序存在独立本机键 `velmira.shelf`；阅读主题与字号继续使用 `velmira.r1`，漫画适页/适宽继续使用 `velmira.comic.fit`。不改变阅读位置与注释坐标契约。
+- 阅读“设置”集中显示主题、字号与当前模式实际支持的快捷键，打开时暂停翻页快捷键；关闭可用 Escape 并恢复触发按钮焦点。移除底部常驻快捷键提示，保留页码与全书进度。
