@@ -190,6 +190,8 @@ sys.stdout.write(base64.b64encode(b.getvalue()).decode())`], { encoding: 'utf8' 
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await nav(base + `/?book=${text.id}&ch=0&debug=1`, '!!window.__velmira'); await click('#btn-settings');
   await waitFor('!!document.querySelector(".drawer-settings.open")');
+  await sleep(320); // Wait for the settings drawer's slide-in before hit-testing a touch.
+  await evaluate('document.querySelector(".settings-font-range").scrollIntoView({block:"center"})');
   await send('Emulation.setTouchEmulationEnabled', { enabled: true });
   const touch = await evaluate(`(() => {const r=document.querySelector('.settings-font-range').getBoundingClientRect();return {x:r.left+r.width*.75,y:r.top+r.height/2,id:1};})()`);
   await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch] });

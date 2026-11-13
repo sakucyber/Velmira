@@ -7,6 +7,8 @@ import time
 from fastapi import APIRouter, Body
 
 from ..ai import director, settings, book_analysis
+from .. import task_log
+from ..ai import retry
 from ..ai.models import stable_json
 from ..ai.providers import request_json, make_provider
 from ..manga import service as s
@@ -82,9 +84,10 @@ async def list_models():
 async def probe():
     cfg = director.text_config()
     try:
-        raw = await make_provider(cfg).complete(system="Return only JSON.", user='Return {"ok":true}.', schema={"type": "object"})
-        if director.json_object(raw).get("ok") is not True:
-            raise ValueError()
+        def validate(raw):
+            if director.json_object(raw).get("ok") is not True:
+                raise ValueError()
+        await retry.complete(make_provider(cfg), system="Return only JSON.", user='Return {"ok":true}.', schema={"type": "object"}, validate=validate)
         return {"ok": True, "model": cfg["model"]}
     except Exception:
         raise MangaError("文本 AI 检测失败，请检查模型、地址和密钥", "text_probe_failed", 502) from None
@@ -92,6 +95,10 @@ async def probe():
 
 @router.post("/api/books/{book_id}/manga/plan")
 async def create_plan(book_id: str, payload: dict = Body(...)):
+    return await plan_for(book_id, payload)
+
+
+async def plan_for(book_id, payload, *, report=None, guard=lambda: None):
     fields(payload, {"scene_id", "form_id", "shot", "action", "para", "flashback"})
     cfg = director.text_config()
     if not isinstance(payload.get("scene_id"), str) or not 1 <= len(payload["scene_id"]) <= 200:
@@ -111,7 +118,8 @@ async def create_plan(book_id: str, payload: dict = Body(...)):
         if cached:
             return {"plan": json.loads(cached[0]), "cached": True}
     # Release SQLite's writer lock before both network requests.
-    result = await director.write_plan(material, cfg)
+    result = await director.write_plan(material, cfg, report=report or task_log.reporter(book_id, "manual", "directing"), guard=guard)
+    guard()
     with connection(book_id) as conn:
         if digest(director.prepare_material(conn, book_id, payload)) != source_hash:
             raise MangaError("分析期间场景或人物发生变化，请重新分析", "text_plan_stale", 409)

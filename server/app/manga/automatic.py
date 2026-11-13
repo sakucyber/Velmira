@@ -8,7 +8,8 @@ import time
 
 from PIL import Image
 
-from .. import db
+from .. import db, task_log
+from ..ai import retry
 from ..ai import book_analysis as analysis, director
 from ..ai.models import CARD_FIELDS, identity_hash, render_identity, stable_json
 from ..ai.providers import make_provider
@@ -43,11 +44,14 @@ def guard(conn, job):
 
 def save(conn, job, state, status, message, *, chapter=None, enabled=1):
     guard(conn, job)
+    previous = row(conn, job["book_id"])
     changed = conn.execute("UPDATE auto_manga SET state_json=?,status=?,message=?,chapter=?,enabled=?,updated_at=? WHERE book_id=? AND run_id=? AND epoch=? AND enabled=1",
                  (stable_json(state), status, message, job["chapter"] if chapter is None else chapter,
                   enabled, int(time.time()), job["book_id"], job["run_id"], job["epoch"])).rowcount
     if not changed:
         raise Paused()
+    if previous["status"] != status or previous["message"] != message:
+        task_log.record(conn, job["book_id"], job["run_id"], status, message)
 
 
 def overview(conn, book_id):
@@ -76,6 +80,7 @@ def toggle(conn, book_id, enabled, chapter):
             if owned:
                 conn.execute("UPDATE book_analysis SET status='paused' WHERE book_id=? AND run_id=? AND status IN ('queued','running')", (book_id, owned))
             conn.execute("UPDATE auto_manga SET enabled=0,epoch=epoch+1,status='paused',message='已暂停；正在处理的一张图会保存，之后不再提交新任务',updated_at=? WHERE book_id=?", (int(time.time()), book_id))
+            task_log.record(conn, book_id, old["run_id"], "paused", "已暂停自动漫画")
         return overview(conn, book_id)
     if old and old["enabled"]:
         return overview(conn, book_id)
@@ -103,6 +108,7 @@ def toggle(conn, book_id, enabled, chapter):
         state = json.loads(row(conn, book_id)["state_json"])
         state["analysis_run"] = reading["run_id"]
         conn.execute("UPDATE auto_manga SET state_json=? WHERE book_id=?", (stable_json(state), book_id))
+    task_log.record(conn, book_id, row(conn, book_id)["run_id"], "queued", "已开启自动漫画，从保存的章节位置继续")
     return overview(conn, book_id)
 
 
@@ -230,8 +236,9 @@ async def step(job):
             summary = conn.execute("SELECT summary_json FROM chapter_summaries WHERE book_id=? AND chapter=?", (bid, job["chapter"])).fetchone()
             material = {"text": scene["text"], "characters": characters, "previous_panels": state.get("previous", []),
                         "chapter_summary": json.loads(summary[0])["summary"] if summary else ""}
-            raw = await make_provider(cfg).complete(system=STORY_SYSTEM, user=stable_json(material), schema={"type": "object"}, temperature=.2)
-            story = normalize_story(raw, scene, characters)
+            story = await retry.complete(make_provider(cfg), system=STORY_SYSTEM, user=stable_json(material), schema={"type": "object"}, temperature=.2,
+                validate=lambda raw: normalize_story(raw, scene, characters), guard=lambda: guard(conn, job),
+                report=task_log.reporter(bid, job["run_id"], "planning"), label="连续分镜编排")
             with conn:
                 guard(conn, job)
                 state.update(story=story, panel=0, scene_id=scene["id"], config=config_hash, scene_hash=digest(dict(scene)))
@@ -294,8 +301,8 @@ async def step(job):
                 save(conn, job, state, "generating", f"第 {job['chapter'] + 1} 章 · 第 {n + 1}/{len(story)} 格" + ("已保存" if rendered else "生成中"))
                 return
             save(conn, job, state, "directing", "正在总结相关情节并编写本格生图提示词")
-        from ..api.text_ai import create_plan
-        plan = (await create_plan(bid, payload))["plan"]
+        from ..api.text_ai import plan_for
+        plan = (await plan_for(bid, payload, guard=lambda: guard(conn, job), report=task_log.reporter(bid, job["run_id"], "directing")))["plan"]
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             guard(conn, job)
@@ -319,7 +326,9 @@ async def advance(job):
         conn = db.get_conn()
         try:
             with conn:
-                conn.execute("UPDATE auto_manga SET enabled=0,status='error',message=?,updated_at=? WHERE book_id=? AND run_id=? AND epoch=? AND enabled=1", (message, int(time.time()), job["book_id"], job["run_id"], job["epoch"]))
+                changed = conn.execute("UPDATE auto_manga SET enabled=0,status='error',message=?,updated_at=? WHERE book_id=? AND run_id=? AND epoch=? AND enabled=1", (message, int(time.time()), job["book_id"], job["run_id"], job["epoch"])).rowcount
+                if changed:
+                    task_log.record(conn, job["book_id"], job["run_id"], "error", "自动漫画已停止，请查看当前阶段提示", "error")
         finally:
             conn.close()
 

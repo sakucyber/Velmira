@@ -60,6 +60,7 @@ export async function mountReader({ bookId, params, debug }) {
 
   // 分页内核按需动态加载：CBZ 漫画分支不需要 paging.js（省 1 个首屏请求）
   let pager = null;
+  let rightComics = null, rightComicsPromise, autoStatus = null;
 
   let panels = null;
   let chapterAc = null;
@@ -170,7 +171,7 @@ export async function mountReader({ bookId, params, debug }) {
   autoToggle.setAttribute('aria-label', '自动生成连贯漫画'); autoToggle.setAttribute('aria-checked', 'false'); autoToggle.disabled = true;
   const autoView = el('button', 'btn btn-tool auto-manga-view', '漫画进度'); autoView.type = 'button';
   dom.settingsBtn.parentElement.prepend(autoToggle, autoView);
-  let autoStatus = null, autoBusy = false, autoTimer;
+  let autoBusy = false, autoTimer;
   const autoAc = new AbortController();
   function showAuto(value) {
     autoStatus = value;
@@ -180,6 +181,14 @@ export async function mountReader({ bookId, params, debug }) {
     autoToggle.disabled = autoBusy;
     autoToggle.title = value.message;
     autoView.textContent = value.pages ? '漫画 · ' + value.pages + ' 页' : value.status === 'error' ? '漫画 · 已中断' : '漫画进度';
+    if (rightComics) rightComics.update(value, state.chapter);
+    else if (value.pages && !rightComicsPromise) {
+      rightComicsPromise = import('./reader-comics.js').then(({ mountReaderComics }) => {
+        if (autoAc.signal.aborted) return;
+        rightComics = mountReaderComics({ main: dom.main, bookId, signal: autoAc.signal, onLayout: () => pager.relocate().then(() => pager.reapplyAnnotations()) });
+        rightComics.update(autoStatus, state.chapter);
+      }).catch(() => { rightComicsPromise = null; });
+    }
   }
   async function openAuto() {
     const p = await ensurePanels();
@@ -427,6 +436,7 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   function updateProgressUI() {
+    if (rightComics && autoStatus) rightComics.update(autoStatus, state.chapter);
     if (comicLink) {
       const links = state.book.reading_links;
       // Match the latest source paragraph at or before the reading position.
@@ -719,7 +729,7 @@ export async function mountReader({ bookId, params, debug }) {
     return fontResize;
   }
 
-  async function openSettings() {
+  async function openSettings(section) {
     if (annUI) annUI.hideMenu();
     const p = await ensurePanels();
     p.openSettings({ themes: THEMES, theme, fontRange: FONT_SIZE, fontSize,
@@ -727,7 +737,7 @@ export async function mountReader({ bookId, params, debug }) {
         theme = next; applyTheme(theme); persist(); pager.reapplyAnnotations();
       },
       onFont: changeFontSize,
-    });
+    }, section === 'manga' ? 'manga' : 'reading');
   }
 
   /* ================= 面板 ================= */
@@ -737,6 +747,7 @@ export async function mountReader({ bookId, params, debug }) {
       panels = mod.createPanels({
         layer: dom.layer,
         bookId,
+        onSettings: openSettings,
         onJump: jumpTo,
         onSegmentJump: jumpToSegment,
         onChapterSelect: goChapter,
@@ -848,6 +859,7 @@ export async function mountReader({ bookId, params, debug }) {
   function onKeydown(e) {
     if (panels && panels.isOpen()) return;
     const t = e.target;
+    if (t?.closest?.('.reader-comics')) return;
     if (t && t.closest && t.closest('.ann-float') && e.key !== 'Escape') return;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (e.key === 'Escape') {

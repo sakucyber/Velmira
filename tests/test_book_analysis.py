@@ -25,6 +25,8 @@ def output(text="Ari walked into the garden.", **changes):
 
 class BookAnalysisTests(unittest.TestCase):
     def setUp(self):
+        p = patch("server.app.ai.retry.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
+        p = patch("server.app.manga.queue.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         root = Path(temp.name)
         for target, value in [("server.app.db.DB_PATH", root / "app.db"), ("server.app.config.DATA_DIR", root)]:
@@ -84,6 +86,16 @@ class BookAnalysisTests(unittest.TestCase):
         self.assertEqual(len(self.sql("SELECT * FROM scenes WHERE segment_id LIKE 'ba_%'")), 2)
         self.run_job(provider)
         self.assertEqual(provider.complete.await_count, 2)
+
+    def test_analysis_recovers_on_third_attempt_and_logs_without_secrets(self):
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=[RuntimeError("test-secret"), {"synopsis": []}, output()]))
+        result = self.run_job(provider)
+        self.assertEqual(result["analysis"]["status"], "done")
+        self.assertEqual(provider.complete.await_count, 3)
+        logs = self.sql("SELECT message,level FROM task_logs ORDER BY id")
+        self.assertTrue(any("3/3" in row["message"] for row in logs))
+        self.assertNotIn("test-secret", json.dumps(logs))
+        self.assertTrue(any("人物卡与章节大意已保存" in row["message"] for row in logs))
 
     def test_partial_failure_resumes_without_repeating_success(self):
         self.add_chapter(1, "Ari waited by the gate.")

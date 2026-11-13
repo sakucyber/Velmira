@@ -18,6 +18,8 @@ from manga_fixture import seed
 
 class AutomaticTests(unittest.TestCase):
     def setUp(self):
+        p = patch("server.app.ai.retry.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
+        p = patch("server.app.manga.queue.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         for target, value in [("server.app.db.DB_PATH", self.root / "app.db"), ("server.app.config.DATA_DIR", self.root)]:
@@ -39,7 +41,7 @@ class AutomaticTests(unittest.TestCase):
                                for shot, action, caption in [("medium", "walk into the park", "走入公园。"), ("reaction", "stop beside the bench", "随后停下脚步。")]]}
         self.story_provider = SimpleNamespace(complete=AsyncMock(side_effect=story))
         p = patch.object(a, "make_provider", return_value=self.story_provider); p.start(); self.addCleanup(p.stop)
-        async def plan(material, config):
+        async def plan(material, config, **kwargs):
             return {"summary": {"summary": material["action"]}, "visual_prompt": "A single adult in a quiet park, coherent daylight, consistent clothing, face clearly visible."}
         self.plan = AsyncMock(side_effect=plan)
         p = patch.object(director, "write_plan", self.plan); p.start(); self.addCleanup(p.stop)
@@ -138,6 +140,37 @@ class AutomaticTests(unittest.TestCase):
             self.call(False)
             self.assertEqual(self.sql("SELECT status FROM book_analysis")[0]["status"], "paused")
 
+    def test_logs_persist_are_bounded_and_pages_follow_chapter(self):
+        from server.app import task_log
+        self.call(); self.finish()
+        result = self.client.get(self.base + "/auto/logs").json()
+        self.assertTrue(result["logs"])
+        self.assertTrue(any("漫画页已保存" in item["message"] for item in result["logs"]))
+        cursor = result["cursor"]
+        self.assertEqual(self.client.get(self.base + "/auto/logs?after=" + str(cursor)).json()["logs"], [])
+        pages = self.client.get(self.base + "/auto/pages?chapter=1&limit=1").json()
+        self.assertEqual(pages["total"], 1)
+        self.assertEqual([p["chapter"] for p in pages["pages"]], [1])
+        self.assertEqual(self.client.get(self.base + "/auto/pages?chapter=2").json()["total"], 0)
+        self.assertEqual(self.client.get("/api/books/missing/manga/auto/logs").status_code, 404)
+        conn = db.get_conn()
+        try:
+            with conn:
+                for number in range(1005): task_log.record(conn, "m3-book", result["run_id"], "test", str(number))
+        finally: conn.close()
+        self.assertEqual(self.sql("SELECT COUNT(*) AS n FROM task_logs")[0]["n"], 1000)
+        recent = self.client.get(self.base + "/auto/logs?limit=2").json()
+        self.assertEqual([x["message"] for x in recent["logs"]], ["1003", "1004"])
+
+    def test_story_recovers_on_third_attempt(self):
+        self.call()
+        story = {"panels": [{"character_id": "m3-char", "shot": "medium", "action": "walk", "caption": "走入公园。", "dialogue": "", "speaker": ""}]}
+        self.story_provider.complete.side_effect = [RuntimeError("private"), {"panels": []}, story]
+        self.advance()
+        self.assertEqual(self.story_provider.complete.await_count, 3)
+        self.assertEqual(self.sql("SELECT status FROM auto_manga")[0]["status"], "generating")
+        self.assertNotIn("private", self.client.get(self.base + "/auto/logs").text)
+
     def test_pause_during_model_request_discards_late_work(self):
         self.call()
         async def delayed(**kw):
@@ -156,7 +189,7 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertFalse(result["enabled"])
         self.assertNotIn("secret-credential", json.dumps(result))
-        self.assertEqual(self.story_provider.complete.await_count, 1)
+        self.assertEqual(self.story_provider.complete.await_count, 3)
 
     def test_source_change_and_reference_revocation_stop_work(self):
         self.call(); self.advance(4)

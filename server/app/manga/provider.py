@@ -87,10 +87,9 @@ class ComfyProvider:
                     return raw
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(2000).decode("utf-8", "replace")
-            raise MangaError(f"ComfyUI HTTP {exc.code}: {detail}", "comfy_error", 502) from exc
+            raise MangaError(f"ComfyUI HTTP {exc.code}，请检查服务端任务记录", "comfy_error", 502) from None
         except (OSError, ValueError) as exc:
-            raise MangaError(f"无法连接图像服务：{exc}", "comfy_unavailable", 503) from exc
+            raise MangaError("无法连接图像服务，请检查连接", "comfy_unavailable", 503) from None
 
     def probe(self):
         info = self.request("/object_info")
@@ -117,7 +116,7 @@ class ComfyProvider:
             before_submit(prompt_id, graph)
         result = self.request("/prompt", {"prompt": graph, "client_id": "velmira-m3", "prompt_id": prompt_id})
         if result.get("node_errors") or not result.get("prompt_id"):
-            raise MangaError("节点或模型配置错误：" + str(result.get("node_errors", result))[:1500], "invalid_workflow", 502)
+            raise MangaError("节点或模型配置错误，请检查 ComfyUI", "invalid_workflow", 502)
         return result["prompt_id"], graph
 
     def result(self, prompt_id):
@@ -126,7 +125,7 @@ class ComfyProvider:
         if not item:
             return None
         if item.get("status", {}).get("status_str") == "error":
-            raise MangaError("ComfyUI 执行失败：" + str(item["status"].get("messages", []))[-1500:], "render_failed", 502)
+            raise MangaError("ComfyUI 执行失败，请检查服务端任务记录", "render_failed", 502)
         images = item.get("outputs", {}).get("9", {}).get("images", [])
         if not images:
             raise MangaError("任务完成但没有输出图片", "image_missing", 502)

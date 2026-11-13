@@ -6,9 +6,9 @@ import json
 import time
 import uuid
 
-from .. import db
+from .. import db, task_log
 from ..manga.models import MangaError, digest
-from . import settings
+from . import settings, retry
 from .director import json_object, checked_text
 from .extraction import _merge_character, scene_id
 from .models import CARD_FIELDS, normalize_scene, normalize_character, stable_json
@@ -128,14 +128,14 @@ def check_active(conn, job):
         raise MangaError("文本模型设置已变化，请继续分析以使用新设置")
 
 
-async def cached_call(conn, job, provider, key, system, material):
+async def cached_call(conn, job, provider, key, system, material, validate=json_object):
     check_active(conn, job)
     cached = conn.execute("SELECT result_json FROM analysis_chunks WHERE book_id=? AND cache_key=?", (job["book_id"], key)).fetchone()
     if cached:
         return json.loads(cached[0])
-    raw = json_object(await provider.complete(system=system, user=stable_json(material), schema={"type": "object"}))
-    check_active(conn, job)
-    return raw
+    return await retry.complete(provider, system=system, user=stable_json(material), schema={"type": "object"},
+        validate=validate, guard=lambda: check_active(conn, job), label="章节分析",
+        report=task_log.reporter(job["book_id"], job["run_id"], "analysis"))
 
 
 def cache(conn, job, key, value):
@@ -171,7 +171,8 @@ async def reduce_summary(conn, job, provider, parts):
             if len(group) == 1:
                 merged.append(group[0]); continue
             key = digest({"reduce": group, "config": job["config_json"], "version": VERSION})
-            raw = await cached_call(conn, job, provider, key, REDUCE_SYSTEM, {"parts": group})
+            raw = await cached_call(conn, job, provider, key, REDUCE_SYSTEM, {"parts": group},
+                                    validate=lambda raw: {"summary": checked_text(json_object(raw), "summary", 2000, True)})
             summary = checked_text(raw, "summary", 2000, True)
             with conn:
                 cache(conn, job, key, {"summary": summary})
@@ -234,8 +235,8 @@ async def process(job):
                                 "preceding_part": parts[-1]["synopsis"] if parts else "", "known_names": names,
                                 "visual_fields": CARD_FIELDS, "text": piece["text"]}
                     if piece["text"].strip():
-                        raw = await cached_call(conn, job, provider, part_key, SYSTEM, material)
-                        part = normalize_part(raw, piece["text"], row["idx"])
+                        part = await cached_call(conn, job, provider, part_key, SYSTEM, material,
+                            validate=lambda raw: normalize_part(json_object(raw), piece["text"], row["idx"]))
                     else:
                         part = normalize_part({"synopsis": "本章无正文。"}, "", row["idx"])
                     with conn:
@@ -253,6 +254,8 @@ async def process(job):
                     value = save_chapter(conn, job, row, pieces, parts, summary, key)
             previous = value["summary"]
             with conn:
+                task_log.record(conn, job["book_id"], job["run_id"], "analysis", f"第 {row['idx'] + 1} 章分析完成，人物卡与章节大意已保存")
+            with conn:
                 check_active(conn, job)
                 conn.execute("UPDATE book_analysis SET completed=?,updated_at=? WHERE book_id=?", (ordinal + 1, int(time.time()), job["book_id"]))
         with conn:
@@ -266,7 +269,7 @@ async def process(job):
         # Gateway bodies can contain credentials. Persist only a fixed actionable message.
         with conn:
             conn.execute("UPDATE book_analysis SET status='error',error=?,updated_at=? WHERE book_id=? AND run_id=? AND status='running'",
-                         ("整书分析中断：请检查文本 API 连接、模型与输出格式，点击继续可复用已完成内容。", int(time.time()), job["book_id"], job["run_id"]))
+                         ("整书分析中断：文本请求最多尝试 3 次；请检查 API、模型与输出格式，继续时复用已完成内容。", int(time.time()), job["book_id"], job["run_id"]))
     finally:
         conn.close()
 

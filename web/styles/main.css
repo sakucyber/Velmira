@@ -1092,3 +1092,29 @@ body.comic-mode .progress-track { display: none !important; }
     scroll-behavior: auto !important;
   }
 }
+
+/* Reading workspace and task visibility. */
+.settings-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.settings-tabs [aria-pressed="true"], .ai-row[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-weak); }
+.drawer-settings { width: min(680px, 100vw); }
+.settings-reading[hidden], .settings-manga[hidden], .ai-analysis-section[hidden], .ai-characters-section[hidden], .reader-comics[hidden] { display: none; }
+.ai-rows { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 20px; }
+.ai-row { width: 100%; min-height: 52px; justify-content: space-between; text-align: left; }
+.ai-analysis-section > .btn { margin: 0 8px 10px 0; }
+.automatic-logs { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.automatic-log { display: flex; align-items: baseline; gap: 10px; margin: 6px 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.automatic-log time { flex-shrink: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
+.automatic-log[data-level="error"] { color: var(--danger); }
+.automatic-log[data-level="warning"] { color: var(--accent); }
+.reader-main.with-comics { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 38%); }
+.with-comics .reader-viewport { min-width: 0; min-height: 0; }
+.with-comics .page-next { right: calc(38% + 14px); }
+.reader-comics { min-width: 0; min-height: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain; padding: 16px; border-left: 1px solid var(--line); background: var(--surface); }
+.reader-comics-head h2 { font-size: 15px; margin: 0; }
+.reader-comic-page { margin: 16px 0; }
+.reader-comic-page img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.reader-comic-page figcaption { margin-top: 6px; }
+@media (max-width: 800px) {
+  .reader-main.with-comics { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) minmax(140px, 40%); }
+  .reader-comics { border-left: 0; border-top: 1px solid var(--line); }
+}

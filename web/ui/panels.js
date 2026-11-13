@@ -7,7 +7,7 @@
    ============================================================ */
 import { el, clear, debounce, apiGet, apiDelete, fmtTime, normalizeFontSize, toast } from '../util/core.js';
 
-export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSelect, onNotesJump, onNotesChanged, onBookmarkJump, onBookmarkDelete }) {
+export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSelect, onNotesJump, onNotesChanged, onBookmarkJump, onBookmarkDelete, onSettings }) {
   let shell = null;        // 当前抽屉
   let body = null;
   let kind = null;         // 'toc' | 'search' | 'segments' | 'bookmarks' | 'notes'
@@ -16,6 +16,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
   let popoverOff = null;
   let returnFocus = null;
   let disposePanel = null;
+  let aiTab = 'analysis';
 
   layer.addEventListener('click', (e) => { if (e.target === layer) close(); });
 
@@ -242,8 +243,22 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     clear(area);
     const scenes = (data && Array.isArray(data.scenes)) ? data.scenes : [];
     const characters = (data && Array.isArray(data.characters)) ? data.characters : [];
+    const nav = el('div', 'ai-rows'); nav.setAttribute('aria-label', 'AI 分析与人物卡');
+    const analysisArea = el('section', 'ai-analysis-section');
+    const charactersArea = el('section', 'ai-characters-section');
+    for (const [id, title, count] of [['analysis', 'AI 分析', scenes.length + ' 个场景'], ['characters', '人物卡', characters.length + ' 位人物']]) {
+      const button = el('button', 'btn ai-row'); button.type = 'button'; button.dataset.aiSection = id;
+      button.append(el('strong', null, title), el('span', 'manga-note', count));
+      button.setAttribute('aria-pressed', String(aiTab === id));
+      button.addEventListener('click', () => {
+        aiTab = id; analysisArea.hidden = id !== 'analysis'; charactersArea.hidden = id !== 'characters';
+        for (const b of nav.children) b.setAttribute('aria-pressed', String(b === button));
+      }); nav.appendChild(button);
+    }
+    analysisArea.hidden = aiTab !== 'analysis'; charactersArea.hidden = aiTab !== 'characters';
+    area.append(nav, analysisArea, charactersArea);
     const wholeBook = el('button', 'btn btn-primary', '整书分析 · 人物卡与章节大意');
-    wholeBook.addEventListener('click', () => openManga('analysis')); area.appendChild(wholeBook);
+    wholeBook.addEventListener('click', () => openManga('analysis')); analysisArea.appendChild(wholeBook);
     const extract = el('button', 'btn ai-extract', '准备片段并分析本章');
     extract.type = 'button';
     extract.addEventListener('click', async () => {
@@ -251,12 +266,12 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       extract.textContent = '分析中…';
       try { await onExtract(); } finally { extract.disabled = false; extract.textContent = '准备片段并分析本章'; }
     });
-    area.appendChild(extract);
+    analysisArea.appendChild(extract);
     const manga = el('button', 'btn ai-extract', '漫画生成');
     manga.type = 'button';
     manga.addEventListener('click', () => openManga());
-    area.appendChild(manga);
-    area.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个场景') : '尚未生成场景；可在漫画生成的出图设置中配置文本 AI，未配置时使用离线 Mock'));
+    analysisArea.appendChild(manga);
+    analysisArea.appendChild(el('div', 'seg-note', scenes.length ? ('已生成 ' + scenes.length + ' 个场景') : '尚未生成场景；可在设置的“漫画与画风设置”中配置文本 AI，未配置时使用离线 Mock'));
     for (const scene of scenes) {
       const card = el('article', 'ai-scene-card');
       card.appendChild(el('div', 'ai-scene-title', '第 ' + ((scene.chapter_id | 0) + 1) + ' 章 · ' + ((scene.plan && scene.plan.summary) || '未命名场景')));
@@ -264,10 +279,10 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       const meta = [plan.location, plan.time_of_day, plan.drawable == null ? '' : ('可绘制度 ' + Math.round(Number(plan.drawable) * 100) + '%')].filter(Boolean).join(' · ');
       if (meta) card.appendChild(el('div', 'ai-scene-meta', meta));
       if (plan.reason) card.appendChild(el('div', 'ai-scene-reason', plan.reason));
-      area.appendChild(card);
+      analysisArea.appendChild(card);
     }
-    area.appendChild(el('div', 'ai-section-title', '人物卡 · ' + characters.length));
-    if (!characters.length) area.appendChild(el('div', 'drawer-empty', '抽取 scene 后会在这里出现人物卡'));
+    charactersArea.appendChild(el('div', 'ai-section-title', '人物卡 · ' + characters.length));
+    if (!characters.length) charactersArea.appendChild(el('div', 'drawer-empty', '抽取 scene 后会在这里出现人物卡'));
     for (const character of characters) {
       const card = el('article', 'ai-character-card');
       const head = el('div', 'ai-character-head');
@@ -284,7 +299,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
         actions.appendChild(freeze);
       }
       card.appendChild(actions);
-      area.appendChild(card);
+      charactersArea.appendChild(card);
     }
   }
 
@@ -303,7 +318,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       disposePanel = () => ac.abort();
       area.appendChild(el('p', 'seg-note', '正在加载…'));
       import('./manga.js').then(({ mountManga }) => {
-        if (!ac.signal.aborted) mountManga({ area, bookId, signal: ac.signal, initialTab });
+        if (!ac.signal.aborted) mountManga({ area, bookId, signal: ac.signal, initialTab, onSettings: () => onSettings?.('manga') });
       }).catch(() => { if (!ac.signal.aborted) area.textContent = '漫画面板加载失败，请重新打开'; });
     });
   }
@@ -313,7 +328,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       const ac = new AbortController();
       disposePanel = () => ac.abort();
       import('./automatic.js').then(({ mountAutomatic }) => {
-        if (!ac.signal.aborted) mountAutomatic({ area, bookId, signal: ac.signal, ...options, onSettings: () => openManga('config') });
+        if (!ac.signal.aborted) mountAutomatic({ area, bookId, signal: ac.signal, ...options, onSettings: () => onSettings?.('manga') });
       }).catch(() => { if (!ac.signal.aborted) area.textContent = '自动漫画面板加载失败，请重新打开'; });
     });
   }
@@ -459,8 +474,29 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     renderNotes(body, notesChapter);
   }
 
-  function openSettings(options) {
-    open('settings', '阅读设置', (area) => {
+  function openSettings(options, section = 'reading') {
+    open('settings', '设置', (container) => {
+      const nav = el('div', 'settings-tabs'); const area = el('div', 'settings-reading');
+      const manga = el('section', 'settings-manga'); manga.setAttribute('aria-label', '漫画与画风设置');
+      let controller;
+      disposePanel = () => controller?.abort();
+      const choose = (value) => {
+        area.hidden = value !== 'reading'; manga.hidden = value !== 'manga';
+        for (const b of nav.children) b.setAttribute('aria-pressed', String(b.dataset.section === value));
+        container.scrollTop = 0;
+        if (value === 'manga' && !controller) {
+          controller = new AbortController(); manga.appendChild(el('p', 'settings-help', '正在加载漫画与画风设置…'));
+          import('./manga.js').then(({ mountManga }) => {
+            if (!controller.signal.aborted) mountManga({ area: manga, bookId, signal: controller.signal, settingsOnly: true });
+          }).catch(() => { if (!controller.signal.aborted) manga.textContent = '设置加载失败，请重新打开'; });
+        }
+      };
+      for (const [id, title] of [['reading', '阅读与快捷键'], ...(!options.comic ? [['manga', '漫画与画风设置']] : [])]) {
+        const button = el('button', 'btn', title); button.type = 'button'; button.dataset.section = id;
+        button.addEventListener('click', () => choose(id)); nav.appendChild(button);
+      }
+      container.append(nav, area, manga);
+      choose(section === 'manga' && !options.comic ? 'manga' : 'reading');
       area.append(el('h3', 'settings-heading', '阅读显示'));
       area.append(el('p', 'settings-help', '设置即时生效，并在本机记住。'));
       const title = el('div', 'settings-label', '主题');

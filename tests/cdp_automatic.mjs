@@ -11,12 +11,15 @@ const base = args.includes('--base') ? args[args.indexOf('--base') + 1] : 'http:
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'velmira-auto-'));
 const port = 9343, pending = new Map(), errors = [], materials = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-let browser, ws, sequence = 0, savedSettings;
+let browser, ws, sequence = 0, savedSettings, failSummary = 2;
 const textAPI = createServer(async (request, response) => {
   try {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks));
     const system = input.messages[0].content, material = JSON.parse(input.messages[1].content);
+    if (system.includes('上下文总结编辑') && failSummary > 0) {
+      failSummary--; response.writeHead(503); response.end('Temporary fixture failure'); return;
+    }
     let output;
     if (system.includes('整书阅读分析员')) output = {
       synopsis: '林澄沿小路走入花园，随后在长椅旁停下。', summary: '林澄来到花园', kind: 'scene', location: 'garden', time_of_day: 'day', entities: ['花园'],
@@ -64,7 +67,7 @@ try {
   await new Promise(resolve => textAPI.listen(0, '127.0.0.1', resolve));
   savedSettings = (await api('/api/ai/settings')).settings;
   await api('/api/ai/settings', 'PATCH', { enabled: true, auto_analyze: false, base_url: `http://127.0.0.1:${textAPI.address().port}/v1`, model: 'gpt-oss-120b' });
-  const text = '第一章 花园\n\n林澄留着黑色短发，沿小路走进花园。随后，林澄在长椅旁停下。\n\n第二章 小路\n\n林澄留着黑色短发，又沿小路走进花园。随后，林澄在长椅旁停下。';
+  const text = '第一章 花园\n\n林澄留着黑色短发，沿小路走进花园。随后，林澄在长椅旁停下。\n\n第二章 小路\n\n' + Array.from({length: 60}, (_, i) => '林澄留着黑色短发，又沿小路走进花园。随后，林澄在长椅旁停下。第' + (i + 1) + '段。').join('\n\n');
   const upload = await fetch(base + '/api/books?filename=自动漫画示例.txt', { method: 'POST', body: text, headers: { 'Content-Type': 'application/octet-stream' } });
   assert.ok(upload.ok); const book = (await upload.json()).book;
   const prefix = '/api/books/' + book.id + '/manga';
@@ -77,11 +80,26 @@ try {
   await send('Page.enable'); await send('Runtime.enable');
   await send('Page.navigate', { url: base + '/?book=' + book.id + '&ch=1&debug=1' });
   await waitFor('!!window.__velmira && !!document.querySelector(".auto-manga-toggle") && !document.querySelector(".auto-manga-toggle").disabled');
+  await click('#btn-ai'); await waitFor('!!document.querySelector(".drawer-ai.open")');
+  assert.equal(await evaluate('document.querySelectorAll(".ai-row").length'), 2);
+  assert.ok(await evaluate('document.querySelectorAll(".ai-row")[1].getBoundingClientRect().top >= document.querySelectorAll(".ai-row")[0].getBoundingClientRect().bottom'));
+  await click('[data-ai-section=characters]');
+  assert.equal(await evaluate('document.querySelector(".ai-analysis-section").hidden && !document.querySelector(".ai-characters-section").hidden'), true);
+  await click('.drawer-ai .drawer-close'); await waitFor('!document.querySelector(".drawer-ai.open")');
   await shot('automatic-reader-desktop');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
+  await evaluate('window.__velmira.jumpTo({chapter:1, para:25})');
+  const readingPara = await evaluate('window.__velmira.pager.locatePara()');
   await click('.auto-manga-toggle');
   await waitFor('!!document.querySelector(".drawer-automatic.open [role=switch]")');
   assert.equal((await api(prefix + '/auto')).auto.start_chapter, 1);
+  await evaluate('[...document.querySelectorAll(".drawer-automatic button")].find(b=>b.textContent==="漫画与画风设置").click()');
+  await waitFor('!!document.querySelector(".drawer-settings.open [aria-label=图像后端]")');
+  assert.equal(await evaluate('document.querySelector(".settings-tabs [data-section=manga]").getAttribute("aria-pressed")'), 'true');
+  assert.equal(await evaluate('document.querySelector(".settings-reading").hidden'), true);
+  await sleep(300); await shot('automatic-settings-jump');
+  await click('.drawer-settings .drawer-close'); await waitFor('!document.querySelector(".drawer-settings.open")');
+  await click('.auto-manga-view'); await waitFor('!!document.querySelector(".drawer-automatic.open [role=switch]")');
   await click('.drawer-automatic [role=switch]');
   await waitFor('document.querySelector(".drawer-automatic [role=switch]").getAttribute("aria-checked")==="false"');
   const paused = (await api(prefix + '/auto')).auto;
@@ -97,7 +115,20 @@ try {
   }
   assert.equal((await api(prefix + '/auto')).auto.status, 'done');
   await waitFor('!!document.querySelector(".automatic-page img") && document.querySelector(".automatic-page img").complete && document.querySelector(".automatic-page img").naturalWidth>0');
+  await waitFor('document.querySelectorAll(".automatic-log").length>0');
+  const logs = (await api(prefix + '/auto/logs')).logs;
+  assert.ok(logs.some(l=>l.message.includes('漫画页已保存')));
+  assert.ok(logs.some(l=>l.level==='warning' && l.message.includes('失败')));
+  assert.ok(logs.some(l=>l.message.includes('3/3')));
   await shot('automatic-draft-desktop');
+  await click('.drawer-automatic .drawer-close'); await waitFor('!document.querySelector(".drawer-automatic.open")');
+  await waitFor('!!document.querySelector(".reader-comics img") && document.querySelector(".reader-comics img").naturalWidth>0');
+  assert.ok(await evaluate('document.querySelector(".reader-comics").getBoundingClientRect().left >= document.querySelector("#reader-viewport").getBoundingClientRect().right - 1'));
+  assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
+  await sleep(300);
+  assert.ok(Math.abs(await evaluate('window.__velmira.pager.locatePara()') - readingPara) <= 10);
+  await shot('automatic-text-comic-desktop');
+  await click('.auto-manga-view'); await waitFor('!!document.querySelector(".drawer-automatic.open")');
   const pages = (await api(prefix + '/auto/pages')).pages;
   assert.ok(pages.length > 0); assert.ok(pages.every(p => p.chapter === 1 && p.status === 'draft' && p.pending_review > 0));
   assert.ok(materials.length > 0);
@@ -108,13 +139,16 @@ try {
   await waitFor('!document.querySelector(".drawer-automatic.open")');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
   assert.ok(await evaluate('document.querySelector(".auto-manga-toggle").getBoundingClientRect().width>=80'));
-  await shot('automatic-reader-mobile');
+  assert.ok(await evaluate('document.querySelector(".reader-comics").getBoundingClientRect().top >= document.querySelector("#reader-viewport").getBoundingClientRect().bottom - 1'));
+  await sleep(300); await shot('automatic-reader-mobile');
   await send('Page.navigate', { url: base + '/?book=' + book.id + '&ch=1&debug=1' });
   await waitFor('!!window.__velmira && !!document.querySelector(".auto-manga-view")');
+  await waitFor('!!document.querySelector(".reader-comics img")');
   await click('.auto-manga-view');
   await waitFor('!!document.querySelector(".automatic-page img")');
+  await waitFor('document.querySelectorAll(".automatic-log").length>0');
   assert.deepEqual(errors, []);
-  console.log('[PASS] 阅读页开关、当前章起点、暂停续跑、真实整书分析与出图队列、草稿拼页、刷新持久化、390px 布局与零 JS 异常');
+  console.log('[PASS] 阅读页开关、当前章起点、暂停续跑、真实整书分析与出图队列、草稿拼页、三次尝试日志、设置直达、AI/人物卡两行入口、正文与漫画并排、刷新持久化、390px 布局与零 JS 异常');
   console.log('Preview: ' + base + '/?book=' + book.id + '&ch=1');
 } finally {
   if (savedSettings) {

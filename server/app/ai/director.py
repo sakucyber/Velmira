@@ -6,6 +6,7 @@ import re
 
 from .models import stable_json
 from .providers import make_provider
+from . import retry
 from .settings import load_settings
 from ..manga.models import MangaError, SHOTS, check_identity, digest, resolve_form
 
@@ -106,34 +107,36 @@ def text_config():
     return {"provider": "openai-compatible", "base_url": settings["base_url"], "model": settings["model"], "local_settings": True}
 
 
-async def write_plan(material, settings):
+async def write_plan(material, settings, *, report=None, guard=lambda: None):
     provider = make_provider(settings)
-    try:
-        summary_raw = json_object(await provider.complete(system=SUMMARY_SYSTEM, user=stable_json(material), schema={"type": "object"}, temperature=0.2))
-        summary = {key: checked_text(summary_raw, key, limit, key == "summary") for key, limit in
-                   [("summary", 1800), ("location", 300), ("time_of_day", 100), ("moment", 500), ("visible_action", 500), ("emotion", 200), ("continuity", 500)]}
+    def summary_value(raw):
+        raw = json_object(raw)
+        value = {key: checked_text(raw, key, limit, key == "summary") for key, limit in
+                 [("summary", 1800), ("location", 300), ("time_of_day", 100), ("moment", 500), ("visible_action", 500), ("emotion", 200), ("continuity", 500)]}
         for key in ("key_props", "uncertainties"):
-            values = summary_raw.get(key, [])
-            if not isinstance(values, list) or len(values) > 20 or any(not isinstance(v, str) or len(v) > 200 for v in values):
-                raise MangaError("文本模型的 " + key + " 字段无效，请重试", "invalid_text_output", 502)
-            summary[key] = values
+            items = raw.get(key, [])
+            if not isinstance(items, list) or len(items) > 20 or any(not isinstance(v, str) or len(v) > 200 for v in items):
+                raise MangaError("文本模型的 " + key + " 字段无效", "invalid_text_output", 502)
+            value[key] = items
+        return value
+    def prompt_value(raw):
+        prompt = checked_text(json_object(raw), "visual_prompt", 1800, True)
+        if _CJK.search(prompt):
+            prompt_input.update(previous_draft=prompt, correction="Rewrite entirely in English. Translate props and refer to 'the selected character'.")
+            raise MangaError("文本模型未能生成完整英文提示词；尚未提交生图任务", "invalid_text_output", 502)
+        return prompt
+    try:
+        summary = await retry.complete(provider, system=SUMMARY_SYSTEM, user=stable_json(material), schema={"type": "object"}, temperature=.2,
+                                       validate=summary_value, report=report, guard=guard, label="相关情节总结")
         prompt_input = {"context_summary": summary, **{key: material[key] for key in
                         ("focus_character", "frozen_identity", "shot_description", "action", "style")}}
-        prompt_raw = json_object(await provider.complete(system=PROMPT_SYSTEM, user=stable_json(prompt_input), schema={"type": "object"}, temperature=0.2))
-        prompt = checked_text(prompt_raw, "visual_prompt", 1800, True)
-        if _CJK.search(prompt):
-            # Some compatible models copy source-language names/props despite the prompt.
-            # Repair once; never submit an invalid prompt or retry without a bound.
-            repair = {**prompt_input, "previous_draft": prompt,
-                      "correction": "Rewrite the draft entirely in English. Translate props and replace Chinese names with 'the selected character'."}
-            prompt_raw = json_object(await provider.complete(system=PROMPT_SYSTEM, user=stable_json(repair), schema={"type": "object"}, temperature=0.2))
-            prompt = checked_text(prompt_raw, "visual_prompt", 1800, True)
-            if _CJK.search(prompt):
-                raise MangaError("文本模型未能生成完整英文提示词，请重试；尚未提交生图任务", "invalid_text_output", 502)
-    except MangaError:
-        raise
+        prompt = await retry.complete(provider, system=PROMPT_SYSTEM, user=lambda: stable_json(prompt_input), schema={"type": "object"}, temperature=.2,
+                                      validate=prompt_value, report=report, guard=guard, label="生图提示词")
+    except MangaError as exc:
+        raise MangaError("文本 AI 已尝试 3 次：" + str(exc), exc.code, exc.status) from None
     except Exception:
-        raise MangaError("文本 AI 调用失败，请检查模型连接与密钥后重试；尚未提交生图任务", "text_ai_failed", 502) from None
+        guard()
+        raise MangaError("文本 AI 已尝试 3 次仍失败，请检查连接与输出；尚未提交生图任务", "text_ai_failed", 502) from None
     return {"summary": summary, "visual_prompt": prompt}
 
 

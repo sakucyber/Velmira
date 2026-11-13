@@ -55,13 +55,15 @@ def runs(book_id: str):
 
 
 @router.get("/pages")
-def list_pages(book_id: str, offset: int = Query(0, ge=0), limit: int = Query(12, ge=1, le=30), run_id: str | None = None):
+def list_pages(book_id: str, offset: int = Query(0, ge=0), limit: int = Query(12, ge=1, le=30), run_id: str | None = None, chapter: int | None = Query(None, ge=0)):
     with pages.connection(book_id) as conn:
         current = a.row(conn, book_id)
         run_id = run_id or (current["run_id"] if current else "")
-        total = conn.execute("SELECT COUNT(*) FROM auto_manga_pages WHERE book_id=? AND run_id=?", (book_id, run_id)).fetchone()[0]
+        where = "book_id=? AND run_id=?" + (" AND chapter=?" if chapter is not None else "")
+        args = (book_id, run_id, chapter) if chapter is not None else (book_id, run_id)
+        total = conn.execute("SELECT COUNT(*) FROM auto_manga_pages WHERE " + where, args).fetchone()[0]
         result = []
-        for row in conn.execute("SELECT * FROM auto_manga_pages WHERE book_id=? AND run_id=? ORDER BY ordinal LIMIT ? OFFSET ?", (book_id, run_id, limit, offset)):
+        for row in conn.execute("SELECT * FROM auto_manga_pages WHERE " + where + " ORDER BY ordinal LIMIT ? OFFSET ?", (*args, limit, offset)):
             error, pending = None, 0
             try:
                 pending = check_draft(conn, book_id, row)
@@ -72,6 +74,30 @@ def list_pages(book_id: str, offset: int = Query(0, ge=0), limit: int = Query(12
                            "pending_review": pending, "error": error,
                            "url": f"/api/books/{book_id}/manga/auto/pages/{row['id']}/image"})
         return {"pages": result, "total": total, "has_more": offset + len(result) < total}
+
+
+@router.get("/logs")
+def logs(book_id: str, after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200), run_id: str | None = None):
+    with connection(book_id) as conn:
+        job = a.row(conn, book_id)
+        current = job["run_id"] if job else ""
+        selected = run_id or current
+        runs = [selected]
+        if selected == current:
+            analysis = conn.execute("SELECT run_id FROM book_analysis WHERE book_id=?", (book_id,)).fetchone()
+            if analysis:
+                runs.append(analysis[0])
+        marks = ",".join("?" for _ in runs)
+        query = f"SELECT id,stage,level,message,created_at FROM task_logs WHERE book_id=? AND run_id IN ({marks}) AND id>? ORDER BY id"
+        # First load shows the latest bounded window; later loads follow its cursor.
+        if not after:
+            query += " DESC LIMIT ?"
+        else:
+            query += " LIMIT ?"
+        entries = [dict(r) for r in conn.execute(query, (book_id, *runs, after, limit))]
+        if not after:
+            entries.reverse()
+        return {"logs": entries, "run_id": selected, "cursor": entries[-1]["id"] if entries else after}
 
 
 @router.get("/pages/{page_id}/image")

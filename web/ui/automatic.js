@@ -10,16 +10,19 @@ export function mountAutomatic({ area, bookId, signal, chapter, onSettings, onCh
   control.setAttribute('role', 'switch'); control.setAttribute('aria-label', '自动生成连贯漫画'); control.setAttribute('aria-checked', 'false');
   const status = el('p', 'manga-note'); status.setAttribute('role', 'status');
   const progress = el('progress'); progress.setAttribute('aria-label', '自动漫画章节进度'); progress.style.width = '100%';
-  const settings = el('button', 'btn', '模型与画风设置'); settings.type = 'button'; settings.addEventListener('click', onSettings);
+  const settings = el('button', 'btn', '漫画与画风设置'); settings.type = 'button'; settings.addEventListener('click', onSettings);
   const actions = el('div', 'manga-actions'); actions.append(control, settings);
+  const logsHead = el('h3', 'ai-section-title', '任务日志');
+  const logs = el('div', 'automatic-logs'); logs.setAttribute('role', 'log'); logs.setAttribute('aria-label', '自动漫画任务日志');
   const gallery = el('div', 'automatic-gallery');
   const history = el('select'); history.setAttribute('aria-label', '选择漫画生成记录');
   const historyLabel = el('label', 'manga-field'); historyLabel.append(el('span', null, '漫画生成记录'), history);
   const latest = el('option', null, '本次生成'); latest.value = ''; history.appendChild(latest);
   const more = el('button', 'btn', '加载更多漫画页'); more.type = 'button'; more.hidden = true;
-  area.append(note, actions, status, progress,
+  area.append(note, actions, status, progress, logsHead, logs,
     el('p', 'manga-note', '开启后会持续调用已配置的文本和图像 API。关闭开关暂停后续任务；正在处理的一张图会保存。关闭软件后进度保留，下次启动继续。'),
     el('p', 'manga-note', '以下为自动漫画草稿。参考图由程序选用；待复核图片会明确标记，可在漫画生成记录中检查。'), historyLabel, gallery, more);
+  let logCursor = 0, logRun = null;
   let current, timer, busy = false, rendered = 0, generation = '', total = -1, loading = false;
   function draw(value) {
     current = value; onChange?.(value);
@@ -52,6 +55,22 @@ export function mountAutomatic({ area, bookId, signal, chapter, onSettings, onCh
     } catch (err) { if (!signal.aborted) toast('漫画页加载失败：' + err.message); }
     finally { loading = false; more.disabled = false; }
   }
+  async function loadLogs() {
+    const run = history.value || current?.run_id || '';
+    if (logRun !== run) { logRun = run; logCursor = 0; logs.replaceChildren(); }
+    const data = await apiGet(base + '/logs?after=' + logCursor + (run ? '&run_id=' + encodeURIComponent(run) : ''), signal);
+    if (signal.aborted || logRun !== run) return;
+    const follow = logs.scrollHeight - logs.scrollTop - logs.clientHeight < 40;
+    if (data.logs.length) logs.querySelector('.automatic-log-empty')?.remove();
+    for (const entry of data.logs) {
+      const row = el('p', 'automatic-log'); row.dataset.level = entry.level;
+      row.append(el('time', null, new Date(entry.created_at * 1000).toLocaleTimeString()), el('span', null, entry.message)); logs.appendChild(row);
+    }
+    logCursor = data.cursor;
+    while (logs.children.length > 200) logs.firstElementChild.remove();
+    if (!logs.children.length) logs.appendChild(el('p', 'manga-note automatic-log-empty', '任务开始后，分析、生成和重试进度会实时显示在这里。'));
+    if (follow) logs.scrollTop = logs.scrollHeight;
+  }
   control.addEventListener('click', async () => {
     if (!current || busy) return;
     busy = true; control.disabled = true;
@@ -60,7 +79,7 @@ export function mountAutomatic({ area, bookId, signal, chapter, onSettings, onCh
     finally { busy = false; if (!signal.aborted) control.disabled = false; }
   });
   more.addEventListener('click', () => loadPages());
-  history.addEventListener('change', () => loadPages(true));
+  history.addEventListener('change', () => { loadPages(true); loadLogs().catch(() => {}); });
   async function loadRuns() {
     const data = await apiGet(base + '/runs', signal);
     if (signal.aborted) return;
@@ -80,6 +99,7 @@ export function mountAutomatic({ area, bookId, signal, chapter, onSettings, onCh
       if (generation !== data.auto.run_id || total < 0) {
         generation = data.auto.run_id; await loadRuns(); await loadPages(true);
       } else if (!history.value && data.auto.pages > total && rendered >= total) await loadPages();
+      await loadLogs();
     } catch (err) { if (!signal.aborted) status.textContent = '读取进度失败：' + err.message; }
     if (!signal.aborted) timer = setTimeout(poll, 2500);
   }

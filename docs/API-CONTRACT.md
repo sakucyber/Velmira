@@ -478,7 +478,7 @@ data: {"revision": 7, "count": 3}
 - `GET /api/ai/models` 从已保存的地址读取模型名称；`POST /api/ai/probe` 发起小型 JSON 完成请求，返回 `{ok:true,model}`。
 - 默认文本模型 `gpt-oss-120b`，128K 上下文，只发送文字。请求按 UTF-8 字节数保守估算 token 上界，预留 3000 输出 token 和 1024 消息开销；这是保守预算，不是精确 tokenizer 计数。整书按章节和分段处理，无需把全书一次塞入上下文。模型具备工具调用能力，本流程由应用串联请求和图像队列，不向模型开放额外工具。
 - `POST /api/books/{book_id}/manga/plan` 接收 `{scene_id,form_id,shot?,action?,para?,flashback?}`，返回 `{plan,cached}`。镜头默认 `portrait`，界面明确传入当前选项。分析完成前 `min(10,总章节数)` 章且目标章节已分析即可生成；否则自动入队并返回 409 `book_analysis_pending`。就绪依据当前分析 run 的已完成章节前缀，旧缓存不能越过门槛；暂停/失败任务需显式继续。读取目标片段（最多 6000 字符）、片段附近本章文字（最多 14000 字符）、上一章结尾（最多 3000 字符），结合相关章节摘要和人物证据，调用文本模型生成结构化中文总结和英文单格提示词。生成目标章节时不引用未来章节资料，也不把参考图发给文本模型。
-- 总结字段为 `summary/location/time_of_day/moment/visible_action/emotion/key_props/continuity/uncertainties`。模型输出须通过 JSON、类型和长度校验；提示词夹带中文时最多纠正一次，失败返回 502，不提交出图任务。
+- 总结字段为 `summary/location/time_of_day/moment/visible_action/emotion/key_props/continuity/uncertainties`。模型输出须通过 JSON、类型和长度校验；每个文本阶段的网络请求和结构化校验共用最多 3 次尝试（含首次），提示词夹带中文也计入同一预算；失败返回 502，不提交出图任务。
 - `plan` 保存来源哈希、范围字符数、模型标识、总结和提示词；缓存键包括来源、地址、模型及方案版本。场景/人物/镜头/上下文在分析期间改变，或旧方案被用于新选择时，返回 409 `text_plan_stale`。
 - 有效 `plan_id` 的出图任务在快照中保存 `text_plan`，将英文提示词与冻结身份、参考图约束一起交给 MOSS。参考图确认、人物版本、生效段落和人脸阈值检查继续适用；执行前和完成时重新验证源上下文，换种子保留总结方案。
 - 本机共享文本 AI 启用后，仍使用默认 Mock 配置的 M2 书籍分析会使用共享 API；显式选择 provider 的请求继续遵循其选择。
@@ -488,7 +488,7 @@ data: {"revision": 7, "count": 3}
 - `GET /api/books/{book_id}/ai/analysis` 返回 `{analysis,chapters}`。analysis 含 `status/total/completed/current_chapter/current_part/total_parts/error/updated_at`；chapters 按章节排序，含 `chapter/title/summary/character_ids/entities/parts`。未开始时为 idle。
 - `POST /api/books/{book_id}/ai/analysis` 开始或继续，返回同样结构。只接收 TXT/EPUB。相同来源和模型的已完成任务直接复用；更改内容、模型、地址或分析版本会新建 run，复用仍有效的缓存。
 - `POST /api/books/{book_id}/ai/analysis/pause` 暂停 queued/running 任务；正在进行的 HTTP 请求可能完成，但晚到响应不会写入已暂停任务。状态为 `queued/running/done/paused/error`。关闭程序后 running 在下次启动恢复为 queued；已完成章节、分段和摘要合并结果持久化复用。
-- `auto_analyze` 默认 true；共享文本 AI 启用后，每 15 秒发现未分析的未归档小说并排队，含已有书库和后续导入。关闭自动发现不取消已创建任务；面板可以单独暂停、继续。API 错误或无效 JSON 停止任务，不静默跳章、不伪造完成、不自动无限重试。
+- `auto_analyze` 默认 true；共享文本 AI 启用后，每 15 秒发现未分析的未归档小说并排队，含已有书库和后续导入。关闭自动发现不取消已创建任务；面板可以单独暂停、继续。API 错误或无效 JSON 在 3 次尝试都失败后停止任务，不静默跳章、不伪造完成、不自动无限重试。
 - 每段最多 6000 字符，包含超长单段的全部文字。多段章节按每组最多 8 份摘要递归合并，保留每章大意；前章摘要参与下一章阅读。人物视觉证据必须逐字出现在该段，章节编号由应用写入；人物卡与场景在同一事务落库，冻结身份不覆盖。新增人物卡仍需冻结并确认参考图后生成分镜。
 - 生成时按当前章人物、地点、道具匹配历史章节，最多选当前章及 8 个相关前章，序列化摘要最多 24000 UTF-8 字节，人物证据最多 4000 字节。来源哈希检查排除过期资料，`plan.scope.related_chapters` 标明引用章节（0-based）。人物外貌以指定的冻结形态和参考图为准。
 - 场景列表支持 `offset` 和 `limit`，返回 `has_more`；漫画面板加载全部有效场景后按章节选择，不受原默认 100 条限制。文本 AI 启用时，界面“加入生成队列”也会先补齐总结和提示词。
@@ -500,10 +500,10 @@ data: {"revision": 7, "count": 3}
 - `PATCH .../auto` 接收 `{enabled:boolean,chapter?:number}`。首次开启从当前章开始；暂停后开启恢复原 run 和起点。完成后重新开启创建新 run，历史草稿可继续查看。仅支持 TXT/EPUB，使用已配置的文本及图像 API。
 - 后台分析完成前 10 章（短书则全部章节）后，按章节及原文片段顺序编排 1–4 格一页的连续分镜，整书分析继续运行；生成追上分析进度时等待目标章就绪。把上一页/格内容带入下一次编排和总结。对白校验为原文逐字引用，人物必须来自片段；没有具名人物的片段生成过渡旁白页。
 - 依照当前章节以前的外貌证据创建冻结形态，复用同一形态的参考图。自动选用的参考图记录于 `auto_manga_refs`，不把 `accepted` 写成人工确认。撤销自动参考会使相关任务失效，不能由后台重新选回。
-- 自动页写入独立的 `auto_manga_pages`，明确标为草稿，`needs_review` 和真实人脸分数保持不变；不绕过 M4 正式拼页/导出的复核门槛。`GET .../auto/pages?offset=0&limit=12&run_id=...` 分页读取草稿（最多30页），省略 run_id 取本次；`GET .../auto/runs` 查看历史记录，`GET .../auto/pages/{id}/image` 读取页图。
-- 关闭开关后不再创建下一张任务，已提交的一张保留；自动流程自行启动的整书分析也暂停。状态写入 SQLite，重启可续跑；重复开启幂等。模型异常停机并显示可处理错误，不无限重试；章节、人物、参考图变化会阻止旧快照继续。中途修改模型/画风须恢复当前页原配置后继续。
+- 自动页写入独立的 `auto_manga_pages`，明确标为草稿，`needs_review` 和真实人脸分数保持不变；不绕过 M4 正式拼页/导出的复核门槛。`GET .../auto/pages?offset=0&limit=12&run_id=...&chapter=...` 分页读取草稿（最多30页），省略 run_id 取本次，chapter 可选且从 0 开始、用于正文旁按章节查看；`GET .../auto/runs` 查看历史记录，`GET .../auto/pages/{id}/image` 读取页图。
+- 关闭开关后不再创建下一张任务，已提交的一张保留；自动流程自行启动的整书分析也暂停。状态写入 SQLite，重启可续跑；重复开启幂等。文本和图像请求共尝试 3 次后仍失败则停机并显示可处理错误，不无限重试；章节、人物、参考图变化会阻止旧快照继续。中途修改模型/画风须恢复当前页原配置后继续。
 - `openai-images` 使用 OpenAI Images 兼容协议：参考图生成调用 `/images/generations`（JSON），带参考图的分镜调用 `/images/edits`（multipart PNG）。需要 `data[0].b64_json` 输出，返回 URL 的接口不在当前适配范围内。所选服务须支持相应模型、尺寸和编辑接口；`/probe` 只验证模型列表可访问，不能证明编辑能力。ComfyUI/MOSS 继续使用原有 HTTP API。
-- 图像 API 请求携带 Idempotency-Key，提交前持久化请求标识。服务中断/退出后无法确认同步请求结果时，续查不会再次提交；用户核对服务端记录后可显式换种子新建任务。实际图像仍须通过参考图及人脸检查，缺少校验或低分保留 needs_review。
+- 图像 API 每次请求最多尝试 3 次，复用同一 Idempotency-Key，提交前持久化请求标识；服务商须支持该键才可确保远端不重复计费。ComfyUI 查询失败或超时继续查询原 prompt；明确执行失败后才重新提交。相似度未达标的换种子重画仍由 max_attempts 控制，与连接失败重试独立。服务中断/退出后无法确认同步请求结果时，续查不会再次提交；用户核对服务端记录后可显式换种子新建任务。实际图像仍须通过参考图及人脸检查，缺少校验或低分保留 needs_review。
 
 # 15. M4 拼页与漫画版
 
@@ -513,3 +513,6 @@ data: {"revision": 7, "count": 3}
 - `POST /api/books/{book_id}/manga/pages/auto` 接收 1–120 个分镜 ID，按章节分组并保留勾选顺序，不跨章节合并。
 - `POST /api/books/{book_id}/manga/exports` 校验所有有效页并生成 CBZ，包含 `ComicInfo.xml` 与 `pages/0001.png` 等有序文件；`GET /exports/{id}/download` 下载。导出快照记录页 revision、图片哈希、章节和段落定位，后续编辑不会改变旧漫画版。
 - 书籍详情中的 `reading_links` 提供小说与漫画版的双向关系及页到章节／段落映射；漫画版继续使用普通书籍进度接口，和原小说进度分开保存。
+
+- `GET .../auto/logs?after=0&limit=100&run_id=...` 返回 `{logs:[{id,stage,level,message,created_at}],run_id,cursor}`。首次返回最近的日志窗口（按 id 正序）；后续用 after=cursor 增量读取，limit 最大 200。当前任务包含其整书分析日志，历史 run 只查对应漫画日志；按书隔离，每本保留最近 1000 条。不记录密钥、小说正文、提示词或原始服务商错误。
+- 自动漫画页面实时显示日志；已完成页在正文右侧按当前章节展示（窄屏在正文下方）。漫画与画风配置统一收进阅读器设置，自动漫画和漫画工作台入口均直达该设置页。

@@ -26,6 +26,8 @@ PROMPT = "A single adult turns her head in a quiet park, curious expression, a b
 
 class TextAITests(unittest.TestCase):
     def setUp(self):
+        p = patch("server.app.ai.retry.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
+        p = patch("server.app.manga.queue.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         for target, value in [("server.app.db.DB_PATH", self.root / "app.db"), ("server.app.config.DATA_DIR", self.root)]:
@@ -110,10 +112,10 @@ class TextAITests(unittest.TestCase):
         self.assertNotEqual(changed["id"], first["plan"]["id"])
 
     def test_invalid_model_output_and_network_failure_never_enqueue(self):
-        cases = [(["not json"], 1), ([{"summary": []}], 1),
-                 ([{**SUMMARY, "key_props": "invalid"}], 1),
-                 ([SUMMARY, {"visual_prompt": "x" * 1801}], 2),
-                 ([SUMMARY, RuntimeError("private gateway error")], 2)]
+        cases = [(["not json"] * 3, 3), ([{"summary": []}] * 3, 3),
+                 ([{**SUMMARY, "key_props": "invalid"}] * 3, 3),
+                 ([SUMMARY] + [{"visual_prompt": "x" * 1801}] * 3, 4),
+                 ([SUMMARY] + [RuntimeError("private gateway error")] * 3, 4)]
         for outputs, count in cases:
             provider = self.provider(outputs)
             response = self.plan(provider, status=502)
@@ -122,15 +124,15 @@ class TextAITests(unittest.TestCase):
             self.assertEqual(self.sql("SELECT * FROM manga_text_plans"), [])
             self.assertEqual(self.sql("SELECT * FROM render_jobs"), [])
 
-    def test_mixed_language_prompt_has_one_bounded_repair(self):
+    def test_mixed_language_prompt_shares_three_attempt_budget(self):
         mixed = {"visual_prompt": "The selected character holds 一杯茶."}
         provider = self.provider([SUMMARY, mixed, {"visual_prompt": PROMPT}])
         self.assertEqual(self.plan(provider)["plan"]["visual_prompt"], PROMPT)
         self.assertEqual(provider.complete.await_count, 3)
         self.assertEqual(json.loads(provider.complete.await_args_list[2].kwargs["user"])["previous_draft"], mixed["visual_prompt"])
-        provider = self.provider([SUMMARY, mixed, mixed])
+        provider = self.provider([SUMMARY, mixed, mixed, mixed])
         self.plan(provider, {**self.payload, "shot": "wide"}, 502)
-        self.assertEqual(provider.complete.await_count, 3)
+        self.assertEqual(provider.complete.await_count, 4)
         self.assertEqual(self.sql("SELECT * FROM render_jobs"), [])
 
     def test_plan_keeps_reference_gate_and_snapshot_through_reroll(self):

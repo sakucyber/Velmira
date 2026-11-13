@@ -21,6 +21,7 @@ from .models import (
 )
 from .prompts import PROMPT_VERSION, SCENE_SYSTEM, build_scene_user
 from .providers import TextProvider
+from . import retry
 
 
 def input_hash(segment_text: str, prompt_version: int, provider_config=None) -> str:
@@ -118,26 +119,17 @@ async def call_provider(provider: TextProvider, *, system: str, user: str, schem
 
 
 async def extract_one(provider: TextProvider, *, segment: dict[str, Any], prompt_version: int, temperature: float = 0.2) -> dict[str, Any]:
-    """单片段抽取；provider 非法输出自动重试一次。"""
+    """Each segment has one three-attempt budget, including JSON validation."""
     source_text = str(segment.get("text") or "")
     chapter = int(segment.get("chapter") or 0)
-    user = build_scene_user(source_text, chapter)
-    last_error = ""
-    for attempt in range(2):
-        try:
-            raw = await call_provider(provider, system=SCENE_SYSTEM, user=user, temperature=temperature)
-            if isinstance(raw, str):
-                raw = json.loads(raw)
-            return normalize_scene(raw, source_text, chapter)
-        except (AIModelError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            last_error = str(exc)
-            if attempt == 0:
-                user += f"\n上次输出无效，请修正 JSON：{last_error}"
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt == 0:
-                user += f"\n请求失败后请重新输出 JSON：{last_error}"
-    raise AIModelError(last_error or "provider 输出无效")
+    def validate(raw):
+        if isinstance(raw, str): raw = json.loads(raw)
+        return normalize_scene(raw, source_text, chapter)
+    try:
+        return await retry.complete(provider, system=SCENE_SYSTEM, user=build_scene_user(source_text, chapter),
+                                    temperature=temperature, validate=validate)
+    except Exception:
+        raise AIModelError("文本 AI 已尝试 3 次仍失败，请检查连接与结构化输出") from None
 
 
 async def extract_segments(

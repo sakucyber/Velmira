@@ -6,8 +6,9 @@ import logging
 import threading
 import time
 
-from .. import db
+from .. import db, task_log
 from ..ai.models import stable_json
+from ..ai.retry import MAX_ATTEMPTS, RETRY_DELAY
 from .face import evaluate_face
 from .models import MangaError, check_identity
 from .provider import ComfyProvider, ImageAPIProvider, mock_image
@@ -78,6 +79,78 @@ def valid_snapshot(conn, job, snap):
             raise MangaError("用于总结的章节上下文已变化", "render_stale", 409)
 
 
+def generate_attempt(conn, job, snap, provider, attempt_id, seed):
+    cfg = snap["config"]
+    existing = conn.execute("SELECT prompt_id FROM render_attempts WHERE id=?", (attempt_id,)).fetchone()[0]
+    if cfg["provider"] == "openai-images" and existing:
+        raise MangaError("上次图像 API 请求结果不确定，请核对服务端记录后再继续")
+    auto = conn.execute("SELECT run_id FROM auto_manga WHERE book_id=?", (job["book_id"],)).fetchone()
+    run_id = auto[0] if auto and snap.get("automatic_draft") else job["id"]
+    report = task_log.reporter(job["book_id"], run_id, "rendering")
+    label = "人物参考图" if job["kind"] == "reference" else "漫画分格"
+    for number in range(1, MAX_ATTEMPTS + 1):
+        if _stop.is_set() or conn.execute("SELECT status FROM render_jobs WHERE id=?", (job["id"],)).fetchone()[0] != "running":
+            return None
+        try:
+            valid_snapshot(conn, job, snap)
+        except (ValueError, OSError) as exc:
+            status(conn, job["id"], "stale", error=str(exc))
+            return None
+        report(f"{label} · 第 {number}/{MAX_ATTEMPTS} 次尝试")
+        submitting = False
+        try:
+            pid = conn.execute("SELECT prompt_id FROM render_attempts WHERE id=?", (attempt_id,)).fetchone()[0]
+            ref = snap.get("reference")
+            if cfg["provider"] == "openai-images":
+                # Reuse one idempotency key throughout this request's retry budget.
+                if not pid:
+                    pid = uid("image_")
+                    with conn:
+                        conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (pid, stable_json({"provider": cfg["provider"], "model": cfg["model"]}), attempt_id))
+                raw = provider.generate(snap, asset_path(ref["path"]) if ref else None, pid)
+            elif provider:
+                if not pid:
+                    capabilities = provider.probe()
+                    if not capabilities["ok"]:
+                        raise MangaError("图像服务缺少所需节点或模型")
+                    def persist_submission(prompt_id, graph):
+                        with conn:
+                            conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (prompt_id, stable_json(graph), attempt_id))
+                    submitting = True
+                    pid, graph = provider.submit(snap, seed, asset_path(ref["path"]) if ref else None, "velmira/" + attempt_id, before_submit=persist_submission)
+                    submitting = False
+                    persist_submission(pid, graph)
+                deadline = time.monotonic() + cfg["timeout"]
+                raw = None
+                while time.monotonic() < deadline:
+                    if _stop.wait(1) or conn.execute("SELECT status FROM render_jobs WHERE id=?", (job["id"],)).fetchone()[0] != "running":
+                        return None
+                    raw = provider.result(pid)
+                    if raw:
+                        break
+                if raw is None:
+                    raise TimeoutError()
+            else:
+                raw = mock_image(seed, cfg["width"], cfg["height"])
+            path = save_image(raw, attempt_id)
+            report(label + " · 图片已保存")
+            return path
+        except Exception as exc:
+            # A known failed Comfy task can be submitted again. An uncertain
+            # submission or a poll timeout must keep querying the same prompt.
+            if cfg["provider"] == "comfyui" and isinstance(exc, MangaError) and (exc.code in {"render_failed", "invalid_workflow", "image_missing"} or submitting and exc.code == "comfy_error"):
+                with conn:
+                    conn.execute("UPDATE render_attempts SET prompt_id=NULL WHERE id=?", (attempt_id,))
+            message = f"{label} · 第 {number}/{MAX_ATTEMPTS} 次失败" + ("，即将重试" if number < MAX_ATTEMPTS else "，已停止")
+            with conn:
+                conn.execute("UPDATE render_attempts SET error=? WHERE id=?", (message, attempt_id))
+            report(message, "warning" if number < MAX_ATTEMPTS else "error")
+            if number == MAX_ATTEMPTS:
+                raise MangaError("图像 AI 已尝试 3 次仍失败，请检查连接、模型和服务端任务记录", "image_retries_exhausted", 502) from None
+            if _stop.wait(RETRY_DELAY * number):
+                return None
+
+
 def process(job_id):
     conn = db.get_conn()
     try:
@@ -103,45 +176,9 @@ def process(job_id):
             if not attempt:
                 conn.execute("INSERT INTO render_attempts(id,job_id,idx,seed) VALUES(?,?,?,?)", (attempt_id, job_id, idx, seed))
                 conn.execute("UPDATE render_jobs SET attempts=? WHERE id=?", (idx, job_id)); conn.commit()
-            pid = attempt["prompt_id"] if attempt else None
-            if cfg["provider"] == "openai-images":
-                if pid:
-                    raise MangaError("上次图像 API 请求结果不确定；请先核对服务端记录，再用“换种子重画”新建任务，避免重复计费")
-                pid = uid("image_")
-                conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (pid, stable_json({"provider": cfg["provider"], "model": cfg["model"]}), attempt_id)); conn.commit()
-                ref = snap.get("reference")
-                raw = provider.generate(snap, asset_path(ref["path"]) if ref else None, pid)
-            elif provider:
-                if not pid:
-                    capabilities = provider.probe()
-                    if not capabilities["ok"]:
-                        raise ValueError("缺少节点或模型：" + ", ".join(capabilities["missing"]))
-                    ref = snap.get("reference")
-                    def persist_submission(prompt_id, graph):
-                        conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (prompt_id, stable_json(graph), attempt_id))
-                        conn.commit()
-                    pid, graph = provider.submit(snap, seed, asset_path(ref["path"]) if ref else None, "velmira/" + attempt_id, before_submit=persist_submission)
-                    conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (pid, stable_json(graph), attempt_id)); conn.commit()
-                deadline = time.monotonic() + cfg["timeout"]
-                raw = None
-                while time.monotonic() < deadline:
-                    if _stop.wait(1):
-                        return
-                    if conn.execute("SELECT status FROM render_jobs WHERE id=?", (job_id,)).fetchone()[0] != "running":
-                        return
-                    try:
-                        raw = provider.result(pid)
-                    except MangaError as exc:
-                        if exc.code == "comfy_unavailable":
-                            continue
-                        raise
-                    if raw:
-                        break
-                if raw is None:
-                    raise TimeoutError("生成超时；重试会继续查询同一任务，不重复提交")
-            else:
-                raw = mock_image(seed, cfg["width"], cfg["height"])
-            path = save_image(raw, attempt_id)
+            path = generate_attempt(conn, job, snap, provider, attempt_id, seed)
+            if path is None:
+                return
             try:
                 valid_snapshot(conn, job, snap)
             except (ValueError, OSError) as exc:
@@ -153,9 +190,11 @@ def process(job_id):
                 return
         status(conn, job_id, "needs_review", error="重试次数已耗尽")
     except Exception as exc:
-        log.warning("render job %s failed: %s", job_id, exc)
-        conn.execute("UPDATE render_attempts SET error=? WHERE job_id=? AND status='running'", (str(exc)[:2000], job_id))
-        status(conn, job_id, "error", error=str(exc)[:2000])
+        log.warning("render job %s failed", job_id)
+        safe = str(exc) if isinstance(exc, MangaError) else "图像 AI 请求异常；请检查连接、模型和服务端任务记录"
+        safe = safe[:500]
+        conn.execute("UPDATE render_attempts SET error=? WHERE job_id=? AND status='running'", (safe, job_id))
+        status(conn, job_id, "error", error=safe)
     finally:
         conn.close()
 

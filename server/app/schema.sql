@@ -360,3 +360,14 @@ CREATE TABLE IF NOT EXISTS auto_manga_pages (
   created_at INTEGER NOT NULL,
   UNIQUE(book_id,run_id,scene_id)
 );
+
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  level TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_logs_run ON task_logs(book_id,run_id,id);

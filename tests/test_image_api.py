@@ -15,12 +15,14 @@ from server.app.ai import settings
 from server.app.main import create_app
 from server.app.manga import queue
 from server.app.manga.models import DEFAULTS, STYLE_PRESETS, MangaError, validate_config
-from server.app.manga.provider import ImageAPIProvider
+from server.app.manga.provider import ImageAPIProvider, ComfyProvider
 from manga_fixture import seed
 
 
 class ImageAPITests(unittest.TestCase):
     def setUp(self):
+        p = patch("server.app.ai.retry.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
+        p = patch("server.app.manga.queue.RETRY_DELAY", 0); p.start(); self.addCleanup(p.stop)
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         for target, value in [("server.app.db.DB_PATH", self.root / "app.db"), ("server.app.config.DATA_DIR", self.root)]:
@@ -75,7 +77,7 @@ class ImageAPITests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(job))
         self.assertEqual(job["snapshot"]["config"]["style_preset"], "anime")
 
-    def test_interrupted_request_is_not_submitted_twice(self):
+    def test_request_retries_three_times_with_one_key_but_restart_does_not_resubmit(self):
         self.client.patch(self.base + "/config", json=self.cfg)
         job = self.client.post(self.base + "/jobs", json={"kind": "reference", "form_id": "form_m3-char"}).json()["job"]
         for attempt in range(2):
@@ -85,9 +87,39 @@ class ImageAPITests(unittest.TestCase):
             finally: conn.close()
             with patch.object(ImageAPIProvider, "generate", side_effect=MangaError("network unavailable")) as network:
                 queue.process(job["id"])
-                self.assertEqual(network.call_count, 1 if attempt == 0 else 0)
+                self.assertEqual(network.call_count, 3 if attempt == 0 else 0)
+                if attempt == 0: self.assertEqual(len({call.args[2] for call in network.call_args_list}), 1)
         result = self.client.get(self.base + "/jobs/" + job["id"]).json()["job"]
         self.assertEqual(result["status"], "error")
+
+    def test_image_request_recovers_after_two_failures(self):
+        self.client.patch(self.base + "/config", json=self.cfg)
+        job = self.client.post(self.base + "/jobs", json={"kind": "reference", "form_id": "form_m3-char"}).json()["job"]
+        conn = db.get_conn()
+        try:
+            with conn: conn.execute("UPDATE render_jobs SET status='running' WHERE id=?", (job["id"],))
+        finally: conn.close()
+        with patch.object(ImageAPIProvider, "generate", side_effect=[RuntimeError("private-key"), b"bad image", self.png]) as generate:
+            queue.process(job["id"])
+        self.assertEqual(generate.call_count, 3)
+        self.assertEqual(len({call.args[2] for call in generate.call_args_list}), 1)
+        result = self.client.get(self.base + "/jobs/" + job["id"]).json()["job"]
+        self.assertEqual(result["status"], "needs_review")
+        self.assertNotIn("private-key", json.dumps(result))
+
+    def test_comfy_poll_retries_reuse_submission(self):
+        self.client.patch(self.base + "/config", json={"provider": "comfyui"})
+        job = self.client.post(self.base + "/jobs", json={"kind": "reference", "form_id": "form_m3-char"}).json()["job"]
+        conn = db.get_conn()
+        try:
+            with conn: conn.execute("UPDATE render_jobs SET status='running' WHERE id=?", (job["id"],))
+        finally: conn.close()
+        with patch.object(ComfyProvider, "probe", return_value={"ok": True}), patch.object(ComfyProvider, "submit", return_value=("same-prompt", {})) as submit, patch.object(ComfyProvider, "result", side_effect=[MangaError("unavailable", "comfy_unavailable"), MangaError("HTTP 503", "comfy_error"), self.png]) as result, patch.object(queue._stop, "wait", return_value=False):
+            queue.process(job["id"])
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(result.call_count, 3)
+        self.assertEqual({call.args[0] for call in result.call_args_list}, {"same-prompt"})
+        self.assertEqual(self.client.get(self.base + "/jobs/" + job["id"]).json()["job"]["status"], "needs_review")
 
     def test_anime_default_presets_custom_and_backend_validation(self):
         cfg = self.client.get(self.base + "/config").json()

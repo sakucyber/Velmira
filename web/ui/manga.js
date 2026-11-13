@@ -6,13 +6,13 @@ const STATES = { queued: '排队中', running: '生成中', needs_review: '待�
 const SHOTS = { portrait: '正面特写', medium: '中景', wide: '全身远景', three_quarter: '侧面近景', reaction: '表情特写' };
 const APPEARANCE = { age: '年龄', gender: '性别', hair_style: '发型', hair_color: '发色', eye_color: '瞳色', skin: '肤色', outfit: '服装', accessories: '配饰' };
 
-export async function mountManga({ area, bookId, signal, initialTab = 'generate' }) {
+export async function mountManga({ area, bookId, signal, initialTab = 'generate', settingsOnly = false, onSettings }) {
   const base = '/api/books/' + encodeURIComponent(bookId);
   let forms = [], scenes = [], config, textSettings, styles = {}, selected = '', timer, busy = false, analysisAbort;
   const root = el('div', 'manga-studio');
   area.replaceChildren(root);
   const note = el('p', 'manga-note', '整书阅读 → 人物卡与章节大意 → 相关情节总结 → 生图提示词 → 图像 API。每格使用一个人物的一张已确认参考图。');
-  root.appendChild(note);
+  if (!settingsOnly) { root.appendChild(note); const settingsLink = el('button', 'btn', '漫画与画风设置'); settingsLink.type = 'button'; settingsLink.addEventListener('click', onSettings); root.appendChild(settingsLink); }
   const tabs = el('div', 'manga-tabs'); root.appendChild(tabs);
   const content = el('div'); root.appendChild(content);
   const jobsHead = el('h3', 'ai-section-title', '生成记录'); root.appendChild(jobsHead);
@@ -50,6 +50,10 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     const img = el('img'); img.src = url; img.alt = alt; img.loading = 'lazy'; link.appendChild(img); parent.appendChild(link);
   }
   async function load() {
+    if (settingsOnly) {
+      const [c, text] = await Promise.all([apiGet(base + '/manga/config', signal), apiGet('/api/ai/settings', signal)]);
+      config = c.config; styles = c.styles; textSettings = text.settings; return;
+    }
     const loadScenes = async () => {
       const result = new Map(); let offset = 0;
       while (!signal.aborted) {
@@ -68,13 +72,13 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     if (signal.aborted) return;
     analysisAbort?.abort();
     tabs.replaceChildren(); content.replaceChildren();
-    for (const [id, label] of [['analysis', '整书分析'], ['generate', '分镜'], ['refs', '人物与参考图'], ['pages', '拼页与导出'], ['config', '出图设置']]) {
+    if (settingsOnly) { tabs.hidden = jobsHead.hidden = jobsArea.hidden = true; renderConfig(); return; }
+    for (const [id, label] of [['analysis', '整书分析'], ['generate', '分镜'], ['refs', '人物与参考图'], ['pages', '拼页与导出']]) {
       const tab = button(tabs, label, async () => { await load(); active = id; render(); });
       tab.setAttribute('aria-pressed', String(active === id));
     }
     if (active === 'generate') renderGenerate();
     if (active === 'refs') renderRefs();
-    if (active === 'config') renderConfig();
     if (active === 'analysis') { analysisAbort = new AbortController(); mountBookAnalysis({ area: content, bookId, signal: analysisAbort.signal }); }
     if (active === 'pages') {
       const controller = new AbortController(); analysisAbort = controller;
@@ -119,7 +123,7 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
       try { config = (await apiPatch(base + '/manga/config', { style_preset: styleChoice.value })).config; invalidate(); }
       catch (err) { styleChoice.value = config.style_preset; toast(err.message); }
     });
-    content.appendChild(el('p', 'manga-note', textSettings.enabled ? ('文本 AI：' + textSettings.model + ' · 整书资料 → 相关情节总结 → 英文提示词 → 图像 API') : '请先在“出图设置”中启用文本 AI，即可自动分析全书并生成漫画。'));
+    content.appendChild(el('p', 'manga-note', textSettings.enabled ? ('文本 AI：' + textSettings.model + ' · 整书资料 → 相关情节总结 → 英文提示词 → 图像 API') : '请先在“设置 → 漫画与画风设置”中启用文本 AI，即可自动分析全书并生成漫画。'));
     const prepare = async () => {
       const payload = payloadFor();
       const f = forms.find(f => f.id === form.value);
@@ -214,6 +218,7 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     });
   }
   function renderConfig() {
+    content.appendChild(el('p', 'manga-note', '文本与图像请求最多尝试 3 次，连续失败后停止并保留任务进度。图像设置用于当前小说，文本 API 设置用于本机所有小说。'));
     const textPanel = el('details', 'manga-editor'); textPanel.appendChild(el('summary', null, '文本 AI：上下文总结与提示词'));
     textPanel.open = true; content.appendChild(textPanel);
     textPanel.appendChild(el('p', 'manga-note', '通过文本 API 自动逐章阅读整本小说，保存人物卡和每章大意；生成时汇总相关情节再编写提示词。图片交给所选图像 API。文本设置适用于本机所有书籍。'));
@@ -248,7 +253,7 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     const provider = select(content, '图像后端', [['comfyui', 'ComfyUI / MOSS API'], ['openai-images', 'OpenAI 兼容图像 API'], ['mock', '占位图（仅验证流程）']], config.provider);
     const preset = select(content, '默认生图风格', [...Object.entries(styles).map(([id, s]) => [id, s.label]), ['custom', '自定义']], config.style_preset);
     const inputs = {};
-    const labels = { base_url: '服务地址', model: '图像 API 模型名', unet: '绘图模型', clip: '9B 文本编码器', vae: '图像解码模型', edit_lora: '参考图编辑模型', width: '宽度', height: '高度', steps: '采样步数', cfg: '提示词强度', sampler: '采样器', scheduler: '调度器', seed: '基础种子', face_threshold: '相似度阈值', max_attempts: '最多生成次数', timeout: '等待超时（秒）', style: '画风', negative: '排除内容', face_python: '人脸校验 Python 路径（可选）', face_models: '人脸模型目录（可选）' };
+    const labels = { base_url: '服务地址', model: '图像 API 模型名', unet: '绘图模型', clip: '9B 文本编码器', vae: '图像解码模型', edit_lora: '参考图编辑模型', width: '宽度', height: '高度', steps: '采样步数', cfg: '提示词强度', sampler: '采样器', scheduler: '调度器', seed: '基础种子', face_threshold: '相似度阈值', max_attempts: '相似度不达标时最多重画次数', timeout: '等待超时（秒）', style: '画风', negative: '排除内容', face_python: '人脸校验 Python 路径（可选）', face_models: '人脸模型目录（可选）' };
     const numbers = new Set(['width', 'height', 'steps', 'cfg', 'seed', 'face_threshold', 'max_attempts', 'timeout']);
     for (const [key, label] of Object.entries(labels)) {
       inputs[key] = field(content, label, config[key], numbers.has(key) ? 'number' : ['style', 'negative'].includes(key) ? 'textarea' : 'text');
@@ -320,6 +325,6 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     try { await refreshJobs(); } catch (err) { if (!signal.aborted) jobsHead.textContent = '生成记录 · 连接中断，正在重试'; }
     if (!signal.aborted) timer = setTimeout(poll, 2500);
   }
-  try { await load(); render(); await poll(); }
+  try { await load(); render(); if (!settingsOnly) await poll(); }
   catch (err) { if (!signal.aborted) content.textContent = '加载失败：' + err.message; }
 }

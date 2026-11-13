@@ -27,6 +27,8 @@ async function waitFor(expression) {
   throw new Error('Timeout: ' + expression);
 }
 async function clickText(text) {
+  await waitFor(`[...document.querySelectorAll('.drawer.open button')].some(b=>b.textContent===${JSON.stringify(text)} && !b.disabled && b.getClientRects().length)`);
+  await sleep(280);
   const point = await evaluate(`(() => { const b=[...document.querySelectorAll('.drawer.open button')].find(b=>b.textContent===${JSON.stringify(text)}); if(!b)throw new Error('Missing button'); b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2};})()`);
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
@@ -57,11 +59,13 @@ try {
   await waitFor('!!window.__velmira && !document.querySelector("#btn-ai").disabled');
   await evaluate('document.querySelector("#btn-ai").click()');
   await waitFor('!!document.querySelector(".drawer-ai.open")');
-  await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs") && document.querySelector(".manga-tabs").children.length===5');
-  await clickText('出图设置'); await waitFor('!!document.querySelector("[aria-label=图像后端]")');
+  await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs") && document.querySelector(".manga-tabs").children.length===4');
+  await clickText('漫画与画风设置'); await waitFor('!!document.querySelector("[aria-label=图像后端]")');
   await set('图像后端', 'mock'); await clickText('保存设置'); await sleep(300);
   await clickText('检测已保存的连接与模型');
   await waitFor('document.querySelector(".manga-studio").textContent.includes("占位图仅供流程验证")');
+  await evaluate('document.querySelector(".drawer-settings .drawer-close").click()'); await waitFor('!document.querySelector(".drawer-settings.open")');
+  await evaluate('document.querySelector("#btn-ai").click()'); await waitFor('!!document.querySelector(".drawer-ai.open")'); await clickText('漫画生成');
   await clickText('人物与参考图'); await waitFor('[...document.querySelectorAll(".drawer.open button")].some(b=>b.textContent==="生成参考图")'); await clickText('生成参考图');
   await waitFor('!!document.querySelector(".manga-ref img")');
   await clickText('确认参考图'); await sleep(300);
@@ -116,14 +120,16 @@ try {
   await evaluate('document.querySelector("#btn-ai").click()'); await waitFor('!!document.querySelector(".drawer-ai.open")');
   await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs")');
   console.log('[PASS] M4 手机编辑器、漫画阅读与小说双向切换');
-  await clickText('出图设置'); await waitFor('!!document.querySelector("[aria-label=默认生图风格]")');
+  await clickText('漫画与画风设置'); await waitFor('!!document.querySelector("[aria-label=默认生图风格]")');
   assert.equal(await evaluate('document.querySelector("[aria-label=默认生图风格]").value'), 'anime');
   await set('默认生图风格', 'watercolor'); await clickText('保存设置');
   await waitFor('document.querySelector(".manga-studio [aria-label=画风]").value.includes("watercolor")');
   assert.equal((await api(prefix + '/config')).config.style_preset, 'watercolor');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
-  assert.equal(await evaluate('document.querySelector(".drawer-manga").getBoundingClientRect().right<=innerWidth'), true);
+  assert.equal(await evaluate('document.querySelector(".drawer-settings").getBoundingClientRect().right<=innerWidth'), true);
   await shot('manga-mobile-settings');
+  await evaluate('document.querySelector(".drawer-settings .drawer-close").click()'); await waitFor('!document.querySelector(".drawer-settings.open")');
+  await evaluate('document.querySelector("#btn-ai").click()'); await waitFor('!!document.querySelector(".drawer-ai.open")'); await clickText('漫画生成');
   await clickText('整书分析'); await waitFor('!!document.querySelector("progress[aria-label=整书阅读进度]")');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
   await shot('manga-mobile-book-analysis');
