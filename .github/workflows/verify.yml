@@ -9,14 +9,14 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
 
@@ -24,19 +24,20 @@ jobs:
         run: python -m pip install -r server/requirements.txt pyinstaller
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        # v3 默认安装已移除的 "tools" 包；v4 默认只安装 platform-tools。
+        uses: android-actions/setup-android@v4
 
       - name: Install Android build tools
         shell: pwsh
