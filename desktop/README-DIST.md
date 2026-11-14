@@ -14,8 +14,8 @@ Python 后端，目标机器无需另外安装 Python。
 
 ## 版本
 
-- 产品版本：**v0.5.1**
-- 健康检查：`GET /api/health` 返回 `{"ok":true,"name":"Velmira","version":"0.5.1"}`
+- 产品版本：**v0.5.2**
+- 健康检查：`GET /api/health` 返回 `{"ok":true,"name":"Velmira","version":"0.5.2"}`
 - 本说明与 `START-HERE.txt`、构建脚本使用同一版本号。
 
 ## 数据与隐私

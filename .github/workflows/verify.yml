@@ -84,14 +84,14 @@ jobs:
         shell: pwsh
         run: |
           $env:DATA_DIR = Join-Path $env:RUNNER_TEMP 'velmira-data'
-          $backend = Start-Process -FilePath './dist/Velmira-desktop-v0.5.1/backend/Velmira-backend/Velmira-backend.exe' -ArgumentList '--port','8876' -PassThru -WindowStyle Hidden
+          $backend = Start-Process -FilePath './dist/Velmira-desktop-v0.5.2/backend/Velmira-backend/Velmira-backend.exe' -ArgumentList '--port','8876' -PassThru -WindowStyle Hidden
           try {
             $ready = $false
             for ($i=0; $i -lt 120; $i++) {
               Start-Sleep -Milliseconds 250
               try {
                 $health = Invoke-RestMethod http://127.0.0.1:8876/api/health
-                if ($health.ok -and $health.version -eq '0.5.1') { $ready = $true; break }
+                if ($health.ok -and $health.version -eq '0.5.2') { $ready = $true; break }
               } catch { }
             }
             if (-not $ready) { throw 'Packaged backend did not become ready' }
@@ -118,7 +118,7 @@ jobs:
       - name: Upload desktop and Android artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: velmira-v0.5.1-windows-android
+          name: velmira-v0.5.2-windows-android
           path: |
-            dist/Velmira-desktop-v0.5.1
+            dist/Velmira-desktop-v0.5.2
             dist/Velmira-universal.apk

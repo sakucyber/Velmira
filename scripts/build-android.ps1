@@ -1,4 +1,4 @@
-﻿# 构建 Velmira Android 通用 APK（不依赖 Gradle）
+# 构建 Velmira Android 通用 APK（不依赖 Gradle）
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 param(
   [string]$Sdk = "",
@@ -66,7 +66,7 @@ Write-Host '[1/6] 编译资源'
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile 失败' }
 
 Write-Host '[2/6] 链接资源与 manifest'
-$linkArgs = @('link', '-o', (Join-Path $work 'base.apk'), '-I', $androidJar, '--manifest', (Join-Path $app 'AndroidManifest.xml'), '-R', (Join-Path $work 'res.zip'), '--java', (Join-Path $work 'gen'), '--min-sdk-version', '24', '--target-sdk-version', '34', '--version-code', '5', '--version-name', '0.5.1', '--auto-add-overlay')
+$linkArgs = @('link', '-o', (Join-Path $work 'base.apk'), '-I', $androidJar, '--manifest', (Join-Path $app 'AndroidManifest.xml'), '-R', (Join-Path $work 'res.zip'), '--java', (Join-Path $work 'gen'), '--min-sdk-version', '24', '--target-sdk-version', '34', '--version-code', '6', '--version-name', '0.5.2', '--auto-add-overlay')
 if ($Debuggable) { $linkArgs += '--debug-mode' }
 & $aapt2 @linkArgs
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link 失败' }

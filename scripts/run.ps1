@@ -1,4 +1,4 @@
-﻿# Velmira 开发服务器启动脚本
+# Velmira 开发服务器启动脚本
 param(
   [int]$Port = 8765,
   [switch]$Reload,
@@ -13,7 +13,7 @@ Set-Location $Root
 if ($DataDir -ne "") {
   $env:DATA_DIR = $DataDir
 }
-Write-Host "Velmira v0.5.1"
+Write-Host "Velmira v0.5.2"
 Write-Host "[run] root      = $Root"
 Write-Host "[run] data dir  = $(if ($env:DATA_DIR) { $env:DATA_DIR } else { Join-Path $Root 'data' })"
 Write-Host "[run] bind      = $BindAddress"

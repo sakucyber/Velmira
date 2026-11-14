@@ -287,10 +287,10 @@ curl.exe -X POST "http://127.0.0.1:8765/api/books?filename=book.txt" --data-bina
 ## 7.1 品牌与版本
 
 - 产品名：**Velmira**（UI 标题、document.title、README、健康检查统一）
-- `server/app/config.py: VERSION = "0.5.1"`（当前版本，见第 9 节）
+- `server/app/config.py: VERSION = "0.5.2"`（当前版本，见第 9 节）
 - GET /api/health 变为：
 ~~~json
-{"ok": true, "name": "Velmira", "version": "0.5.1"}
+{"ok": true, "name": "Velmira", "version": "0.5.2"}
 ~~~
 - 前端不得再出现旧品牌名；浏览器标签页格式：`<书名> · Velmira`
 
@@ -427,7 +427,7 @@ data: {"revision": 7, "count": 3}
 
 # 9. v0.4 增量：批注预览与分发
 
-- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.5.1"`；书库标识为 v0.4，APK 版本为 0.5.1。
+- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.5.2"`；书库标识为 v0.4，APK 版本为 0.5.2。
 - 注释 API 和数据库结构不变。`note` 为非空文字时，原文 `mark.ann` 额外带 `ann-note` 类，用双下划线标记；普通高亮维持四色背景。
 - 鼠标悬停批注文字直接展示笔记，点击可固定弹层；手机单击、键盘 Enter/空格也可查看。弹层保留改色、编辑、删除操作。
 - 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。

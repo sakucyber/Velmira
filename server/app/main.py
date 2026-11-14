@@ -1,6 +1,6 @@
 """FastAPI 应用入口：建库 → 挂载业务路由 → 可选挂载扩展路由 → 最后挂静态目录。
 
-项目：Velmira v0.5.1；离线同步与实时书库 SSE。
+项目：Velmira v0.5.2；离线同步与实时书库 SSE。
 启动：python -m uvicorn server.app.main:app --host 127.0.0.1 --port 8765
 数据目录：环境变量 DATA_DIR 优先，默认 项目根/data。
 """

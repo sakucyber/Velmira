@@ -1,6 +1,6 @@
 """全局配置：项目根、数据目录、静态目录、上传上限。
 
-项目：Velmira，版本 0.5.1。
+项目：Velmira，版本 0.5.2。
 数据目录优先级：环境变量 DATA_DIR > 自包含版用户目录或源码项目根/data。
 注意：DATA_DIR 在进程导入时读取，测试需在启动/导入前设置环境变量。
 """
@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 # 产品名（契约 7.1）：UI / 健康检查统一使用
 APP_NAME = "Velmira"

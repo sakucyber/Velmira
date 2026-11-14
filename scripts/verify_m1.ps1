@@ -1,6 +1,6 @@
-﻿<#
+<#
 .SYNOPSIS
-  M1（Velmira v0.5.1）一键独立验收：
+  M1（Velmira v0.5.2）一键独立验收：
   冷启动隔离服务 -> TXT M0 回归(41) -> M1 API(A/C/D/E/F) -> 品牌/体积/node --check ->
   单测(37) -> 重启持久化 -> CDP 前端实测(G) -> 旧库升级(I) -> 清理。
   只写 tests/ 与 scripts/，不改 server/ web/ docs/ book/。
@@ -53,9 +53,9 @@ try {
   $started = Start-Server $Port "m1_verify_server.log"
   $server = $started.proc
   Write-Host ("health=" + ($started.health | ConvertTo-Json -Compress))
-  if ($started.health.name -ne "Velmira" -or $started.health.version -ne "0.5.1") { $failures += "健康检查 name/version 不符" }
+  if ($started.health.name -ne "Velmira" -or $started.health.version -ne "0.5.2") { $failures += "健康检查 name/version 不符" }
 
-  Step "2. TXT M0 回归（tests/verify_m0.py，版本断言已更新 0.5.1）"
+  Step "2. TXT M0 回归（tests/verify_m0.py，版本断言已更新 0.5.2）"
   python tests/verify_m0.py --base "http://127.0.0.1:$Port" 2>&1 | Select-Object -Last 4
   if ($LASTEXITCODE -ne 0) { $failures += "verify_m0.py FAIL（exit $LASTEXITCODE）" }
 

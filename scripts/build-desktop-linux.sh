@@ -6,7 +6,7 @@
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-version="${VELMIRA_VERSION:-0.5.1}"
+version="${VELMIRA_VERSION:-0.5.2}"
 arch="${VELMIRA_ARCH:-$(uname -m)}"
 case "$arch" in
   x86_64|amd64) arch="amd64" ;;
