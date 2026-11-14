@@ -147,6 +147,9 @@ sys.stdout.write(base64.b64encode(b.getvalue()).decode())`], { encoding: 'utf8' 
   pass('重新导入恢复原书 ID、批注，并从服务端保存的第 3 章继续');
 
   await evaluate(`localStorage.setItem('velmira.r1', JSON.stringify({...JSON.parse(localStorage.getItem('velmira.r1') || '{}'), fontSize: 2}))`);
+  // Confirm the write reached storage before navigating; a slow runner can
+  // otherwise load the reader before localStorage is persisted.
+  await waitFor('JSON.parse(localStorage.getItem("velmira.r1")||"{}").fontSize===2');
   await nav(base + `/?book=${text.id}&ch=0&debug=1`, '!!window.__velmira && !!document.querySelector("mark.ann-note")');
   assert.equal(await evaluate('getComputedStyle(document.querySelector("#reader-column")).fontSize'), '22px');
   assert.deepEqual(await evaluate(`(async () => {const core=await import('/util/core.js');const saved=localStorage.getItem('velmira.r1');try{return [0,1,2,3].map(fontSize=>{localStorage.setItem('velmira.r1',JSON.stringify({fontSize}));return core.store.get().fontSize;});}finally{localStorage.setItem('velmira.r1',saved);}})()`), [17, 19, 22, 25]);
