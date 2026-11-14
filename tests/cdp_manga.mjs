@@ -124,7 +124,15 @@ try {
   assert.equal(await evaluate('document.querySelector("[aria-label=默认生图风格]").value'), 'anime');
   await set('默认生图风格', 'watercolor'); await clickText('立即保存设置');
   await waitFor('document.querySelector(".manga-studio [aria-label=画风]").value.includes("watercolor")');
-  assert.equal((await api(prefix + '/config')).config.style_preset, 'watercolor');
+  // Auto-save and the immediate-save button can overlap on a slow runner; wait
+  // for the server value instead of assuming the PATCH completed with the UI.
+  let serverStyle = '';
+  for (let attempt = 0; attempt < 100; attempt++) {
+    serverStyle = (await api(prefix + '/config')).config.style_preset;
+    if (serverStyle === 'watercolor') break;
+    await sleep(100);
+  }
+  assert.equal(serverStyle, 'watercolor', 'saved style did not reach the server');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
   assert.equal(await evaluate('document.querySelector(".drawer-settings").getBoundingClientRect().right<=innerWidth'), true);
   await shot('manga-mobile-settings');
