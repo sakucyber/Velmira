@@ -34,16 +34,16 @@ def json_object(raw):
         try:
             raw = json.loads(text)
         except ValueError:
-            raise MangaError("文本模型未返回有效 JSON，请重试", "invalid_text_output", 502) from None
+            raise MangaError("文本模型未返回有效 JSON，请重试", "invalid_text_output", 502, reason="json_invalid") from None
     if not isinstance(raw, dict):
-        raise MangaError("文本模型返回格式无效，请重试", "invalid_text_output", 502)
+        raise MangaError("文本模型返回格式无效，请重试", "invalid_text_output", 502, reason="json_invalid")
     return raw
 
 
 def checked_text(value, key, limit, required=False):
     text = value.get(key, "")
     if not isinstance(text, str) or len(text) > limit or (required and not text.strip()):
-        raise MangaError("文本模型的 " + key + " 字段无效，请重试", "invalid_text_output", 502)
+        raise MangaError("文本模型的 " + key + " 字段无效，请重试", "invalid_text_output", 502, reason="field_invalid")
     return text.strip()
 
 
@@ -153,7 +153,8 @@ async def write_plan(material, settings, *, report=None, guard=lambda: None):
         prompt = await retry.complete(provider, system=PROMPT_SYSTEM, user=lambda: stable_json(prompt_input), schema={"type": "object"}, temperature=.2,
                                       validate=prompt_value, report=report, guard=guard, label="生图提示词")
     except MangaError as exc:
-        raise MangaError("文本 AI 已尝试 3 次：" + str(exc), exc.code, exc.status) from None
+        raise MangaError("文本 AI 已尝试 3 次：" + str(exc), exc.code, exc.status,
+                         reason=getattr(exc, "reason", None)) from None
     except Exception as exc:
         guard()
         raise MangaError("文本 AI 已尝试 3 次仍失败，请检查连接与输出；尚未提交生图任务", "text_ai_failed", 502,

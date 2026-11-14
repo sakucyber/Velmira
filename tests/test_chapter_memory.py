@@ -88,6 +88,34 @@ class ChapterMemoryTests(unittest.TestCase):
         with self.assertRaises(MangaError): asyncio.run(cm.compress(provider,book_id='b',chapter=0,title='0',pieces=[{'text':'new'}],parts=[],source_hash='new'))
         self.assertEqual(dict(self.conn.execute('SELECT * FROM chapter_memory_capsules').fetchone()),previous)
 
+    def test_compress_drops_minority_paraphrased_quotes_and_keeps_sources(self):
+        row = self.row(1); text = json.loads(row['paras_json'])[0]
+        response = {"memory": memory_text(), "facts": [
+            {"kind":"event","character_id":"Ari","field":"action","value":"opens","quote":"Ari opens the door"},
+            {"kind":"event","character_id":"Ari","field":"ending","value":"key breaks",
+             "quote":"Ari opens the door Finally the key breaks"},
+            {"kind":"prop","character_id":"Ari","field":"key","value":"shatters","quote":"the key shatters"}]}
+        provider = SimpleNamespace(complete=AsyncMock(return_value=response))
+        result = asyncio.run(cm.compress(provider, book_id='b', chapter=1, title='1',
+            pieces=[{'text':text}], parts=[{'synopsis':'Ari opens the door.'}], source_hash=digest(row)))
+        self.assertEqual(provider.complete.await_count, 1)
+        self.assertEqual(len(result['facts']), 2)
+        self.assertEqual(result['dropped_facts'], 1)
+        # The stored quote must be the exact source span, not the model's
+        # punctuation-inserted paraphrase.
+        self.assertEqual(result['facts'][1]['quote'], text)
+
+    def test_compress_last_attempt_keeps_verifiable_memory_when_quotes_all_fail(self):
+        row = self.row(1); text = json.loads(row['paras_json'])[0]
+        response = {"memory": memory_text(), "facts": [
+            {"kind":"event","character_id":"Ari","field":"action","value":"invented","quote":"not in the chapter"}]}
+        provider = SimpleNamespace(complete=AsyncMock(return_value=response))
+        result = asyncio.run(cm.compress(provider, book_id='b', chapter=1, title='1',
+            pieces=[{'text':text}], parts=[{'synopsis':'Ari opens the door.'}], source_hash=digest(row)))
+        self.assertEqual(provider.complete.await_count, 3)
+        self.assertEqual(result['facts'], [])
+        self.assertTrue(result['text'])
+
     def test_offline_fallback_is_explicit_utf8_estimate(self):
         with patch.dict('sys.modules', {'tiktoken':None}):
             count,method=cm.token_count('汉字🙂')

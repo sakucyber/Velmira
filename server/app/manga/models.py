@@ -55,10 +55,13 @@ SHOTS = {
 
 
 class MangaError(ValueError):
-    def __init__(self, message, code="invalid_render_request", status=400, *, status_code=None, error_code=None):
+    def __init__(self, message, code="invalid_render_request", status=400, *, status_code=None, error_code=None, reason=None):
         super().__init__(message)
         self.code, self.status = code, status
         self.status_code, self.error_code = status_code, error_code
+        # A stable machine-readable cause for diagnostics.  Never present raw
+        # provider text here; the analysis panel maps it to fixed copy.
+        self.reason = reason
 
 
 def digest(value):

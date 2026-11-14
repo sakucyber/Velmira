@@ -112,6 +112,34 @@ class TextAITests(unittest.TestCase):
         self.save_settings(enabled=False)
         self.plan(status=409)
 
+    def test_plain_http_is_limited_to_local_and_private_endpoints(self):
+        self.assertEqual(self.save_settings(base_url="http://192.168.1.10:8000/v1").status_code, 200)
+        self.assertEqual(self.save_settings(base_url="http://localhost:11434/v1").status_code, 200)
+        self.assertEqual(self.save_settings(base_url="http://remote.example/v1").status_code, 400)
+
+    def test_graded_text_probe_reports_each_stage(self):
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=["OK", {"ok": True}, {"quote": "blue door"}]))
+        with patch("server.app.api.text_ai.make_provider", return_value=provider),              patch("server.app.api.text_ai.request_json", return_value={"data": [{"id": "test-director"}]}):
+            response = self.client.post("/api/ai/probe")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"], body)
+        self.assertEqual([stage["id"] for stage in body["stages"]], ["models", "chat", "json", "citation"])
+        self.assertTrue(all(stage["ok"] for stage in body["stages"]))
+
+    def test_graded_text_probe_separates_configuration_failure(self):
+        from server.app.ai.providers import ProviderRequestError
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=ProviderRequestError(
+            "unauthorized", status_code=401, error_code="http_error")))
+        with patch("server.app.api.text_ai.make_provider", return_value=provider),              patch("server.app.api.text_ai.request_json", return_value={"data": []}):
+            body = self.client.post("/api/ai/probe").json()
+        self.assertFalse(body["ok"])
+        chat = next(stage for stage in body["stages"] if stage["id"] == "chat")
+        self.assertFalse(chat["ok"])
+        self.assertTrue(chat["fatal"])
+        self.assertFalse(chat["retryable"])
+        self.assertIn("密钥", chat["detail"])
+
     def test_local_server_without_json_mode_still_validates_output(self):
         self.save_settings(json_mode=False, rpm=25, max_concurrency=5)
         provider=OpenAICompatProvider('https://text.example/v1','test-director',local_settings=True)

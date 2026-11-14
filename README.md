@@ -225,6 +225,7 @@ docs/                   架构、计划、契约、截图
 ## 文档与证据
 
 - docs/M0-PLAN.md · docs/M1-PLAN.md · docs/API-CONTRACT.md（v0.4）
+- [AI 失败诊断与可恢复性](docs/AI-DIAGNOSTICS.md)（阶段/原因、分级探测、失败样本与诊断包）
 - tests/REPORT.md · tests/REPORT-M1.md · [v0.4 验证记录](tests/REPORT-v0.4.md)
 - [v0.4.0 本地交付说明](docs/RELEASE-v0.4.0.md)
 - 截图：阅读器 · 笔记 · 目录 · 搜索 · 漫画 · 书库 · 移动端（docs/screenshots/）

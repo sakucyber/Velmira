@@ -80,8 +80,8 @@ def main():
 
     # ---------------- 前置：冷启动健康检查
     st, ct, obj, raw, ms = api("GET", "/api/health")
-    if st == 200 and obj and obj.get("version") == "0.4.2" and "mock" not in str(obj.get("version")):
-        add("A0 冷启动健康检查", "PASS", f"GET /api/health -> 200 version=0.4.2 data_dir={obj.get('data_dir')}", f"{ms:.0f}ms")
+    if st == 200 and obj and obj.get("version") == "0.5.1" and "mock" not in str(obj.get("version")):
+        add("A0 冷启动健康检查", "PASS", f"GET /api/health -> 200 version=0.5.1 data_dir={obj.get('data_dir')}", f"{ms:.0f}ms")
     else:
         add("A0 冷启动健康检查", "FAIL", f"status={st} body={raw[:200]!r}")
         print(json.dumps(RESULTS, ensure_ascii=False, indent=1))

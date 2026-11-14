@@ -1,12 +1,13 @@
 """FastAPI 应用入口：建库 → 挂载业务路由 → 可选挂载扩展路由 → 最后挂静态目录。
 
-项目：Velmira v0.4.2；离线同步与实时书库 SSE。
+项目：Velmira v0.5.1；离线同步与实时书库 SSE。
 启动：python -m uvicorn server.app.main:app --host 127.0.0.1 --port 8765
 数据目录：环境变量 DATA_DIR 优先，默认 项目根/data。
 """
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,6 +20,10 @@ from .api.books import router as books_router
 from .db import init_db
 
 log = logging.getLogger("velmira.server")
+# Desktop redirects stdout/stderr to backend.log. Without a root handler the
+# application loggers only emit WARNING+ through lastResort, which loses the
+# context needed to diagnose an AI failure; keep INFO+ with timestamps.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 @asynccontextmanager
@@ -26,6 +31,7 @@ async def _lifespan(app: FastAPI):
     # create_app() 已完成建库；这里避免启动阶段再次读 schema、做迁移事务。
     from .manga import queue, automatic
     from .ai import book_analysis
+    log.info("Velmira %s starting", config.VERSION)
     queue.start()
     book_analysis.start()
     automatic.start()
@@ -35,6 +41,7 @@ async def _lifespan(app: FastAPI):
         await automatic.stop()
         await book_analysis.stop()
         await queue.stop()
+        log.info("Velmira backend stopped")
 
 
 def create_app() -> FastAPI:
@@ -44,6 +51,22 @@ def create_app() -> FastAPI:
 
     # 先建库（uvicorn 启动期间也不会出现「表不存在」的窗口）
     init_db()
+
+    @app.middleware("http")
+    async def _request_timing(request, call_next):
+        # Only paths and durations are logged; query strings and bodies can
+        # contain book text or search terms.
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            log.exception("API 请求异常 %s %s", request.method, request.url.path)
+            raise
+        elapsed = time.monotonic() - started
+        if elapsed >= 2.0 and request.url.path.startswith("/api/"):
+            log.warning("API 请求较慢 %s %s %.2fs status=%s", request.method,
+                        request.url.path, elapsed, response.status_code)
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def _on_validation_error(request, exc: RequestValidationError):

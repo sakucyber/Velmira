@@ -47,6 +47,9 @@ elif [[ -d "$root/.tmp/tiktoken-cache" ]]; then
 fi
 cp "$root/LICENSE" "$stage/LICENSE" 2>/dev/null || true
 cp "$root/NOTICE.md" "$stage/NOTICE.md" 2>/dev/null || true
+cp "$root/README.md" "$stage/README.md" 2>/dev/null || true
+cp "$root/desktop/README-DIST.md" "$stage/README-DIST.md" 2>/dev/null || true
+cp -a "$root/docs" "$stage/docs" 2>/dev/null || true
 
 cat > "$stage/Velmira" <<'LAUNCHER'
 #!/usr/bin/env bash

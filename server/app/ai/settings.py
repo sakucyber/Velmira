@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import ipaddress
 import json
 import os
 import threading
@@ -18,7 +19,9 @@ from .. import config
 
 _lock = threading.RLock()
 DEFAULTS = {"base_url": "", "model": "gpt-oss-120b", "enabled": False, "auto_analyze": True,
-            "rpm": 0, "max_concurrency": 1, "json_mode": True, "reference_api": "edits"}
+            "rpm": 0, "max_concurrency": 1, "json_mode": True, "reference_api": "edits",
+            "reasoning_effort": ""}
+REASONING_EFFORTS = {"", "minimal", "low", "medium", "high", "max"}
 
 
 def _path(slot="text"):
@@ -73,6 +76,23 @@ def public_settings(slot="text"):
     return {**{k: value[k] for k in DEFAULTS}, "key_configured": bool(value.get("key_dpapi") or value.get("key_local"))}
 
 
+def _private_host(hostname):
+    """Loopback, private LAN and mDNS names may use plain HTTP.
+
+    Everything else must use HTTPS: a remote HTTP endpoint sends the saved API
+    key in cleartext. Keeping this explicit also keeps the older rule (remote
+    plain HTTP is rejected) while still allowing local Ollama-style servers.
+    """
+    host = str(hostname or "").strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".lan"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 def validate_url(value):
     if not isinstance(value, str) or len(value) > 500:
         raise ValueError("API 地址无效")
@@ -93,6 +113,8 @@ def validate_url(value):
     # endpoint here.  ``urlsplit`` normalises the scheme to lower case.
     if url.scheme not in {"http", "https"}:
         raise ValueError("API 地址须使用 HTTP 或 HTTPS")
+    if url.scheme == "http" and not _private_host(url.hostname):
+        raise ValueError("远程 API 地址须使用 HTTPS；本机或局域网地址可使用 HTTP")
     return value
 
 
@@ -135,6 +157,11 @@ def save_settings(patch, slot="text"):
             if patch["reference_api"] not in ("edits", "generations"):
                 raise ValueError("参考图接口无效")
             value["reference_api"] = patch["reference_api"]
+        if "reasoning_effort" in patch:
+            effort = patch["reasoning_effort"]
+            if not isinstance(effort, str) or effort.strip().lower() not in REASONING_EFFORTS:
+                raise ValueError("推理强度须为空或 minimal/low/medium/high/max")
+            value["reasoning_effort"] = effort.strip().lower()
         # Blank leaves the existing credential in place, so reopening the form is safe.
         key = patch.get("api_key", "")
         if not isinstance(key, str) or len(key) > 2000 or any(c in key for c in "\r\n"):

@@ -247,6 +247,7 @@ func startBackend(root string, port int) (baseURL string, stop func(), wait func
 	}
 
 	logPath := backendLogPath()
+	rotateBackendLog(logPath, 5<<20, 3)
 	logFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if logFile != nil {
 		fmt.Fprintf(logFile, "\n=== %s velmira backend :%d ===\n", time.Now().Format(time.RFC3339), port)
@@ -334,6 +335,19 @@ func backendCommand(root string, port int) (*exec.Cmd, error) {
 	}
 
 	return exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port), "--no-proxy-headers"), nil
+}
+
+// rotateBackendLog keeps the long-lived desktop log bounded. Rotation happens
+// once per launch, before the new append handle is opened.
+func rotateBackendLog(path string, limit int64, keep int) {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() < limit {
+		return
+	}
+	for index := keep - 1; index >= 1; index-- {
+		_ = os.Rename(fmt.Sprintf("%s.%d", path, index), fmt.Sprintf("%s.%d", path, index+1))
+	}
+	_ = os.Rename(path, path+".1")
 }
 
 func backendLogPath() string {

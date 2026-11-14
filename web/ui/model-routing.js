@@ -5,6 +5,8 @@ const STRATEGIES = [
   ['round_robin', '轮流', '每次请求轮流分配起始模型，失败后继续尝试其他模型。'],
   ['random', '随机', '每次请求随机选择起始模型，失败后继续尝试其他模型。'],
 ];
+const REASONING = /(?:^|[\/_.-])(?:o[134](?:$|[-_.])|reasoner|reasoning|thinking|deepseek-r|qwq|gpt-oss)/i;
+const EFFORTS = [['', '不指定（不下发）'], ['minimal', 'minimal'], ['low', 'low'], ['medium', 'medium'], ['high', 'high'], ['max', 'max']];
 
 /** Global model pools. Credentials stay in server-side connection profiles. */
 export async function mountModelRouting({ area, kind, signal }) {
@@ -20,6 +22,8 @@ export async function mountModelRouting({ area, kind, signal }) {
   root.appendChild(heading);
   const loading = el('p', 'manga-note', '正在读取模型池…'); root.appendChild(loading);
   const active = () => !signal.aborted && root.isConnected;
+  // Assigned after the parameter controls exist; renderModels may run earlier.
+  let updateTokenHint = () => {};
   let connections, config, status, presets = [];
   try {
     const [pool, saved] = await Promise.all([apiGet('/api/ai/routing/' + kind, signal), apiGet('/api/ai/connections', signal)]);
@@ -187,6 +191,7 @@ export async function mountModelRouting({ area, kind, signal }) {
       const remove = button(actions, '×', () => { models.splice(index, 1); renderModels(); updateChoices(); dirty(); }, 'routing-icon routing-remove'); remove.setAttribute('aria-label', name + '模型池：移除第 ' + (index + 1) + ' 个模型');
       list.appendChild(row);
     });
+    updateTokenHint();
   };
 
   // A model-library edit can change both the available connections and the
@@ -254,9 +259,15 @@ export async function mountModelRouting({ area, kind, signal }) {
   const connectionNumbers = el('div', 'routing-parameters'); newConnection.appendChild(connectionNumbers);
   const rpm = field(connectionNumbers, '每分钟请求上限（0 为不限）', 0, 'number'); rpm.min = '0'; rpm.max = '1000'; rpm.step = '1';
   const concurrency = field(connectionNumbers, '最大并发', 1, 'number'); concurrency.min = '1'; concurrency.max = '8'; concurrency.step = '1';
-  let jsonMode, referenceApi;
-  if (kind === 'text') jsonMode = field(newConnection, '要求 JSON 输出（服务需支持）', true, 'checkbox');
-  else {
+  let jsonMode, referenceApi, reasoningEffort;
+  if (kind === 'text') {
+    jsonMode = field(newConnection, '要求 JSON 输出（服务需支持）', true, 'checkbox');
+    const effortWrap = el('label', 'manga-field');
+    effortWrap.appendChild(el('span', null, '推理强度（可选，未选择则不下发）'));
+    reasoningEffort = el('select'); reasoningEffort.setAttribute('aria-label', name + '模型池：推理强度');
+    for (const [value, label] of EFFORTS) { const option = el('option', null, label); option.value = value; reasoningEffort.appendChild(option); }
+    effortWrap.appendChild(reasoningEffort); newConnection.appendChild(effortWrap);
+  } else {
     const wrap = el('label', 'manga-field'); wrap.appendChild(el('span', null, '参考图接口'));
     referenceApi = el('select'); referenceApi.setAttribute('aria-label', name + '模型池：新连接参考图接口');
     for (const [value, label] of [['edits', '标准图像编辑接口'], ['generations', 'Agnes JSON 参考图接口']]) { const option = el('option', null, label); option.value = value; referenceApi.appendChild(option); }
@@ -270,6 +281,7 @@ export async function mountModelRouting({ area, kind, signal }) {
     const payload = { label: connectionLabel.value.trim(), kind, models: names, base_url: address.value.trim(), api_key: key.value,
       rpm: Number(rpm.value), max_concurrency: Number(concurrency.value) };
     if (jsonMode) payload.json_mode = jsonMode.checked;
+    if (reasoningEffort) payload.reasoning_effort = reasoningEffort.value;
     if (referenceApi) payload.reference_api = referenceApi.value;
     if (savedConnectionId) payload.id = savedConnectionId;
     connectionStatus.textContent = '正在自动保存连接…'; delete connectionStatus.dataset.error;
@@ -280,7 +292,7 @@ export async function mountModelRouting({ area, kind, signal }) {
     connectionStatus.textContent = '连接已自动保存，可在上方加入模型池'; delete connectionStatus.dataset.error;
   };
   const scheduleConnection = debounce(() => saveConnection().catch(err => { connectionStatus.textContent = err.message || '连接自动保存失败'; connectionStatus.dataset.error = 'true'; }), 650);
-  [connectionLabel, address, key, modelNames, rpm, concurrency, jsonMode, referenceApi].filter(Boolean).forEach(control => {
+  [connectionLabel, address, key, modelNames, rpm, concurrency, jsonMode, referenceApi, reasoningEffort].filter(Boolean).forEach(control => {
     control.addEventListener(control.type === 'checkbox' || control.tagName === 'SELECT' ? 'change' : 'input', scheduleConnection);
   });
   // Kept as an immediate fallback; normal editing saves automatically.
@@ -307,6 +319,16 @@ export async function mountModelRouting({ area, kind, signal }) {
   if (kind === 'text') {
     temperature = field(parameters, '温度', config.temperature, 'number'); temperature.min = '0'; temperature.max = '2'; temperature.step = '0.1';
     maxTokens = field(parameters, '最大 Token', config.max_tokens, 'number'); maxTokens.min = '256'; maxTokens.max = '32768'; maxTokens.step = '1';
+    const tokenHint = el('p', 'manga-note'); parameters.appendChild(tokenHint);
+    updateTokenHint = () => {
+      const reasoning = models.map(member => member.model).filter(model => REASONING.test(model));
+      const value = Number(maxTokens.value) || config.max_tokens;
+      tokenHint.textContent = reasoning.length
+        ? '检测到推理模型 ' + reasoning.slice(0, 2).join('、') + '：思考过程会先占用最大 Token，建议 16000 以上（硬上限 32768）。'
+        : '最大 Token 硬上限 32768。温度、最大 Token、超时与冷却对模型池内所有文本任务统一生效。';
+      tokenHint.dataset.error = String(reasoning.length > 0 && value < 16000);
+    };
+    updateTokenHint();
   }
   const timeout = field(parameters, '单次请求超时（秒）', config.timeout, 'number'); timeout.min = '5'; timeout.max = '600'; timeout.step = '1';
   const cooldown = field(parameters, '失败模型冷却（秒）', config.cooldown, 'number'); cooldown.min = '0'; cooldown.max = '3600'; cooldown.step = '1';
@@ -321,14 +343,33 @@ export async function mountModelRouting({ area, kind, signal }) {
     if (maxTokens) maxTokens.value = selected.max_tokens;
     dirty('已选择“' + selected.label + '”预设，正在自动保存…');
   });
-  root.appendChild(el('p', 'manga-note', '冷却中的模型会暂时跳过，冷却结束后自动参与后续请求。每个连接仍遵守各自的并发与 RPM 上限。'));
+  root.appendChild(el('p', 'manga-note', '冷却中的模型会暂时跳过，冷却结束后自动参与后续请求。每个连接仍遵守各自的并发与 RPM 上限。单个模型在一次请求中最多调用一次，失败后切换候选；外层最多 3 轮。'));
   for (const control of [enabled, temperature, maxTokens, timeout, cooldown].filter(Boolean)) {
-    control.addEventListener('input', () => dirty());
-    control.addEventListener('change', () => dirty());
+    control.addEventListener('input', () => { if (control === maxTokens) updateTokenHint(); dirty(); });
+    control.addEventListener('change', () => { if (control === maxTokens) updateTokenHint(); dirty(); });
   }
   const actions = el('div', 'manga-actions'); root.appendChild(actions);
   button(actions, '立即保存', () => { clearTimeout(saveTimer); return saveNow(); }, 'btn-primary');
   button(actions, '重新加载模型池', () => refreshPool(true));
+  if (kind === 'text') {
+    const probe = el('section', 'automatic-diagnosis'); probe.hidden = true;
+    const probeBody = el('div'); probe.appendChild(probeBody); root.appendChild(probe);
+    button(actions, '检测文本 AI', async () => {
+      probe.hidden = false;
+      probeBody.replaceChildren(el('p', 'manga-note', '正在分级检测模型列表、对话、JSON 与原文引文…'));
+      const result = await apiPost('/api/ai/probe', {}, signal);
+      if (!active()) return;
+      probeBody.replaceChildren(el('h5', null, '文本 AI 分级检测 · ' + result.model));
+      for (const item of result.stages || []) {
+        const row = el('article', 'automatic-diagnosis-item');
+        row.dataset.level = item.ok ? 'ok' : item.fatal ? 'error' : 'warning';
+        row.append(el('strong', null, (item.ok ? '通过 · ' : '未通过 · ') + item.title),
+          el('p', 'manga-note', item.ok ? item.detail : (item.detail + '；' + (item.suggestion || '') + (item.ms ? '（' + item.ms + ' ms）' : ''))));
+        probeBody.appendChild(row);
+      }
+      probeBody.appendChild(el('p', 'manga-note', '总耗时 ' + result.elapsed_ms + ' ms。' + (result.ok ? '可继续整书分析。' : '请先处理未通过项；非致命项只影响引文精度。')));
+    });
+  }
   root.appendChild(feedback);
 
   const onConnectionsChanged = () => { refreshPool(); };

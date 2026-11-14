@@ -70,53 +70,113 @@ def _fact_id(book_id: str, chapter: int, source_hash: str, fact: dict, start: in
     return "fact_" + hashlib.sha256(stable_json([book_id, chapter, source_hash, semantic, start]).encode()).hexdigest()[:28]
 
 
-def _find_quote(text: str, quote: str, requested: object) -> tuple[int, int]:
+# Quotation checks are deliberately layered.  A model may legitimately
+# compress a sentence, change a quotation mark, or merge two adjacent clauses;
+# those small deviations must not discard an otherwise usable chapter memory.
+# Punctuation and whitespace are ignored for the fallback match, while the
+# stored offsets always point at the exact original text.
+_MATCH_IGNORE = set(" \t\r\n\u3000…—–-·•.,，。:：;；!?！？'\"“”‘’「」『』()（）[]【】<>《》_/\\|~*·")
+DROP_LIMIT = 0.4
+
+
+def _folded(value: str) -> tuple[str, list[int]]:
+    chars, positions = [], []
+    for index, char in enumerate(value):
+        if char in _MATCH_IGNORE:
+            continue
+        lowered = char.lower()
+        chars.append(lowered if len(lowered) == 1 else char)
+        positions.append(index)
+    return "".join(chars), positions
+
+
+def _locate_quote(text: str, quote: str, requested: object):
+    """Return (start, end, exact) or None when the quote cannot be verified."""
     if not quote:
-        raise MangaError("记忆事实缺少原文证据", "invalid_memory_output", 502)
+        return None
     if type(requested) is int and 0 <= requested <= len(text) and text[requested:requested + len(quote)] == quote:
-        return requested, requested + len(quote)
+        return requested, requested + len(quote), True
     start = text.find(quote)
-    if start < 0:
-        raise MangaError("记忆事实的 quote 不在当前章节", "invalid_memory_output", 502)
-    if text.find(quote, start + 1) >= 0:
-        raise MangaError("记忆事实的 quote 出现多次，请提供准确 start_offset", "invalid_memory_output", 502)
-    return start, start + len(quote)
+    if start >= 0:
+        if text.find(quote, start + 1) >= 0:
+            return None  # Ambiguous position; a concrete offset is required.
+        return start, start + len(quote), True
+    folded_text, positions = _folded(text)
+    folded_quote = _folded(quote)[0]
+    if not folded_quote:
+        return None
+    found = folded_text.find(folded_quote)
+    if found < 0 or folded_text.find(folded_quote, found + 1) >= 0:
+        return None
+    start = positions[found]
+    end = positions[found + len(folded_quote) - 1] + 1
+    # Keep sentence punctuation that the folded comparison ignored, so the
+    # stored quote remains a readable contiguous source span.
+    while end < len(text) and text[end] in ".,，。!?！？;；:：…—\"'”’」』】》":
+        end += 1
+    return start, end, False
 
 
 def normalize(raw: object, text: str, *, book_id: str, chapter: int, source_hash: str,
-              model: str | None = None) -> dict:
+              model: str | None = None, tolerant: bool = False,
+              dropped: list[str] | None = None) -> dict:
+    """Normalize one compressed capsule.
+
+    The summary itself is a hard requirement. Individual facts are soft when
+    tolerant mode is enabled: an unverifiable quote is dropped and recorded
+    while the rest of the chapter keeps its continuity memory. Callers that
+    need the historical strict behaviour (imports, direct API use) leave
+    tolerant off.
+    """
     if not isinstance(raw, dict):
-        raise MangaError("章节记忆格式无效", "invalid_memory_output", 502)
+        raise MangaError("章节记忆格式无效", "invalid_memory_output", 502, reason="field_invalid")
     if not isinstance(raw.get("memory"), str):
-        raise MangaError("章节记忆 memory 须为文本", "invalid_memory_output", 502)
+        raise MangaError("章节记忆 memory 须为文本", "invalid_memory_output", 502, reason="field_invalid")
     memory = raw["memory"].strip()
     tokens, method = token_count(memory, model)
     if not CAPSULE_MIN <= tokens <= CAPSULE_MAX:
-        raise MangaError(f"章节记忆须为 {CAPSULE_MIN}–{CAPSULE_MAX} token（当前 {tokens}，{method}）", "invalid_memory_output", 502)
+        raise MangaError(f"章节记忆须为 {CAPSULE_MIN}–{CAPSULE_MAX} token（当前 {tokens}，{method}）", "invalid_memory_output", 502, reason="field_invalid")
     values = raw.get("facts", [])
     if not isinstance(values, list) or len(values) > 5000:
-        raise MangaError("章节记忆 facts 无效", "invalid_memory_output", 502)
+        raise MangaError("章节记忆 facts 无效", "invalid_memory_output", 502, reason="field_invalid")
     facts = []
+    reasons = dropped if dropped is not None else []
     for value in values:
-        if not isinstance(value, dict):
-            raise MangaError("章节记忆事实格式无效", "invalid_memory_output", 502)
-        if any(not isinstance(value.get(key, ""), str) for key in ("kind", "character_id", "field", "value", "quote")):
-            raise MangaError("章节记忆事实须为文本字段", "invalid_memory_output", 502)
+        if not isinstance(value, dict) or any(
+                not isinstance(value.get(key, ""), str) for key in ("kind", "character_id", "field", "value", "quote")):
+            if not tolerant:
+                raise MangaError("章节记忆事实格式无效", "invalid_memory_output", 502, reason="field_invalid")
+            reasons.append("field_invalid")
+            continue
         kind, character_id, field, fact_value, quote = (str(value.get(k, "")).strip() for k in ("kind", "character_id", "field", "value", "quote"))
         if kind not in {"event", "relationship", "prop", "suspense", "state"} or not field or not fact_value or len(quote) > 500 or len(fact_value) > 500:
-            raise MangaError("章节记忆事实字段无效", "invalid_memory_output", 502)
-        start, end = _find_quote(text, quote, value.get("start_offset"))
+            if not tolerant:
+                raise MangaError("章节记忆事实字段无效", "invalid_memory_output", 502, reason="field_invalid")
+            reasons.append("field_invalid")
+            continue
+        located = _locate_quote(text, quote, value.get("start_offset"))
+        if located is None:
+            if not tolerant:
+                raise MangaError("记忆事实的 quote 不在当前章节或出现多次，请提供准确 start_offset",
+                                 "invalid_memory_output", 502, reason="quote_mismatch")
+            reasons.append("quote_mismatch")
+            continue
+        start, end, exact = located
+        stored_quote = quote if exact else text[start:end]
         facts.append({"id": _fact_id(book_id, chapter, source_hash, value, start), "book_id": book_id,
                       "chapter": chapter, "kind": kind, "character_id": character_id, "field": field,
-                      "value": fact_value, "quote": quote, "start_offset": start,
+                      "value": fact_value, "quote": stored_quote, "start_offset": start,
                       "end_offset": end, "source_hash": source_hash})
-    return {"text": memory, "tokens": tokens, "token_method": method,
-            "status": "ok", "version": CAPSULE_VERSION, "facts": facts}
+    result = {"text": memory, "tokens": tokens, "token_method": method,
+              "status": "ok", "version": CAPSULE_VERSION, "facts": facts}
+    if dropped is not None:
+        result["dropped_facts"] = len(dropped)
+    return result
 
 
 async def compress(provider, *, book_id: str, chapter: int, title: str, pieces: list[dict],
                    parts: list[dict], source_hash: str, model: str | None = None,
-                   guard=lambda: None, report=None) -> dict:
+                   guard=lambda: None, report=None, on_failure=None) -> dict:
     from . import retry
     material = {"book_id": book_id, "chapter": chapter, "title": title,
                 "text": _source_text(pieces),
@@ -128,12 +188,12 @@ async def compress(provider, *, book_id: str, chapter: int, title: str, pieces: 
         material["budget_instruction"] = "本地没有可用 tokenizer，当前以UTF-8字节作保守预算。memory须100–250个UTF-8字节（汉字约33–83个），不要自行估算英文token。"
     from .director import json_object
     known_people = {str(c.get("name", "")) for p in parts for c in p.get("characters", [])}
-    def validate(raw):
+    def validate(raw, attempt=retry.MAX_ATTEMPTS):
         try:
             value = dict(json_object(raw))
             values = value.get("facts", [])
             if not isinstance(values, list) or len(values) > 80:
-                raise MangaError("章节记忆facts须为数组", "invalid_memory_output", 502)
+                raise MangaError("章节记忆facts须为数组", "invalid_memory_output", 502, reason="field_invalid")
             values = list(values)
             # Preserve every previously validated visual evidence item even
             # if the capsule model selects different plot facts for emphasis.
@@ -148,18 +208,40 @@ async def compress(provider, *, book_id: str, chapter: int, title: str, pieces: 
                             "field":evidence.get("field", ""), "value":evidence.get("value", ""),
                             "quote":quote, "start_offset":base + start})
             value["facts"] = values
-            result = normalize(value, material["text"], book_id=book_id, chapter=chapter, source_hash=source_hash, model=model)
-            for fact in result["facts"]:
-                if fact["character_id"] and known_people and fact["character_id"] not in known_people:
-                    raise MangaError("记忆事实引用未知人物，请使用分段资料里的姓名", "invalid_memory_output", 502)
+            dropped = []
+            result = normalize(value, material["text"], book_id=book_id, chapter=chapter,
+                               source_hash=source_hash, model=model, tolerant=True, dropped=dropped)
+            # Unknown names are semantic mismatches, not a structural failure:
+            # keep the verifiable facts and drop the rest with the same budget.
+            if known_people:
+                kept = []
+                for fact in result["facts"]:
+                    if fact["character_id"] and fact["character_id"] not in known_people:
+                        dropped.append("unknown_character")
+                        continue
+                    kept.append(fact)
+                result["facts"] = kept
+            total = len(values)
+            ratio = len(dropped) / total if total else 0
+            if dropped and report:
+                report(f"章节连续性记忆 · 第 {attempt} 次输出有 {len(dropped)}/{total} 条事实未通过校验", "warning")
+            # A minority of paraphrased quotes is normal across models.  Only a
+            # majority failure is worth another full round; the final attempt
+            # keeps whatever can be verified instead of failing the chapter.
+            if ratio > DROP_LIMIT and attempt < retry.MAX_ATTEMPTS:
+                material["correction"] = (f"有 {len(dropped)}/{total} 条事实的 quote 未能在正文中逐字找到。"
+                                          "请只引用正文中的连续原文，不要改写、拼接或省略。重新输出完整memory和facts。")
+                raise MangaError(f"章节记忆有 {len(dropped)}/{total} 条事实无法验证", "invalid_memory_output", 502,
+                                 reason="quote_mismatch")
             result["facts"] = list({fact["id"]:fact for fact in result["facts"]}.values())
+            result["dropped_facts"] = len(dropped)
             return result
         except MangaError as exc:
             material["correction"] = str(exc) + "。请重新输出完整memory和facts，不要截断摘要。"
             raise
     return await retry.complete(provider, system=COMPRESS_SYSTEM, user=lambda: stable_json(material), schema={"type": "object"},
         temperature=.15, guard=guard, report=report, label="章节连续性记忆",
-        validate=validate)
+        attempt_aware=True, on_failure=on_failure, validate=validate)
 
 
 def save(conn, book_id: str, chapter: int, source_hash: str, memory: dict, *, revision: int | None = None) -> None:

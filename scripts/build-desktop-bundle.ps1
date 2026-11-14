@@ -87,6 +87,13 @@ Copy-Item $backendDir (Join-Path $bundle 'backend\Velmira-backend') -Recurse -Fo
 foreach ($name in @('README.md','LICENSE','NOTICE.md')) {
   if (Test-Path (Join-Path $root $name)) { Copy-Item (Join-Path $root $name) (Join-Path $bundle $name) -Force }
 }
+# The runtime package is not the source repository: ship the runtime-specific
+# readme and the docs that README.md links to, so the first run is not a
+# scavenger hunt for files that only exist in Git.
+Copy-Item (Join-Path $root 'desktop\README-DIST.md') (Join-Path $bundle 'README-DIST.md') -Force
+if (Test-Path (Join-Path $root 'docs')) {
+  Copy-Item (Join-Path $root 'docs') (Join-Path $bundle 'docs') -Recurse -Force
+}
 Copy-Item (Join-Path $root 'desktop\START-HERE.txt') (Join-Path $bundle 'START-HERE.txt') -Force
 & $Python (Join-Path $root 'scripts\collect-bundle-licenses.py') --bundle $bundle --root $root
 if ($LASTEXITCODE -ne 0) { throw '收集分发依赖许可失败' }

@@ -13,7 +13,7 @@ Set-Location $Root
 if ($DataDir -ne "") {
   $env:DATA_DIR = $DataDir
 }
-Write-Host "Velmira v0.4.0"
+Write-Host "Velmira v0.5.1"
 Write-Host "[run] root      = $Root"
 Write-Host "[run] data dir  = $(if ($env:DATA_DIR) { $env:DATA_DIR } else { Join-Path $Root 'data' })"
 Write-Host "[run] bind      = $BindAddress"

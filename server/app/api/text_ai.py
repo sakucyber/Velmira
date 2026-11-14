@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
+import zipfile
 
 from fastapi import APIRouter, Body
+from fastapi.responses import Response
 
+from .. import config
 from ..ai import director, settings, book_analysis, translation
 from .. import task_log
 from ..ai import retry
@@ -230,6 +234,38 @@ def pause_analysis(book_id: str):
         return book_analysis.overview(conn, book_id)
 
 
+@router.get("/api/books/{book_id}/ai/analysis/diagnose")
+def diagnose_analysis(book_id: str):
+    """Explain the current analysis state without calling any model."""
+    with connection(book_id) as conn:
+        return book_analysis.diagnose(conn, book_id)
+
+
+@router.get("/api/books/{book_id}/ai/analysis/diagnostics/export")
+def export_analysis_diagnostics(book_id: str):
+    """One-click support bundle: safe logs, config categories and samples."""
+    with connection(book_id) as conn:
+        payload = book_analysis.export_diagnostics(conn, book_id)
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("summary.json", json.dumps({
+            "version": config.VERSION, "generated_at": int(time.time()),
+            "book": payload.get("book"), "analysis": payload.get("summary", {}).get("analysis"),
+            "checks": payload.get("summary", {}).get("checks"),
+            "config": payload.get("summary", {}).get("config"),
+        }, ensure_ascii=False, indent=2))
+        archive.writestr("task-logs.json", json.dumps(payload.get("logs", []), ensure_ascii=False, indent=2))
+        archive.writestr("config.json", json.dumps(payload.get("config", {}), ensure_ascii=False, indent=2))
+        for name, sample in (payload.get("samples") or {}).items():
+            archive.writestr("samples/" + str(name).replace("/", "_").replace("\\", "_"),
+                             json.dumps(sample, ensure_ascii=False, indent=2))
+        archive.writestr("README.txt", "Velmira AI 诊断包。包含任务日志、配置类别与脱敏后的失败样本；不含 API 密钥或提示词。失败样本为有限长度的模型输出片段，可能含少量正文引用。\n")
+    safe_id = "".join(char for char in str(book_id) if char.isalnum() or char in "-_")[:40] or "book"
+    return Response(content=archive_buffer.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="velmira-diagnostics-' + safe_id + '.zip"',
+                             "Cache-Control": "private, no-store"})
+
+
 @router.get("/api/ai/settings")
 def get_settings():
     return {"settings": settings.public_settings()}
@@ -277,15 +313,84 @@ async def list_models():
 
 @router.post("/api/ai/probe")
 async def probe():
+    """Graded text probe: reachability, chat, JSON output and citation fidelity.
+
+    A reachable model that cannot produce JSON or quote a passage is exactly the
+    situation that used to pass a one-line probe and then fail real analysis,
+    so the stages are reported separately instead of one opaque boolean.
+    """
     cfg = director.text_config()
-    try:
-        def validate(raw):
-            if director.json_object(raw).get("ok") is not True:
-                raise ValueError()
-        await retry.complete(make_provider(cfg), system="Return only JSON.", user='Return {"ok":true}.', schema={"type": "object"}, validate=validate)
-        return {"ok": True, "model": "文本模型池" if cfg.get("routing") else cfg["model"]}
-    except Exception:
-        raise MangaError("文本 AI 检测失败，请检查模型、地址和密钥", "text_probe_failed", 502) from None
+    provider = make_provider(cfg)
+    if cfg.get("routing"):
+        target = cfg["routing"]["connections"][0]
+        model_label = "文本模型池（" + "、".join(item["model"] for item in cfg["routing"]["connections"][:3]) + "）"
+    else:
+        target, model_label = cfg, cfg["model"]
+    from ..ai.diagnostics import failure_detail, non_retryable
+    stages = []
+    started_at = time.monotonic()
+
+    async def stage(stage_id, title, fatal, work):
+        import time as clock
+        began = clock.monotonic()
+        try:
+            detail = await work()
+        except Exception as exc:
+            info = failure_detail(exc, stage="probe", model=model_label)
+            stages.append({"id": stage_id, "title": title, "ok": False, "fatal": fatal,
+                           "detail": info["title"], "reason": info["reason"],
+                           "suggestion": info["suggestion"], "http_status": info["http_status"],
+                           "finish_reason": info["finish_reason"], "retryable": not non_retryable(exc),
+                           "ms": round((clock.monotonic() - began) * 1000)})
+            return False
+        stages.append({"id": stage_id, "title": title, "ok": True, "fatal": fatal,
+                       "detail": detail, "ms": round((clock.monotonic() - began) * 1000)})
+        return True
+
+    async def models_reachable():
+        base = str(target.get("base_url") or "").rstrip("/")
+        if not base:
+            raise MangaError("没有可用的 API 地址", "text_ai_not_configured", 409, reason="auth")
+        url = base if base.endswith("/models") else base + "/models"
+        key = settings.api_key_for(target["base_url"], target.get("credential_slot", "text"))
+        data = await asyncio.to_thread(request_json, url, api_key=key, timeout=20)
+        values = data.get("data", data.get("models", [])) if isinstance(data, dict) else data
+        return "模型列表可访问" + ("（" + str(len(values)) + " 项）" if isinstance(values, list) else "")
+
+    async def chat_request():
+        raw = await provider.complete(system="Reply with one short word.", user="Say OK.")
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        if not text.strip():
+            raise MangaError("模型返回空内容", "empty_content", 502, reason="empty_content")
+        return "最小对话请求成功"
+
+    async def json_output():
+        raw = await provider.complete(system="Return only JSON.", user='Return {"ok":true}.', schema={"type": "object"})
+        value = director.json_object(raw)
+        if value.get("ok") is not True:
+            raise MangaError("JSON 字段不符合要求", "invalid_text_output", 502, reason="field_invalid")
+        return "可返回有效 JSON 对象"
+
+    async def citation_output():
+        passage = "She opened the blue door and stepped into the rain."
+        raw = await provider.complete(
+            system="Return only JSON. Quote one exact contiguous substring of the supplied passage.",
+            user=passage + '\nReturn {"quote":"<exact substring of the passage>"}',
+            schema={"type": "object"})
+        value = director.json_object(raw)
+        quote = value.get("quote")
+        if not isinstance(quote, str) or len(quote.strip()) < 6 or quote.strip() not in passage:
+            raise MangaError("模型未能逐字引用原文", "invalid_text_output", 502, reason="quote_mismatch")
+        return "可逐字引用给定原文"
+
+    await stage("models", "读取模型列表", False, models_reachable)
+    await stage("chat", "最小对话请求", True, chat_request)
+    await stage("json", "JSON 输出", True, json_output)
+    await stage("citation", "原文引文校验", False, citation_output)
+    failed = next((item for item in stages if not item["ok"] and item["fatal"]), None)
+    note = (failed["title"] + "失败：" + failed["detail"] + "；" + failed["suggestion"]) if failed else "文本 AI 检测通过"
+    return {"ok": failed is None, "model": model_label, "stages": stages,
+            "note": note, "elapsed_ms": round((time.monotonic() - started_at) * 1000)}
 
 
 @router.post("/api/books/{book_id}/manga/plan")

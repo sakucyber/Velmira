@@ -287,10 +287,10 @@ curl.exe -X POST "http://127.0.0.1:8765/api/books?filename=book.txt" --data-bina
 ## 7.1 品牌与版本
 
 - 产品名：**Velmira**（UI 标题、document.title、README、健康检查统一）
-- `server/app/config.py: VERSION = "0.4.0"`（当前版本，见第 9 节）
+- `server/app/config.py: VERSION = "0.5.1"`（当前版本，见第 9 节）
 - GET /api/health 变为：
 ~~~json
-{"ok": true, "name": "Velmira", "version": "0.4.0"}
+{"ok": true, "name": "Velmira", "version": "0.5.1"}
 ~~~
 - 前端不得再出现旧品牌名；浏览器标签页格式：`<书名> · Velmira`
 
@@ -427,7 +427,7 @@ data: {"revision": 7, "count": 3}
 
 # 9. v0.4 增量：批注预览与分发
 
-- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.4.0"`；书库标识为 v0.4，APK 版本为 0.4.0。
+- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.5.1"`；书库标识为 v0.4，APK 版本为 0.5.1。
 - 注释 API 和数据库结构不变。`note` 为非空文字时，原文 `mark.ann` 额外带 `ann-note` 类，用双下划线标记；普通高亮维持四色背景。
 - 鼠标悬停批注文字直接展示笔记，点击可固定弹层；手机单击、键盘 Enter/空格也可查看。弹层保留改色、编辑、删除操作。
 - 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。
@@ -485,10 +485,12 @@ data: {"revision": 7, "count": 3}
 
 # 14. 整书阅读与通用图像 API
 
-- `GET /api/books/{book_id}/ai/analysis` 返回 `{analysis,chapters}`。analysis 含 `status/total/completed/current_chapter/current_part/total_parts/error/updated_at`；chapters 按章节排序，含 `chapter/title/summary/character_ids/entities/parts`。未开始时为 idle。
+- `GET /api/books/{book_id}/ai/analysis` 返回 `{analysis,chapters}`。analysis 含 `status/total/completed/current_chapter/current_part/total_parts/error/updated_at`；失败时另有 `failure:{code,reason,stage,chapter,model,http_status,finish_reason,usage,max_tokens,title,message,suggestion}`。chapters 按章节排序，含 `chapter/title/summary/character_ids/entities/parts`。未开始时为 idle。
 - `POST /api/books/{book_id}/ai/analysis` 开始或继续，返回同样结构。只接收 TXT/EPUB。相同来源和模型的已完成任务直接复用；更改内容、模型、地址或分析版本会新建 run，复用仍有效的缓存。
 - `POST /api/books/{book_id}/ai/analysis/pause` 暂停 queued/running 任务；正在进行的 HTTP 请求可能完成，但晚到响应不会写入已暂停任务。状态为 `queued/running/done/paused/error`。关闭程序后 running 在下次启动恢复为 queued；已完成章节、分段和摘要合并结果持久化复用。
-- `auto_analyze` 默认 true；共享文本 AI 启用后，每 15 秒发现未分析的未归档小说并排队，含已有书库和后续导入。关闭自动发现不取消已创建任务；面板可以单独暂停、继续。API 错误或无效 JSON 在 3 次尝试都失败后停止任务，不静默跳章、不伪造完成、不自动无限重试。
+- `GET /api/books/{book_id}/ai/analysis/diagnose` 返回 `{analysis,checks,logs,samples,config,can_resume,failure}`，不调用任何模型；用于查看阶段、原因、Token 预算与最近任务时间线。详见 `AI-DIAGNOSTICS.md`。
+- `GET /api/books/{book_id}/ai/analysis/diagnostics/export` 返回 zip（summary/task-logs/config/samples/README），只含脱敏后的失败样本、任务日志和公开配置，不含密钥、提示词或上游响应正文。
+- `auto_analyze` 默认 true；共享文本 AI 启用后，每 15 秒发现未分析的未归档小说并排队，含已有书库和后续导入。关闭自动发现不取消已创建任务；面板可以单独暂停、继续。API 错误或无效 JSON 在 3 次尝试都失败后停止任务；401/402/403 等凭据或配置错误只请求一次，不静默跳章、不伪造完成、不自动无限重试。
 - 每段最多 6000 字符，包含超长单段的全部文字。多段章节按每组最多 8 份摘要递归合并，保留每章大意；前章摘要参与下一章阅读。人物视觉证据必须逐字出现在该段，章节编号由应用写入；人物卡与场景在同一事务落库，冻结身份不覆盖。新增人物卡仍需冻结并确认参考图后生成分镜。
 - 每章另由文本模型生成 100–250 token 胶囊及带原文引用和字符位置的事实；自动分镜上下文按最终序列化结果限制为 1800 token。只检索当前位置之前的事实及此前章节胶囊，来源哈希排除过期资料。已知编码采用 tiktoken，未知编码明确标记估计。人物外貌以生效位置的冻结形态和参考图为准，详见 `CHAPTER-MEMORY.md`。
 - 场景列表支持 `offset` 和 `limit`，返回 `has_more`；漫画面板加载全部有效场景后按章节选择，不受原默认 100 条限制。文本 AI 启用时，界面“加入生成队列”也会先补齐总结和提示词。
@@ -514,6 +516,7 @@ data: {"revision": 7, "count": 3}
 - `POST /api/books/{book_id}/manga/exports` 校验所有有效页并生成 CBZ，包含 `ComicInfo.xml` 与 `pages/0001.png` 等有序文件；`GET /exports/{id}/download` 下载。导出快照记录页 revision、图片哈希、章节和段落定位，后续编辑不会改变旧漫画版。
 - 书籍详情中的 `reading_links` 提供小说与漫画版的双向关系及页到章节／段落映射；漫画版继续使用普通书籍进度接口，和原小说进度分开保存。
 
+- `POST /api/ai/probe` 分级返回 `{ok,model,stages,note,elapsed_ms}`：模型列表、最小对话、JSON 输出、原文引文四级，含 `fatal/retryable/detail/suggestion`；`ok` 只由致命级（对话、JSON）决定。
 - `GET .../auto/logs?after=0&limit=100&run_id=...` 返回 `{logs:[{id,stage,level,message,created_at}],run_id,cursor}`。首次返回最近的日志窗口（按 id 正序）；后续用 after=cursor 增量读取，limit 最大 200。当前任务包含其整书分析日志，历史 run 只查对应漫画日志；按书隔离，每本保留最近 1000 条。不记录密钥、小说正文、提示词或原始服务商错误。
 - 自动漫画页面实时显示日志；已完成页在正文右侧按当前章节展示（窄屏在正文下方）。漫画与画风配置统一收进阅读器设置，自动漫画和漫画工作台入口均直达该设置页。
 - `GET /api/books/{book_id}/manga/reading-map?chapter=0&run_id=...` 返回 `{book_id,run_id,offset_unit:"unicode_codepoints",range_end:"exclusive",panels}`。省略 run_id 使用当前自动任务；同时合并有效手工页并按 job_id 去重。每格含 `chapter,start,end,source_quote,job_id,page_id,panel_index,page_url,url,rect,caption,dialogue,speaker,draft,pending_review`；`rect` 为页内归一化 `[x,y,width,height]`，`url` 直接读取单格图片。原文完整哈希或引用不符、资源缺失以及缺少可信来源的旧图片不参与映射。

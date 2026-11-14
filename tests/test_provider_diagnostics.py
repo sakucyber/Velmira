@@ -4,7 +4,7 @@ import io
 import unittest
 import urllib.error
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from server.app.ai.diagnostics import provider_failure
 from server.app.ai.providers import ProviderRequestError, request_json
@@ -38,6 +38,63 @@ class ProviderDiagnosticsTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     ImageAPIProvider(config).generate({}, None, "request")
             self.assertEqual(provider_failure(raised.exception), expected)
+
+    def test_failure_detail_explains_reasoning_budget(self):
+        from server.app.ai.diagnostics import failure_detail
+        error = ProviderRequestError("推理模型在思考阶段用完了最大 Token", error_code="reasoning_budget",
+                                     finish_reason="length", max_tokens=8000,
+                                     usage={"completion_tokens": 8000, "completion_tokens_details": {"reasoning_tokens": 8000}})
+        info = failure_detail(error, stage="memory", chapter=2, model="deepseek-flash")
+        self.assertEqual(info["reason"], "reasoning_budget")
+        self.assertEqual(info["code"], "output_reasoning_budget")
+        self.assertEqual(info["stage"], "memory")
+        self.assertEqual(info["chapter"], 2)
+        self.assertEqual(info["finish_reason"], "length")
+        self.assertEqual(info["usage"]["reasoning_tokens"], 8000)
+        self.assertIn("第 3 章章节记忆阶段失败", info["message"])
+        self.assertIn("思考 8000", info["message"])
+        self.assertIn("16000", info["suggestion"])
+        self.assertNotIn("sk-", str(info))
+
+    def test_reasoning_effort_and_hard_token_ceiling(self):
+        from server.app.ai.providers import HARD_MAX_OUTPUT_TOKENS, OpenAICompatProvider
+        provider = OpenAICompatProvider("https://text.example/v1", "reasoner")
+        cfg = {"base_url": "https://text.example/v1", "model": "reasoner", "reasoning_effort": "low",
+               "max_tokens": 16000, "temperature": 0.0, "json_mode": True}
+        with patch("server.app.ai.providers.request_json",
+                   return_value={"choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+                                 "usage": {"completion_tokens": 10}}) as request:
+            provider._complete_once("system", "user", {"type": "object"}, .2, cfg)
+        body = request.call_args.kwargs["body"]
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertEqual(body["max_tokens"], 16000)
+        self.assertEqual(body["temperature"], 0.0)
+        # The v0.4.6 report said 32000 was never sent; it is valid here.
+        with patch("server.app.ai.providers.request_json",
+                   return_value={"choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}]}) as request:
+            provider._complete_once("system", "user", {"type": "object"}, .2, {**cfg, "max_tokens": 32000})
+        self.assertEqual(request.call_args.kwargs["body"]["max_tokens"], 32000)
+        with self.assertRaises(ProviderRequestError) as raised:
+            provider._complete_once("system", "user", {"type": "object"}, .2,
+                                    {**cfg, "max_tokens": HARD_MAX_OUTPUT_TOKENS + 1})
+        self.assertEqual(raised.exception.error_code, "invalid_config")
+        with patch("server.app.ai.providers.request_json", return_value={"choices": [
+                {"message": {"content": ""}, "finish_reason": "length"}],
+                "usage": {"completion_tokens": 16000, "completion_tokens_details": {"reasoning_tokens": 16000}}}):
+            with self.assertRaises(ProviderRequestError) as raised:
+                provider._complete_once("system", "user", {"type": "object"}, .2, cfg)
+        self.assertEqual(raised.exception.error_code, "reasoning_budget")
+        self.assertEqual(raised.exception.usage["reasoning_tokens"], 16000)
+        self.assertEqual(raised.exception.max_tokens, 16000)
+
+    def test_retry_stops_immediately_for_configuration_failures(self):
+        import asyncio
+        from server.app.ai import retry
+        provider = SimpleNamespace(complete=AsyncMock(
+            side_effect=ProviderRequestError("unauthorized", status_code=401, error_code="http_error")))
+        with self.assertRaises(ProviderRequestError):
+            asyncio.run(retry.complete(provider, system="s", user="u"))
+        self.assertEqual(provider.complete.await_count, 1)
 
     def test_routing_exhaustion_keeps_category_only(self):
         cfg = {"enabled": True, "models": [{"connection_id": "c", "model": "m"}], "timeout": 1,

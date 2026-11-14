@@ -289,6 +289,9 @@ CREATE TABLE IF NOT EXISTS book_analysis (
   current_part INTEGER NOT NULL DEFAULT 0,
   total_parts INTEGER NOT NULL DEFAULT 0,
   error TEXT,
+  error_code TEXT,
+  error_stage TEXT,
+  error_detail TEXT,
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS analysis_chunks (

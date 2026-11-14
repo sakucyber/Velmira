@@ -117,16 +117,16 @@ try {
   await poolAdd('text', fixtureModels.text[1]);
   await poolClick('text', '轮流');
   await poolEval('text', `pool.querySelector('.routing-enable input').checked=true; pool.querySelector('.routing-enable input').dispatchEvent(new Event('input',{bubbles:true}));`);
-  await poolEval('text', `const fields=[...pool.querySelector(':scope > .routing-parameters').querySelectorAll('input[type=number]')]; fields[0].value='0.4'; fields[0].dispatchEvent(new Event('input',{bubbles:true})); fields[1].value='4096'; fields[1].dispatchEvent(new Event('input',{bubbles:true})); fields[2].value='45'; fields[2].dispatchEvent(new Event('input',{bubbles:true})); fields[3].value='30'; fields[3].dispatchEvent(new Event('input',{bubbles:true}));`);
-  await poolClick('text', '保存文本模型池');
-  await waitFor(`document.querySelector(${JSON.stringify(textPool)}).textContent.includes('模型池已保存')`);
+  await poolEval('text', `const fields=[...pool.querySelector('.routing-advanced .routing-parameters').querySelectorAll('input[type=number]')]; fields[0].value='0.4'; fields[0].dispatchEvent(new Event('input',{bubbles:true})); fields[1].value='4096'; fields[1].dispatchEvent(new Event('input',{bubbles:true})); fields[2].value='45'; fields[2].dispatchEvent(new Event('input',{bubbles:true})); fields[3].value='30'; fields[3].dispatchEvent(new Event('input',{bubbles:true}));`);
+  await poolClick('text', '立即保存');
+  await waitFor(`document.querySelector(${JSON.stringify(textPool)}).textContent.includes('已自动保存')`);
   let textRouting = await api('/api/ai/routing/text');
   assert.equal(textRouting.config.enabled, true); assert.equal(textRouting.config.strategy, 'round_robin'); assert.equal(textRouting.config.models.length, 2);
   assert.equal(textRouting.config.temperature, 0.4); assert.equal(textRouting.config.max_tokens, 4096); assert.equal(textRouting.config.timeout, 45); assert.equal(textRouting.config.cooldown, 30);
-  await poolClick('text', '按顺序'); await poolClick('text', '保存文本模型池');
+  await poolClick('text', '按顺序'); await poolClick('text', '立即保存');
   await waitFor(`!document.querySelector(${JSON.stringify(textPool)}).hasAttribute('aria-busy')`);
   assert.equal((await api('/api/ai/routing/text')).config.strategy, 'ordered');
-  await poolClick('text', '轮流'); await poolClick('text', '保存文本模型池');
+  await poolClick('text', '轮流'); await poolClick('text', '立即保存');
   await waitFor(`!document.querySelector(${JSON.stringify(textPool)}).hasAttribute('aria-busy')`);
   textRouting = await api('/api/ai/routing/text');
 
@@ -136,13 +136,13 @@ try {
   await poolEval('image', `const b=[...pool.querySelectorAll('.routing-model')][0].querySelector('button[aria-label*="移除"]'); b.click();`);
   await poolClick('image', '随机');
   await poolEval('image', `pool.querySelector('.routing-enable input').checked=true; pool.querySelector('.routing-enable input').dispatchEvent(new Event('input',{bubbles:true}));`);
-  await poolEval('image', `const fields=[...pool.querySelector(':scope > .routing-parameters').querySelectorAll('input[type=number]')]; fields[0].value='90'; fields[0].dispatchEvent(new Event('input',{bubbles:true})); fields[1].value='20'; fields[1].dispatchEvent(new Event('input',{bubbles:true}));`);
-  await poolClick('image', '保存图像模型池');
-  await waitFor(`document.querySelector(${JSON.stringify(imagePool)}).textContent.includes('模型池已保存')`);
+  await poolEval('image', `const fields=[...pool.querySelector('.routing-advanced .routing-parameters').querySelectorAll('input[type=number]')]; fields[0].value='90'; fields[0].dispatchEvent(new Event('input',{bubbles:true})); fields[1].value='20'; fields[1].dispatchEvent(new Event('input',{bubbles:true}));`);
+  await poolClick('image', '立即保存');
+  await waitFor(`document.querySelector(${JSON.stringify(imagePool)}).textContent.includes('已自动保存')`);
   const imageRouting = await api('/api/ai/routing/image');
   assert.equal(imageRouting.config.enabled, true); assert.equal(imageRouting.config.strategy, 'random'); assert.equal(imageRouting.config.models.length, 1);
   assert.equal(imageRouting.config.timeout, 90); assert.equal(imageRouting.config.cooldown, 20);
-  await poolClick('text', '刷新文本路由状态'); await poolClick('image', '刷新图像路由状态');
+  await poolClick('text', '刷新文本路由状态'); await poolClick('image', '刷新生图路由状态');
   assert.equal((await api('/api/ai/routing/text')).status.attempts, 0);
   assert.equal((await api('/api/ai/routing/image')).status.attempts, 0);
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
@@ -162,6 +162,8 @@ try {
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(imagePool)}).querySelector('.routing-enable input').checked`), true);
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await waitFor('document.documentElement.scrollWidth<=innerWidth');
+  // The drawer still transitions from the desktop X slide to the mobile sheet.
+  await sleep(400);
   assert.equal(await evaluate('document.querySelector(".drawer-settings").getBoundingClientRect().right<=innerWidth'), true);
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(textPool)}).scrollWidth<=document.querySelector(${JSON.stringify(textPool)}).clientWidth+1`), true);
   assert.equal(await evaluate(`document.querySelector(${JSON.stringify(imagePool)}).scrollWidth<=document.querySelector(${JSON.stringify(imagePool)}).clientWidth+1`), true);
@@ -181,7 +183,7 @@ try {
   await poolEval('text', `const handle=pool.querySelector('.routing-drag-handle');handle.focus();handle.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));`);
   assert.equal(await poolEval('text', `return pool.querySelector('.routing-model').dataset.model;`), fixtureModels.text[0]);
   for (const kind of ['text', 'image']) {
-    const name = kind === 'text' ? '文本' : '图像';
+    const name = kind === 'text' ? '文本' : '生图';
     const fixtureModel = 'form-' + kind + '-' + suffix;
     const countBefore = (await api('/api/ai/connections')).connections.filter(c => c.kind === kind).length;
     await poolEval(kind, `const form=pool.querySelector('.routing-new-connection'); form.open=true;
@@ -192,10 +194,11 @@ try {
       form.scrollIntoView({block:'start'});`);
     assert.equal(await poolEval(kind, `const form=pool.querySelector('.routing-new-connection'); return form.scrollWidth<=form.clientWidth+1 && pool.scrollWidth<=pool.clientWidth+1;`), true);
     assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
-    await poolClick(kind, '保存' + name + '连接');
-    await waitFor(`document.querySelector('.model-routing[data-routing="${kind}"] .routing-feedback').textContent.includes('连接已保存')`);
+    await poolClick(kind, '立即保存连接');
+    await waitFor(`document.querySelector('.model-routing[data-routing="${kind}"] .routing-autosave').textContent.includes('连接已自动保存')`);
     assert.equal(await poolEval(kind, `return pool.querySelector('.routing-new-connection input[type=password]').value;`), '');
-    assert.equal(await poolEval(kind, `return pool.querySelector('.routing-new-connection').open;`), false);
+    // Auto-save never collapses the form the user is editing.
+    assert.equal(await poolEval(kind, `return pool.querySelector('.routing-new-connection').open;`), true);
     assert.equal(await poolEval(kind, `return [...pool.querySelector('.routing-add select').options].some(o=>o.textContent.includes(${JSON.stringify(fixtureModel)}));`), true);
     const connections = (await api('/api/ai/connections')).connections.filter(c => c.kind === kind);
     assert.equal(connections.length, countBefore + 1);

@@ -20,6 +20,13 @@ def init_db() -> None:
         memory_fact_columns = {row[1] for row in conn.execute("PRAGMA table_info(chapter_memory_facts)")}
         if "kind" not in memory_fact_columns:
             conn.execute("ALTER TABLE chapter_memory_facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'state'")
+        # Structured AI failure diagnostics were added after v0.4.6. Existing
+        # local libraries keep their analysis rows; only the explanatory
+        # columns are appended.
+        analysis_columns = {row[1] for row in conn.execute("PRAGMA table_info(book_analysis)")}
+        for column in ("error_code", "error_stage", "error_detail"):
+            if column not in analysis_columns:
+                conn.execute("ALTER TABLE book_analysis ADD COLUMN " + column + " TEXT")
         # The EPUB asset table was introduced after the first v0.4 builds. Keep
         # existing local libraries readable when the new chapter mapping column
         # is added without requiring a destructive database reset.

@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 
-from .. import db, task_log
+from .. import config, db, task_log
 from ..manga.models import MangaError, digest
 from . import settings, retry
 from .director import json_object, checked_text
@@ -84,7 +84,8 @@ def enqueue(conn, book_id, *, resume=False):
     conn.execute("""INSERT INTO book_analysis(book_id,run_id,status,source_hash,config_json,total,updated_at)
         VALUES(?,?,'queued',?,?,?,?) ON CONFLICT(book_id) DO UPDATE SET
         run_id=excluded.run_id,status='queued',source_hash=excluded.source_hash,config_json=excluded.config_json,
-        total=excluded.total,completed=0,current_chapter=NULL,current_part=0,total_parts=0,error=NULL,updated_at=excluded.updated_at""",
+        total=excluded.total,completed=0,current_chapter=NULL,current_part=0,total_parts=0,error=NULL,
+        error_code=NULL,error_stage=NULL,error_detail=NULL,updated_at=excluded.updated_at""",
         (book_id, uuid.uuid4().hex, fingerprint, stable_json(cfg), len(rows), int(time.time())))
     return dict(conn.execute("SELECT * FROM book_analysis WHERE book_id=?", (book_id,)).fetchone())
 
@@ -93,9 +94,160 @@ def overview(conn, book_id):
     row = conn.execute("SELECT * FROM book_analysis WHERE book_id=?", (book_id,)).fetchone()
     job = dict(row) if row else {"status": "idle", "completed": 0, "total": len(chapters(conn, book_id))}
     job.pop("config_json", None)
+    # The public error message stays for older clients; the structured object
+    # carries stage/model/reason so the panel can explain what actually failed.
+    failure = None
+    if job.get("status") == "error" and job.get("error_detail"):
+        try:
+            parsed = json.loads(job["error_detail"])
+            failure = parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            failure = None
+    job["failure"] = failure
     summaries = [{"chapter": r["chapter"], **json.loads(r["summary_json"])} for r in conn.execute(
         "SELECT chapter,summary_json FROM chapter_summaries WHERE book_id=? ORDER BY chapter", (book_id,))]
     return {"analysis": job, "chapters": summaries}
+
+
+def _stored_failure(job):
+    if not job or job.get("status") != "error" or not job.get("error_detail"):
+        return None
+    try:
+        value = json.loads(job["error_detail"])
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def diagnose(conn, book_id):
+    """Actionable checks without making any provider request.
+
+    Everything returned here is either local configuration metadata or a
+    fixed diagnostic category.  API keys and upstream bodies never enter the
+    response.
+    """
+    from . import routing, settings as ai_settings
+    from .connections import resolve
+    from .providers import (HARD_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS,
+                            REASONING_MIN_OUTPUT_TOKENS, is_reasoning_model)
+    row = conn.execute("SELECT * FROM book_analysis WHERE book_id=?", (book_id,)).fetchone()
+    job = dict(row) if row else None
+    if job:
+        job.pop("config_json", None)
+        job["failure"] = _stored_failure(job)
+    checks = []
+    models, max_tokens, source = [], MAX_OUTPUT_TOKENS, "本机连接"
+    pool = routing.get_config("text")
+    local = ai_settings.load_settings()
+    if pool["enabled"] and pool["models"]:
+        source = "文本模型池"
+        max_tokens = pool["max_tokens"]
+        models = [item["model"] for item in pool["models"]]
+        checks.append({"level": "ok", "code": "text_pool_ready", "kind": "config",
+                       "title": "文本模型池已启用",
+                       "detail": "候选 " + "、".join(models[:5]) + ("…" if len(models) > 5 else "")
+                                 + "；失败会按设置降级。"})
+        missing = []
+        for item in pool["models"]:
+            try:
+                if not resolve(item["connection_id"], item["model"], "text")["key_configured"]:
+                    missing.append(item["model"])
+            except ValueError:
+                missing.append(item["model"])
+        if missing:
+            checks.append({"level": "warning", "code": "text_key_missing", "kind": "credentials",
+                           "title": "部分连接没有保存密钥",
+                           "detail": "检查 " + "、".join(missing[:3]) + " 的连接设置；部分本机服务允许空密钥。"})
+    elif local["enabled"] and local["base_url"] and local["model"]:
+        models = [local["model"]]
+        checks.append({"level": "ok", "code": "text_connection_ready", "kind": "config",
+                       "title": "文本 AI 已配置", "detail": "使用单连接 " + local["model"] + "；建议在模型池中启用备用模型。"})
+        if not ai_settings.public_settings()["key_configured"]:
+            checks.append({"level": "warning", "code": "text_key_missing", "kind": "credentials",
+                           "title": "尚未保存 API 密钥", "detail": "如供应商需要密钥，请在模型库或本机设置中填写。"})
+    else:
+        checks.append({"level": "error", "code": "text_ai_not_configured", "kind": "config",
+                       "title": "文本 AI 尚未启用",
+                       "detail": "请先保存文本连接并启用模型池（或启用本机文本 AI），然后重新开始分析。"})
+    reasoning = [model for model in models if is_reasoning_model(model)]
+    if reasoning and max_tokens < REASONING_MIN_OUTPUT_TOKENS:
+        checks.append({"level": "warning", "code": "reasoning_token_budget", "kind": "tokens",
+                       "title": "推理模型可能耗尽输出预算",
+                       "detail": reasoning[0] + " 会先消耗思考 token；当前最大 Token 为 " + str(max_tokens)
+                                 + "，建议提高到 " + str(REASONING_MIN_OUTPUT_TOKENS) + " 以上（上限 "
+                                 + str(HARD_MAX_OUTPUT_TOKENS) + "）。"})
+    elif reasoning:
+        checks.append({"level": "ok", "code": "reasoning_token_budget", "kind": "tokens",
+                       "title": "推理模型预算充足",
+                       "detail": "当前最大 Token 为 " + str(max_tokens) + "，可容纳思考过程。"})
+    failure = job.get("failure") if job else None
+    status = (job or {}).get("status", "idle")
+    if failure:
+        checks.append({"level": "error", "code": failure.get("code") or "analysis_failed", "kind": "analysis",
+                       "title": failure.get("title") or "整书分析中断",
+                       "detail": (failure.get("message") or "") + "；" + (failure.get("suggestion") or "")})
+    elif status in {"queued", "running"}:
+        checks.append({"level": "ok", "code": "analysis_running", "kind": "status",
+                       "title": "整书分析正在运行",
+                       "detail": "已完成 " + str(job["completed"]) + "/" + str(job["total"]) + " 章；继续时不会重复已有章节。"})
+    elif status == "paused":
+        checks.append({"level": "warning", "code": "analysis_paused", "kind": "resume",
+                       "title": "整书分析已暂停", "detail": "可以从已完成章节之后继续，已有结果会复用。"})
+    elif status == "done":
+        checks.append({"level": "ok", "code": "analysis_done", "kind": "status",
+                       "title": "整书分析已完成", "detail": "章节大意、人物卡和连续性记忆均已保存。"})
+    else:
+        checks.append({"level": "ok", "code": "analysis_idle", "kind": "status",
+                       "title": "尚未开始整书分析", "detail": "点击开始后会按章节顺序分析；可随时暂停。"})
+    logs = []
+    if job:
+        logs = [dict(item) for item in conn.execute(
+            "SELECT stage,level,message,created_at FROM task_logs WHERE book_id=? AND run_id=? ORDER BY id DESC LIMIT 40",
+            (book_id, job["run_id"]))]
+    if not logs:
+        logs = [dict(item) for item in conn.execute(
+            "SELECT stage,level,message,created_at FROM task_logs WHERE book_id=? ORDER BY id DESC LIMIT 40", (book_id,))]
+    logs.reverse()
+    from .diagnostics import STAGE_LABELS, samples
+    safe_logs = []
+    for item in logs:
+        stage = item.get("stage") if item.get("stage") in STAGE_LABELS else "status"
+        level = item.get("level") if item.get("level") in {"info", "warning", "error"} else "info"
+        safe_logs.append({"stage": stage, "level": level, "created_at": item.get("created_at"),
+                          "message": str(item.get("message") or "")[:300]})
+    return {"analysis": job, "checks": checks, "failure": failure, "logs": safe_logs,
+            "samples": samples(book_id),
+            "config": {"source": source, "models": models[:20], "max_tokens": max_tokens,
+                       "recommended_max_tokens": REASONING_MIN_OUTPUT_TOKENS,
+                       "max_tokens_limit": HARD_MAX_OUTPUT_TOKENS},
+            "can_resume": status in {"error", "paused"}}
+
+
+def export_diagnostics(conn, book_id):
+    """Collect bounded diagnostic data for a user-initiated support bundle."""
+    from . import routing, settings as ai_settings
+    from .diagnostics import read_sample, samples
+    report = diagnose(conn, book_id)
+    # Model pool status helps support distinguish a bad model from a bad
+    # configuration; public views never contain credentials.
+    try:
+        pools = {"text": routing.public("text"), "image": routing.public("image")}
+    except Exception:
+        pools = {}
+    snapshot = {"version": config.VERSION,
+                "text": ai_settings.public_settings("text"),
+                "image": ai_settings.public_settings("image"),
+                "pools": pools}
+    book = conn.execute("SELECT id,title,format,chapter_count FROM books WHERE id=?", (book_id,)).fetchone()
+    logs = [dict(item) for item in conn.execute(
+        "SELECT stage,level,message,created_at FROM task_logs WHERE book_id=? ORDER BY id DESC LIMIT 1000", (book_id,))]
+    files = {}
+    for item in samples(book_id):
+        payload = read_sample(book_id, item.get("name") or "")
+        if payload:
+            files[item["name"]] = payload
+    return {"summary": report, "logs": logs, "samples": files, "config": snapshot,
+            "book": dict(book) if book else {"id": book_id}}
 
 
 def comic_ready(conn, book_id, chapter, job):
@@ -127,13 +279,26 @@ def check_active(conn, job):
         raise MangaError("文本模型设置已变化，请继续分析以使用新设置")
 
 
-async def cached_call(conn, job, provider, key, system, material, validate=json_object):
+def _sample_hook(book_id, state):
+    """Retain one redacted failure sample per stage without leaking secrets."""
+    def save(exc, raw):
+        from .diagnostics import failure_detail, save_sample
+        if raw is None:
+            raw = getattr(exc, "raw_preview", None)
+        save_sample(book_id, state.get("stage") or "analysis", raw,
+                    failure_detail(exc, stage=state.get("stage"), chapter=state.get("chapter"),
+                                   model=state.get("model")))
+    return save
+
+
+async def cached_call(conn, job, provider, key, system, material, validate=json_object, *, on_failure=None):
     check_active(conn, job)
     cached = conn.execute("SELECT result_json FROM analysis_chunks WHERE book_id=? AND cache_key=?", (job["book_id"], key)).fetchone()
     if cached:
         return json.loads(cached[0])
     return await retry.complete(provider, system=system, user=stable_json(material), schema={"type": "object"},
         validate=validate, guard=lambda: check_active(conn, job), label="章节分析",
+        on_failure=on_failure,
         report=task_log.reporter(job["book_id"], job["run_id"], "analysis"))
 
 
@@ -158,7 +323,7 @@ def normalize_part(raw, text, chapter):
     return {**result, "synopsis": synopsis, "entities": entities}
 
 
-async def reduce_summary(conn, job, provider, parts):
+async def reduce_summary(conn, job, provider, parts, *, on_failure=None):
     values = [p["synopsis"] for p in parts]
     if len(values) == 1:
         return values[0]
@@ -171,7 +336,8 @@ async def reduce_summary(conn, job, provider, parts):
                 merged.append(group[0]); continue
             key = digest({"reduce": group, "config": job["config_json"], "version": VERSION})
             raw = await cached_call(conn, job, provider, key, REDUCE_SYSTEM, {"parts": group},
-                                    validate=lambda raw: {"summary": checked_text(json_object(raw), "summary", 2000, True)})
+                                    validate=lambda raw: {"summary": checked_text(json_object(raw), "summary", 2000, True)},
+                                    on_failure=on_failure)
             summary = checked_text(raw, "summary", 2000, True)
             with conn:
                 cache(conn, job, key, {"summary": summary})
@@ -214,8 +380,11 @@ def save_chapter(conn, job, row, pieces, parts, summary, key, memory):
 
 async def process(job):
     conn = db.get_conn()
+    state = {"stage": "analysis", "chapter": None, "model": None}
     try:
         cfg = json.loads(job["config_json"])
+        state["model"] = cfg.get("model") if isinstance(cfg.get("model"), str) else None
+        on_failure = _sample_hook(job["book_id"], state)
         provider = make_provider(cfg)
         rows = chapters(conn, job["book_id"])
         if source_hash(rows) != job["source_hash"]:
@@ -223,6 +392,7 @@ async def process(job):
         previous = ""
         for ordinal, row in enumerate(rows):
             check_active(conn, job)
+            state.update(stage="analysis", chapter=row["idx"])
             pieces = chunks(json.loads(row["paras_json"]))
             key = digest({"chapter": row, "previous": previous, "config": cfg, "version": VERSION})
             with conn:
@@ -239,7 +409,9 @@ async def process(job):
                 # Backfill missing memory from original prose; never compress
                 # an old capsule again or infer facts from an abridged summary.
                 if not conn.execute("SELECT 1 FROM chapter_memory_capsules WHERE book_id=? AND chapter=? AND source_hash=? AND version=?", (job["book_id"], row["idx"], digest(row), chapter_memory.CAPSULE_VERSION)).fetchone():
-                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=[], source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"))
+                    state["stage"] = "memory"
+                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=[], source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"), on_failure=on_failure)
+                    state["stage"] = "analysis"
                     with conn:
                         conn.execute("BEGIN IMMEDIATE")
                         check_active(conn, job)
@@ -262,7 +434,8 @@ async def process(job):
                     material["long_term_memory"] = retrieve(conn, job["book_id"], present, piece["text"])
                     if piece["text"].strip():
                         part = await cached_call(conn, job, provider, part_key, SYSTEM, material,
-                            validate=lambda raw: normalize_part(json_object(raw), piece["text"], row["idx"]))
+                            validate=lambda raw: normalize_part(json_object(raw), piece["text"], row["idx"]),
+                            on_failure=on_failure)
                     else:
                         part = normalize_part({"synopsis": "本章无正文。"}, "", row["idx"])
                     with conn:
@@ -270,16 +443,19 @@ async def process(job):
                         cache(conn, job, part_key, part)
                         conn.execute("UPDATE book_analysis SET current_part=?,updated_at=? WHERE book_id=?", (idx + 1, int(time.time()), job["book_id"]))
                     parts.append(part)
-                summary = await reduce_summary(conn, job, provider, parts)
+                state["stage"] = "reduction"
+                summary = await reduce_summary(conn, job, provider, parts, on_failure=on_failure)
+                state["stage"] = "memory"
                 memory_key = digest({"memory": key, "version": chapter_memory.CAPSULE_VERSION})
                 cached_memory = conn.execute("SELECT result_json FROM analysis_chunks WHERE book_id=? AND cache_key=?", (job["book_id"], memory_key)).fetchone()
                 if cached_memory:
                     memory = json.loads(cached_memory[0])
                 else:
-                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=parts, source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"))
+                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=parts, source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"), on_failure=on_failure)
                     with conn:
                         check_active(conn, job)
                         cache(conn, job, memory_key, memory)
+                state["stage"] = "analysis"
                 with conn:
                     conn.execute("BEGIN IMMEDIATE")
                     check_active(conn, job)
@@ -298,19 +474,27 @@ async def process(job):
             check_active(conn, job)
             if source_hash(chapters(conn, job["book_id"])) != job["source_hash"]:
                 raise MangaError("分析期间书籍已变化，请重新分析")
-            conn.execute("UPDATE book_analysis SET status='done',error=NULL,updated_at=? WHERE book_id=?", (int(time.time()), job["book_id"]))
+            conn.execute("""UPDATE book_analysis SET status='done',error=NULL,error_code=NULL,error_stage=NULL,
+                            error_detail=NULL,updated_at=? WHERE book_id=?""", (int(time.time()), job["book_id"]))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        # Gateway bodies can contain credentials. Persist only a fixed actionable message.
-        from .diagnostics import provider_failure, public_failure
-        code = provider_failure(exc)
-        hint = public_failure(code)
-        safe = ("[" + code + "] " + hint["title"] + "；" + hint["detail"]
-                if code != "provider_failed" else "整书分析中断：文本请求最多尝试 3 次；请检查 API、模型与输出格式，继续时复用已完成内容。")
+        # Gateway bodies can contain credentials. Persist only categories,
+        # token counts and fixed copy; the sample file keeps bounded model text.
+        from .diagnostics import failure_detail
+        failure = failure_detail(exc, stage=state.get("stage"), chapter=state.get("chapter"),
+                                 model=state.get("model"))
+        safe = (failure["message"] + "；" + failure["suggestion"])[:600]
         with conn:
-            conn.execute("UPDATE book_analysis SET status='error',error=?,updated_at=? WHERE book_id=? AND run_id=? AND status='running'",
-                         (safe, int(time.time()), job["book_id"], job["run_id"]))
+            conn.execute("""UPDATE book_analysis SET status='error',error=?,error_code=?,error_stage=?,error_detail=?,updated_at=?
+                            WHERE book_id=? AND run_id=? AND status='running'""",
+                         (safe, failure["code"], failure["stage"], stable_json(failure),
+                          int(time.time()), job["book_id"], job["run_id"]))
+        try:
+            with conn:
+                task_log.record(conn, job["book_id"], job["run_id"], failure["stage"] or "analysis", safe, "error")
+        except Exception:
+            pass
     finally:
         conn.close()
 

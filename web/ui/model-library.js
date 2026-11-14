@@ -1,6 +1,7 @@
 import { el, apiGet, apiPost, apiPatch, apiDelete, debounce } from '../util/core.js';
 
 const CAPABILITIES = { text: '文本', image: '生图', vision: '视觉', embedding: '嵌入', tools: '工具' };
+const EFFORTS = [['', '不指定（不下发）'], ['minimal', 'minimal'], ['low', 'low'], ['medium', 'medium'], ['high', 'high'], ['max', 'max']];
 let stylesheet;
 function loadStyles() {
   if (!stylesheet) stylesheet = new Promise((resolve, reject) => {
@@ -72,8 +73,9 @@ export async function mountModelLibrary({ area, signal }) {
     const rpm = input(grid, '每分钟请求上限（0 为不限）', old?.rpm ?? 0, 'number'); rpm.min = '0'; rpm.max = '1000';
     const concurrency = input(grid, '最大并发', old?.max_concurrency ?? 1, 'number'); concurrency.min = '1'; concurrency.max = '8';
     const json = input(grid, '要求 JSON 输出（服务需支持）', '', 'checkbox'); json.checked = old?.json_mode ?? true;
+    const effort = select(grid, '推理强度（可选，未选择则不下发）', EFFORTS, old?.reasoning_effort || '');
     const reference = select(grid, '参考图接口', [['edits', '标准图像编辑接口'], ['generations', 'Agnes JSON 参考图接口']], old?.reference_api || 'edits');
-    const adapt = () => { json.parentElement.hidden = kind.value !== 'text'; reference.parentElement.hidden = kind.value !== 'image'; };
+    const adapt = () => { json.parentElement.hidden = kind.value !== 'text'; effort.parentElement.hidden = kind.value !== 'text'; reference.parentElement.hidden = kind.value !== 'image'; };
     kind.addEventListener('change', adapt); adapt();
     if (old?.key_configured) panel.appendChild(el('p', 'ml-help', '此连接已保存密钥。修改 API 地址时请重新填写密钥。'));
     const autoStatus = el('p', 'ml-help ml-autosave'); autoStatus.setAttribute('role', 'status'); panel.appendChild(autoStatus);
@@ -81,7 +83,8 @@ export async function mountModelLibrary({ area, signal }) {
     const save = async () => {
       if (!label.value.trim() || !address.value.trim()) throw new Error('请填写厂商名称和 API 地址');
       const payload = { label: label.value.trim(), kind: kind.value, base_url: address.value.trim(), api_key: key.value,
-        models: old?.models || [], rpm: Number(rpm.value), max_concurrency: Number(concurrency.value), json_mode: json.checked, reference_api: reference.value };
+        models: old?.models || [], rpm: Number(rpm.value), max_concurrency: Number(concurrency.value), json_mode: json.checked,
+        reference_api: reference.value, reasoning_effort: effort.value };
       if (connectionId) payload.id = connectionId;
       autoStatus.textContent = '正在自动保存…'; delete autoStatus.dataset.error;
       const result = await apiPost('/api/ai/connections', payload, signal);
@@ -92,7 +95,7 @@ export async function mountModelLibrary({ area, signal }) {
       window.dispatchEvent(new CustomEvent('velmira-connections-changed'));
     };
     const schedule = debounce(() => save().catch(err => { autoStatus.textContent = err.message || '自动保存失败'; autoStatus.dataset.error = 'true'; }), 650);
-    [label, kind, address, key, rpm, concurrency, json, reference].forEach(node => node.addEventListener(node.type === 'checkbox' || node.tagName === 'SELECT' ? 'change' : 'input', schedule));
+    [label, kind, address, key, rpm, concurrency, json, effort, reference].forEach(node => node.addEventListener(node.type === 'checkbox' || node.tagName === 'SELECT' ? 'change' : 'input', schedule));
     // Keep a manual action as an immediate fallback, but no click is required.
     button(panel, '保存厂商连接', async () => { schedule.cancel(); await save(); await refresh('厂商连接已保存，可添加模型或读取供应商列表'); }, 'btn-primary');
     label.focus();

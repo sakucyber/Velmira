@@ -17,7 +17,7 @@ def public():
     for item in entries():
         cfg = settings.public_settings("profile-" + item["id"])
         result.append({**{k: item[k] for k in ("id", "label", "kind", "models", "rpm", "max_concurrency")},
-                       **{k: cfg[k] for k in ("base_url", "json_mode", "reference_api", "key_configured")}})
+                       **{k: cfg[k] for k in ("base_url", "json_mode", "reference_api", "reasoning_effort", "key_configured")}})
     return result
 
 
@@ -36,7 +36,7 @@ def resolve(connection_id, model, kind):
 
 
 def save_connection(payload):
-    allowed = {"id", "label", "kind", "models", "base_url", "api_key", "rpm", "max_concurrency", "json_mode", "reference_api"}
+    allowed = {"id", "label", "kind", "models", "base_url", "api_key", "rpm", "max_concurrency", "json_mode", "reference_api", "reasoning_effort"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValueError("连接设置包含未知字段")
     kind, label, models = payload.get("kind"), payload.get("label"), payload.get("models")
@@ -62,7 +62,7 @@ def save_connection(payload):
             if any(p["connection_id"] == connection_id and p["model"] not in models for p in get_config(kind)["models"]):
                 from ..manga.models import MangaError
                 raise MangaError("请先从模型池移除正在使用的模型", "model_in_use", 409)
-        patch = {k: payload[k] for k in ("base_url", "api_key", "rpm", "max_concurrency", "json_mode", "reference_api") if k in payload}
+        patch = {k: payload[k] for k in ("base_url", "api_key", "rpm", "max_concurrency", "json_mode", "reference_api", "reasoning_effort") if k in payload}
         patch.update(model=models[0] if models else "", enabled=bool(models))
         cfg = settings.save_settings(patch, "profile-" + connection_id)
         item = {"id": connection_id, "label": label.strip(), "kind": kind, "models": models,
@@ -85,5 +85,6 @@ def activate(connection_id, model, kind):
     # Preserve the user's explicit auto-analysis preference when changing providers.
     value = settings.save_settings({"base_url": cfg["base_url"], "model": model, "api_key": settings.api_key(cfg),
                                    "enabled": True, "rpm": item["rpm"], "max_concurrency": item["max_concurrency"],
-                                   "json_mode": cfg.get("json_mode", True), "reference_api": cfg.get("reference_api", "edits")}, kind)
+                                   "json_mode": cfg.get("json_mode", True), "reference_api": cfg.get("reference_api", "edits"),
+                                   "reasoning_effort": cfg.get("reasoning_effort", "")}, kind)
     return value

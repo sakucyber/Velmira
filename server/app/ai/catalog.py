@@ -94,6 +94,11 @@ def _validated(payload, old=None):
     if not isinstance(caps, list) or not caps or any(not isinstance(c, str) or c not in CAPABILITIES for c in caps):
         raise ValueError("请选择文本、生图、视觉、嵌入或工具能力")
     value["capabilities"] = list(dict.fromkeys(caps))
+    # A model's capabilities must stay compatible with its connection kind:
+    # adding a "tools only" model to a text vendor would silently make it
+    # unusable in the text pool and hide the real routing mistake.
+    if item["kind"] not in value["capabilities"]:
+        raise ValueError("能力必须包含连接的" + ("文本" if item["kind"] == "text" else "生图") + "能力")
     for field in ("input_price", "output_price"):
         price = value.get(field)
         if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price) or not 0 <= price <= 1e9):

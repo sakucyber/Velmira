@@ -14,6 +14,41 @@ from .models import CARD_FIELDS
 
 GPT_OSS_CONTEXT_TOKENS = 128000
 MAX_OUTPUT_TOKENS = 6000
+# The routing API and UI expose this same ceiling; reject larger values locally
+# instead of silently not sending the request.
+HARD_MAX_OUTPUT_TOKENS = 32768
+# Reasoning models spend output budget on hidden thinking before the JSON body.
+# 16000 leaves room for a normal chapter on DeepSeek/OpenAI-style thinkers.
+REASONING_MIN_OUTPUT_TOKENS = 16000
+_REASONING_MODEL = re.compile(
+    r"(?:^|[/_.-])(?:o[134](?:$|[-_.])|reasoner|reasoning|thinking|deepseek-r|qwq|gpt-oss)", re.IGNORECASE)
+
+
+def is_reasoning_model(model) -> bool:
+    """Best-effort name check; the UI uses the same heuristic for its hint."""
+    return bool(_REASONING_MODEL.search(str(model or "")))
+
+
+def _safe_usage(value) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    details = value.get("completion_tokens_details")
+    result = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        number = value.get(key)
+        if type(number) is int and number >= 0:
+            result[key] = number
+    if isinstance(details, dict):
+        reasoning = details.get("reasoning_tokens")
+        if type(reasoning) is int and reasoning >= 0:
+            result["reasoning_tokens"] = reasoning
+    if "reasoning_tokens" not in result:
+        # Idempotent for already-flattened usage dicts (ProviderRequestError
+        # sanitizes once at construction and again when re-wrapping).
+        reasoning = value.get("reasoning_tokens")
+        if type(reasoning) is int and reasoning >= 0:
+            result["reasoning_tokens"] = reasoning
+    return result
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -24,10 +59,16 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class ProviderRequestError(RuntimeError):
     """A safe failure category; never retain an upstream response body or key."""
 
-    def __init__(self, message, *, status_code=None, error_code="request_failed"):
+    def __init__(self, message, *, status_code=None, error_code="request_failed",
+                 finish_reason=None, usage=None, max_tokens=None, raw_preview=None):
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
+        # Stable metadata for diagnostics; never an upstream response body.
+        self.finish_reason = finish_reason
+        self.usage = _safe_usage(usage)
+        self.max_tokens = max_tokens
+        self.raw_preview = str(raw_preview or "")[:4000]
 
 
 def request_json(url, *, api_key="", body=None, timeout=120):
@@ -199,6 +240,12 @@ class OpenAICompatProvider:
     def _complete_once(self, system, user, schema, temperature, cfg):
         model = cfg["model"]
         max_tokens = cfg.get("max_tokens", MAX_OUTPUT_TOKENS)
+        if type(max_tokens) is not int or max_tokens < 1:
+            raise ProviderRequestError("最大 Token 须为正整数", error_code="invalid_config")
+        if max_tokens > HARD_MAX_OUTPUT_TOKENS:
+            raise ProviderRequestError(
+                "最大 Token 上限为 " + str(HARD_MAX_OUTPUT_TOKENS) + "，请降低后再试",
+                error_code="invalid_config")
         # UTF-8 byte count is a conservative upper bound for this byte-level tokenizer.
         # Reserve output and message framing without requiring tokenizer weights locally.
         if model.lower().split("/")[-1] == "gpt-oss-120b":
@@ -216,6 +263,11 @@ class OpenAICompatProvider:
         }
         if schema:
             body["response_format"] = {"type": "json_object"}
+        # Only send the optional parameter when the user configured it; most
+        # OpenAI-compatible gateways reject unknown fields.
+        effort = str(cfg.get("reasoning_effort") or "").strip().lower()
+        if effort in {"minimal", "low", "medium", "high", "max"}:
+            body["reasoning_effort"] = effort
         if self.local_settings:
             from .settings import api_key_for
             key = api_key_for(cfg["base_url"], cfg.get("credential_slot", "text"))
@@ -227,25 +279,46 @@ class OpenAICompatProvider:
         with request_slot((cfg["base_url"], "text"), cfg.get("rpm", 0), cfg.get("max_concurrency", 1),
                           wait_timeout=0 if cfg.get("_route_id") else None):
             payload = request_json(url, api_key=key, body=body, timeout=cfg.get("timeout", 120))
-        try:
-            content = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise ProviderRequestError("文本 provider 返回缺少 choices[0].message.content", error_code="invalid_response") from None
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        finish_reason = choice.get("finish_reason") if isinstance(choice.get("finish_reason"), str) else None
+        usage = _safe_usage(payload.get("usage") if isinstance(payload, dict) else None)
+        message = choice.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if content is None:
+            raise ProviderRequestError("文本 provider 返回缺少 choices[0].message.content",
+                                       error_code="invalid_response", finish_reason=finish_reason,
+                                       usage=usage, max_tokens=max_tokens) from None
         if isinstance(content, str):
             stripped = content.strip()
             if not stripped:
-                raise ProviderRequestError("文本 API 返回空内容", error_code="invalid_response")
+                # finish_reason=length plus reasoning tokens is the classic
+                # reasoning-model budget failure; report it as such instead of
+                # a generic invalid response.
+                if finish_reason == "length" and usage.get("reasoning_tokens"):
+                    code, message_text = "reasoning_budget", "推理模型在思考阶段用完了最大 Token"
+                elif finish_reason == "length":
+                    code, message_text = "output_truncated", "文本 API 输出达到最大 Token 被截断"
+                else:
+                    code, message_text = "empty_content", "文本 API 返回空内容"
+                raise ProviderRequestError(message_text, error_code=code, finish_reason=finish_reason,
+                                           usage=usage, max_tokens=max_tokens)
             try:
                 result = json.loads(stripped)
             except json.JSONDecodeError:
                 if schema and cfg.get("_route_id"):
-                    raise ProviderRequestError("文本 API 未返回有效 JSON", error_code="invalid_response") from None
+                    raise ProviderRequestError("文本 API 未返回有效 JSON", error_code="invalid_response",
+                                               finish_reason=finish_reason, usage=usage, max_tokens=max_tokens,
+                                               raw_preview=stripped) from None
                 return stripped
             if schema and cfg.get("_route_id") and not isinstance(result, dict):
-                raise ProviderRequestError("文本 API 未返回 JSON 对象", error_code="invalid_response")
+                raise ProviderRequestError("文本 API 未返回 JSON 对象", error_code="invalid_response",
+                                           finish_reason=finish_reason, usage=usage, max_tokens=max_tokens,
+                                           raw_preview=stripped)
             return result
         if not isinstance(content, dict) or not content:
-            raise ProviderRequestError("文本 API 返回内容格式无效", error_code="invalid_response")
+            raise ProviderRequestError("文本 API 返回内容格式无效", error_code="invalid_response",
+                                       finish_reason=finish_reason, usage=usage, max_tokens=max_tokens)
         return content
 
 

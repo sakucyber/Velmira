@@ -118,6 +118,44 @@ class BookAnalysisTests(unittest.TestCase):
         self.assertEqual(self.run_job(second)["analysis"]["status"], "done")
         self.assertEqual(second.complete.await_count, 1)
 
+    def test_failure_records_stage_reason_and_diagnosis(self):
+        from server.app.ai.providers import ProviderRequestError
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=ProviderRequestError(
+            "upstream quota", status_code=402, error_code="http_error")))
+        data = self.run_job(provider)
+        self.assertEqual(data["analysis"]["status"], "error")
+        failure = data["analysis"]["failure"]
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure["code"], "provider_billing")
+        self.assertEqual(failure["stage"], "analysis")
+        self.assertEqual(failure["http_status"], 402)
+        self.assertIn("第 1 章章节分析阶段失败", failure["message"])
+        diagnosis = self.client.get(self.endpoint + "/diagnose").json()
+        self.assertTrue(any(check["code"] == "provider_billing" for check in diagnosis["checks"]))
+        self.assertTrue(diagnosis["logs"])
+        self.assertIn("can_resume", diagnosis)
+        self.assertNotIn("test-secret", json.dumps(diagnosis))
+
+    def test_diagnostic_export_contains_no_secret(self):
+        import io as _io
+        import zipfile
+        from server.app.ai.providers import ProviderRequestError
+        provider = SimpleNamespace(complete=AsyncMock(side_effect=ProviderRequestError(
+            "upstream quota", status_code=402, error_code="http_error")))
+        self.run_job(provider)
+        response = self.client.get(self.endpoint + "/diagnostics/export")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "application/zip")
+        archive = zipfile.ZipFile(_io.BytesIO(response.content))
+        names = archive.namelist()
+        self.assertIn("summary.json", names)
+        self.assertIn("task-logs.json", names)
+        self.assertIn("config.json", names)
+        self.assertTrue(any(name.startswith("samples/") for name in names))
+        combined = b"".join(archive.read(name) for name in names).decode("utf-8")
+        self.assertNotIn("test-secret", combined)
+        self.assertNotIn("api_key", combined.lower())
+
     def test_pause_ignores_late_response_and_resume(self):
         async def pause(**kwargs):
             self.client.post(self.endpoint + "/pause")
@@ -139,7 +177,11 @@ class BookAnalysisTests(unittest.TestCase):
         async def change(**kwargs):
             self.sql("UPDATE chapters SET title='Changed again' WHERE book_id='m3-book'")
             return output()
-        settings.save_settings({"model": "changed-model"})
+        # Saved chapter summaries are intentionally reused by source hash even
+        # after a model change (see the durable-work comment in book_analysis),
+        # so a late-write check needs new source text rather than a new config.
+        self.sql("UPDATE chapters SET paras_json=? WHERE book_id='m3-book'",
+                 (json.dumps(["Ari walked into a different garden wearing a red coat."]),))
         self.assertEqual(self.run_job(SimpleNamespace(complete=change))["analysis"]["status"], "error")
         self.assertEqual(json.loads(self.sql("SELECT summary_json FROM chapter_summaries")[0]["summary_json"])["title"], "Changed")
 

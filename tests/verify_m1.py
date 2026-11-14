@@ -2,7 +2,7 @@
 """M1 独立验收 API 实测（verifier-m1 所有，tests/ 部分）。
 
 覆盖：A 健康/品牌字段、C EPUB 导入、D CBZ 分页媒体/进度、E 注释 CRUD+校验、
-F 书签、I(部分) 持久化。TXT 回归由 tests/verify_m0.py 负责（版本断言已更新 0.4.2）。
+F 书签、I(部分) 持久化。TXT 回归由 tests/verify_m0.py 负责（版本断言已更新 0.5.1）。
 
 用法：
   python tests/verify_m1.py --base http://127.0.0.1:8787 [--phase api|persist]
@@ -227,7 +227,7 @@ def phase_api():
     global BASE
     # ---------- A 健康/品牌 ----------
     st, hdrs, obj, raw, ms = api("GET", "/api/health")
-    ok = st == 200 and obj.get("name") == "Velmira" and obj.get("version") == "0.4.2"
+    ok = st == 200 and obj.get("name") == "Velmira" and obj.get("version") == "0.5.1"
     add("A1 GET /api/health name/version", "PASS" if ok else "FAIL",
         f"status={st} name={obj.get('name')!r} version={obj.get('version')!r} data_dir={obj.get('data_dir')!r}")
 
