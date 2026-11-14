@@ -107,6 +107,10 @@ try {
   await send('Page.enable'); await send('Network.enable'); await send('Page.navigate', { url: base + '/?book=' + bookId + '&debug=1' });
   await waitFor('[...document.querySelectorAll("#reader-column [data-i]")].some(p=>p.textContent.includes("测试正文"))');
   await evaluate(`(async()=>{window.core=await import('/util/core.js');window.ls=(await import('/util/local-store.js')).localStore;await ls.meta('auto-sync',false);await ls.sync();return true;})()`);
+  // The reader debounces its own progress PUT by 1.2s after the first render.
+  // Let that initial save land before device A starts its offline phase, or a
+  // slow CI runner can let this device overwrite A's newer offline position.
+  await sleep(1500);
   assert.notEqual(await evaluate('ls.deviceId'), firstDevice);
   const annotationId = annotations.annotations[0].id;
   assert.equal(await evaluate(`(async()=> (await ls.listAnnotations('${bookId}'))[0].note)()`), '断网仍可修改');
