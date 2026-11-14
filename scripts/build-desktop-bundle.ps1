@@ -2,7 +2,7 @@
 # 目标机器无需另装 Python；数据保存在 %LOCALAPPDATA%\Velmira\data。
 param(
   [string]$Python = "",
-  [string]$Out = "dist\Velmira-desktop-v0.4.0"
+  [string]$Out = "dist\Velmira-desktop-v0.5.1"
 )
 
 # PS5.1 原生命令将诊断写到 stderr；每步以 LASTEXITCODE 检查结果。
@@ -17,9 +17,9 @@ if (-not $Python) {
 }
 if (-not $Python) { throw '找不到 Python 3.11：请用 -Python 指定可执行文件' }
 
-& $Python -c 'import fastapi,uvicorn,PIL,PyInstaller' 2>$null
+& $Python -c 'import fastapi,uvicorn,PIL,qrcode,tiktoken,PyInstaller' 2>$null
 if ($LASTEXITCODE -ne 0) {
-  throw "Python 环境缺少 fastapi/uvicorn/Pillow/PyInstaller；先运行 pip install -r server/requirements.txt pyinstaller，或用 -Python 指向已配置环境"
+  throw "Python 环境缺少 fastapi/uvicorn/Pillow/qrcode/tiktoken/PyInstaller；先运行 pip install -r server/requirements.txt pyinstaller，或用 -Python 指向已配置环境"
 }
 
 $bundle = if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path $root $Out }
@@ -28,11 +28,29 @@ $distRoot = [IO.Path]::GetFullPath((Join-Path $root 'dist')) + [IO.Path]::Direct
 if (-not $bundle.StartsWith($distRoot, [StringComparison]::OrdinalIgnoreCase)) {
   throw '分发目录必须位于本项目 dist/ 下，避免误覆盖其他目录'
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $root 'backend') | Out-Null
-$backendDir = Join-Path $root 'backend\Velmira-backend'
-$backendOneFile = Join-Path $root 'backend\Velmira-backend.exe'
-if (Test-Path -LiteralPath $backendDir) { Remove-Item -LiteralPath $backendDir -Recurse -Force }
-if (Test-Path -LiteralPath $backendOneFile) { Remove-Item -LiteralPath $backendOneFile -Force }
+$backendBuildRoot = Join-Path $root ('.tmp\backend-dist-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $backendBuildRoot | Out-Null
+$tokenCache = Join-Path $root '.tmp\tiktoken-cache'
+New-Item -ItemType Directory -Force -Path $tokenCache | Out-Null
+$existingTokenCache = if ($env:TIKTOKEN_CACHE_DIR) { $env:TIKTOKEN_CACHE_DIR } else { Join-Path ([IO.Path]::GetTempPath()) 'data-gym-cache' }
+if ((Test-Path $existingTokenCache) -and ([IO.Path]::GetFullPath($existingTokenCache) -ne [IO.Path]::GetFullPath($tokenCache))) {
+  Get-ChildItem $existingTokenCache -File | Copy-Item -Destination $tokenCache -Force
+}
+$oldTokenCache = $env:TIKTOKEN_CACHE_DIR
+$env:TIKTOKEN_CACHE_DIR = $tokenCache
+try {
+  # Public vocabulary files are bundled so generation never needs to fetch a
+  # tokenizer on the target machine. These downloads are build dependencies.
+  $prepareTokens = Join-Path $root '.tmp\prepare-tokenizer.py'
+  @'
+import tiktoken
+tiktoken.get_encoding("cl100k_base")
+tiktoken.get_encoding("o200k_base")
+'@ | Set-Content -Encoding UTF8 $prepareTokens
+  & $Python $prepareTokens
+  if ($LASTEXITCODE -ne 0) { throw '准备离线 tokenizer 词表失败' }
+} finally { $env:TIKTOKEN_CACHE_DIR = $oldTokenCache }
+$backendDir = Join-Path $backendBuildRoot 'Velmira-backend'
 
 $previousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = if ($previousPythonPath) { $root + ';' + $previousPythonPath } else { $root }
@@ -40,10 +58,13 @@ try {
   # Directory mode avoids PyInstaller extracting a 35 MB archive on every launch.
   & $Python -m PyInstaller --noconfirm --clean --onedir `
   --name Velmira-backend `
-  --distpath (Join-Path $root 'backend') `
+  --distpath $backendBuildRoot `
   --workpath (Join-Path $root '.tmp\pyi-work') `
   --specpath (Join-Path $root '.tmp') `
   --paths $root `
+  --collect-submodules qrcode `
+  --collect-submodules tiktoken_ext `
+  --add-data ($tokenCache + ';tiktoken-cache') `
   --add-data ($root + '\web;web') `
   --add-data ($root + '\server\app\schema.sql;server/app') `
   --add-data ($root + '\server\app\manga\face_worker.py;server/app/manga') `

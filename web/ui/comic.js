@@ -1,13 +1,14 @@
 /* ============================================================
    ui/comic.js —— CBZ 漫画阅读模式（契约 7.4 / 7.6）
    入口：export async function mountComic({ bookId, params, book })
-   - 单 <img> 换 src（不预加载、不用离屏绘制或对象 URL）
+   - 单 <img> 换 src（已下载图片通过短期对象 URL 读取）
    - 页面元数据 GET /pages 懒拉，仅保留当前页 ±1
    - 进度 GET/PUT /progress（chapter=页码, para=0），≥800ms 防抖
    - 键盘 ←/→/空格、上下页按钮、左右点击区、触摸滑动 40px
    - 适页 / 适宽（localStorage 记忆）；?debug=1 显示 heap/DOM/img
    ============================================================ */
-import { el, debounce, clamp, intOrNull, apiGet, toast, THEMES, store, applyTheme } from '../util/core.js';
+import { el, debounce, clamp, intOrNull, apiGet, apiPut, toast, THEMES, store, applyTheme } from '../util/core.js';
+import { resolveImage } from '../util/local-media.js';
 
 const FIT_KEY = 'velmira.comic.fit';
 const SAVE_MS = 900;      /* 约束：≥800ms，禁止每页都 PUT */
@@ -187,13 +188,18 @@ export async function mountComic(opts = {}) {
   /* ================== 单图换 src（唯一 <img>） ================== */
   function setLoading(on) { loading.hidden = !on; }
 
-  function loadImage(url, bust) {
-    const abs = new URL(url, location.href).href;
-    expectSrc = bust ? abs + (abs.indexOf('?') >= 0 ? '&' : '?') + 'r=' + Date.now() : abs;
+  let imageGeneration = 0, releaseImage = () => {};
+  async function loadImage(url, bust) {
+    const token = ++imageGeneration;
+    const media = await resolveImage(bookId, url);
+    if (token !== imageGeneration) { media.release(); return; }
+    releaseImage(); releaseImage = media.release;
+    const abs = new URL(media.url, location.href).href;
+    expectSrc = bust && !abs.startsWith('blob:') ? abs + (abs.indexOf('?') >= 0 ? '&' : '?') + 'r=' + Date.now() : abs;
     errorBox.hidden = true;
     setLoading(true);
     loadStart = performance.now();
-    img.src = expectSrc;   /* 只改 src：不新建元素、不缓存二进制 */
+    img.src = expectSrc;
   }
 
   function playPageIn() {
@@ -289,15 +295,7 @@ export async function mountComic(opts = {}) {
   async function saveProgress() {
     const at = page;
     try {
-      const res = await fetch('/api/books/' + enc + '/progress', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chapter: at, para: 0, offset: 0 }),
-        cache: 'no-store',
-        keepalive: true,
-      });
-      if (!res.ok) return;
-      const data = await res.json().catch(() => null);
+      const data = await apiPut('/api/books/' + enc + '/progress', { chapter: at, para: 0, offset: 0 });
       const p = data && data.progress ? Number(data.progress.percent) : NaN;
       if (Number.isFinite(p) && page === at) {   /* 页码未变才采用服务端 percent */
         percent = clamp(p, 0, 1);
@@ -416,6 +414,7 @@ export async function mountComic(opts = {}) {
     scheduleSave.flush();
     if (metaAc) metaAc.abort();
     if (debugTimer) clearInterval(debugTimer);
+    imageGeneration++; releaseImage();
     document.removeEventListener('keydown', onKeydown);
   }, { once: true });
 

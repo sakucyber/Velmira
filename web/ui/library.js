@@ -11,13 +11,13 @@
    ============================================================ */
 import {
   $, el, store, toast, fmtChars, apiGet, uploadBook,
-  THEMES, FONT_SIZE, applyTheme, applyFontSize,
+  THEMES, FONT_SIZE, applyTheme, applyFontSize, getAuthState,
 } from '../util/core.js';
 import { readingState, readingLabel, coverHue, shelfPreferences, saveShelfPreferences, openBookDetails } from './library-tools.js';
 
 const EMPTY_TEXT = '拖入或选择 TXT / EPUB / CBZ 文件，导入后在这里开始阅读。';
 const POLL_MS = 5000;          // 契约 8.3：5 秒轮询兜底（SSE 重连也复用该周期）
-const LIVE_TEXT = { connecting: '连接中', live: '自动更新', polling: '定时更新', offline: '离线' };
+const LIVE_TEXT = { connecting: '连接中', live: '自动更新', polling: '定时更新', offline: '离线', local: '本机书库' };
 const FORMAT_LABEL = { txt: 'TXT', epub: 'EPUB', cbz: 'CBZ' };
 
 export async function mountLibrary() {
@@ -72,7 +72,7 @@ export async function mountLibrary() {
   let refreshTimer = 0;        // SSE 事件去抖
   let settingsPanels = null;
 
-  async function openSettings() {
+  async function openSettings(section) {
     const button = $('#rail-settings');
     if (button.disabled) return;
     button.disabled = true;
@@ -89,9 +89,19 @@ export async function mountLibrary() {
         books: books.filter(book => book.format !== 'cbz'),
         onTheme: (theme) => { applyTheme(theme); store.set({ theme }); },
         onFont: async (value) => { store.set({ fontSize: applyFontSize(value) }); },
-      });
+      }, typeof section === 'string' ? section : 'reading');
     } catch (err) { toast('设置加载失败：' + err.message); }
     finally { button.disabled = false; }
+  }
+
+  if (getAuthState().standalone) {
+    if (!document.getElementById('mobile-ai-style')) { const link = el('link'); link.id = 'mobile-ai-style'; link.rel = 'stylesheet'; link.href = '/styles/mobile-ai.css'; document.head.append(link); }
+    const button = el('button', 'rail-nav-item rail-ai', '✧ AI'); button.id = 'rail-ai'; button.type = 'button'; button.setAttribute('aria-label', '手机 AI 工作台');
+    $('#rail-settings').before(button);
+    button.addEventListener('click', async () => {
+      if (!settingsPanels) { const { createPanels } = await import('./panels.js'); settingsPanels = createPanels({ layer: $('#drawer-layer') }); }
+      settingsPanels.openMobileAI({ onSettings: openSettings });
+    });
   }
 
   /* ---------------- 状态点 ---------------- */
@@ -101,7 +111,7 @@ export async function mountLibrary() {
     liveEl.dataset.state = state;
     const label = liveEl.querySelector('.live-text');
     if (label) label.textContent = text || LIVE_TEXT[state] || state;
-    liveEl.title = '书库内容变化会自动刷新列表；连接中断时每 5 秒重试。不监视电脑文件夹。当前：' + (LIVE_TEXT[state] || state);
+    liveEl.title = state === 'local' ? '书籍和阅读记录保存在本机，无需连接电脑。' : '书库内容变化会自动刷新列表；连接中断时每 5 秒重试。不监视电脑文件夹。当前：' + (LIVE_TEXT[state] || state);
   }
 
   /* ---------------- 数据指纹 / 元信息 ---------------- */
@@ -406,6 +416,7 @@ export async function mountLibrary() {
     es = null;
   }
   function openEventSource() {
+    if (getAuthState().standalone) { setLiveState('local'); return; }
     if (destroyed || es) return;
     if (typeof EventSource === 'undefined') { startPolling(); return; }
     let source;
@@ -606,7 +617,7 @@ export async function mountLibrary() {
   if (skeletonEl) skeletonEl.hidden = true;
   renderShelf();
   openEventSource();
-  setLiveState(es ? 'connecting' : (pollTimer ? 'polling' : 'connecting'));
+  setLiveState(getAuthState().standalone ? 'local' : es ? 'connecting' : (pollTimer ? 'polling' : 'connecting'));
 
   if (debug) {
     window.__lib = {

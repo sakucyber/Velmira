@@ -1,6 +1,6 @@
 import { el, apiGet, apiPost, apiPatch, apiPut, apiDelete, toast } from '../util/core.js';
 
-const LABELS = { auto: '自动选择', '1x1': '单格', '2x1': '左右双格', '2x2': '四格', '2x3': '两列三行', '3x2': '三列两行', '1+2': '上大下双', '2+1': '上双下大' };
+const LABELS = { auto: '自动选择', '1x1': '单格', '2x1': '左右双格', '2x2': '四格', '1+2': '上大下双', '2+1': '上双下大', '1+2+2': '上大下四格', '2+2+1': '上四格下大', '2+3': '两格加三格', '2x3': '两列三行', '3x2': '三列两行', '3+4': '三格加四格', '2+2+2+1': '三行双格加底格' };
 
 export async function mountMangaPages({ area, bookId, signal }) {
   const base = '/api/books/' + encodeURIComponent(bookId) + '/manga';
@@ -80,7 +80,7 @@ export async function mountMangaPages({ area, bookId, signal }) {
   }
   showSlots([{ job_id: panels.find(p => ['done', 'approved'].includes(p.status))?.id || '' }]);
   const editActions = el('div', 'manga-actions'); editor.appendChild(editActions);
-  button(editActions, '添加一格', () => { if (slots.length >= 6) throw new Error('每页最多 6 格'); showSlots([...slotValues(), {}]); });
+  button(editActions, '添加一格', () => { if (slots.length >= 7) throw new Error('每页最多 7 格'); showSlots([...slotValues(), {}]); });
   const save = button(editActions, '保存并预览漫画页', async () => {
     const spec = { ...common(), panels: slotValues() };
     const result = editing ? await apiPatch(base + '/pages/' + editing.id, { revision: editing.revision, spec }) : await apiPost(base + '/pages', spec);
@@ -96,7 +96,7 @@ export async function mountMangaPages({ area, bookId, signal }) {
     if (!selected.size) throw new Error('请先勾选分镜');
     await apiPost(base + '/pages/auto', { job_ids: [...selected], settings: common() }); selected.clear(); await refresh();
   });
-  candidates.appendChild(el('p', 'manga-note', '沿用上方页面设置，按章节分组、按勾选顺序拼页；自动模板每页最多四格。文字可在生成后逐页编辑。'));
+  candidates.appendChild(el('p', 'manga-note', '沿用上方页面设置，按章节和已规划的漫画页分组，保留勾选顺序；自动模板每页 1–7 格。文字可在生成后逐页编辑。'));
   const gallery = el('div', 'page-gallery'); root.append(el('h3', 'ai-section-title', '漫画页'), gallery);
   const exportsArea = el('div', 'page-exports'); root.appendChild(exportsArea);
   button(root, '导出 CBZ 并加入书架', async () => {

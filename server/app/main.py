@@ -1,6 +1,6 @@
 """FastAPI 应用入口：建库 → 挂载业务路由 → 可选挂载扩展路由 → 最后挂静态目录。
 
-项目：Velmira v0.4.0；实时书库 SSE（/api/events）。
+项目：Velmira v0.4.2；离线同步与实时书库 SSE。
 启动：python -m uvicorn server.app.main:app --host 127.0.0.1 --port 8765
 数据目录：环境变量 DATA_DIR 优先，默认 项目根/data。
 """
@@ -39,6 +39,8 @@ async def _lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title=config.APP_NAME, version=config.VERSION, lifespan=_lifespan)
+    from .security import install_security
+    install_security(app)
 
     # 先建库（uvicorn 启动期间也不会出现「表不存在」的窗口）
     init_db()
@@ -79,6 +81,18 @@ def create_app() -> FastAPI:
     app.include_router(auto_manga_router)
     from .api.text_ai import router as text_ai_router
     app.include_router(text_ai_router)
+    from .api.storyboards import router as storyboards_router
+    app.include_router(storyboards_router)
+    from .api.ai_features import router as ai_features_router
+    from .api.catalog import router as catalog_router
+    from .api.configuration import router as configuration_router
+    app.include_router(ai_features_router)
+    app.include_router(catalog_router)
+    app.include_router(configuration_router)
+    from .api.security import router as security_router
+    app.include_router(security_router)
+    from .api.sync import router as sync_router
+    app.include_router(sync_router)
 
     # 契约 8.2：v0.3 实时书库 SSE；模块异常不得拖垮 app
     try:
@@ -151,4 +165,4 @@ app = create_app()
 if __name__ == "__main__":  # 便于 python -m server.app.main 直接起开发服务
     import uvicorn
 
-    uvicorn.run("server.app.main:app", host="127.0.0.1", port=8765)
+    uvicorn.run("server.app.main:app", host="127.0.0.1", port=8765, proxy_headers=False)

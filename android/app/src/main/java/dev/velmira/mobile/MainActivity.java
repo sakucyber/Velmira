@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Build;
@@ -19,9 +20,12 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.ValueCallback;
+import android.webkit.CookieManager;
+import android.webkit.ConsoleMessage;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -33,18 +37,25 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileDescriptor;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 /**
- * Velmira 的 Android 客户端：连接局域网里的 Velmira 桌面服务，用 WebView 显示同一套界面。
- * 手机与电脑需要在同一 Wi-Fi；地址形如 http://192.168.1.10:8765。
+ * Standalone reader: its private library and HTTP service run on this device.
+ * A desktop connection is optional and never gates opening the local library.
  */
 public class MainActivity extends Activity {
 
     private static final String PREFS = "velmira";
     private static final String KEY_SERVER = "server";
+    private static final String KEY_THEME = "window_theme";
+    private static final String THEME_SIGNAL = "VELMIRA_WINDOW_THEME:";
     private static final int REQ_FILE = 1001;
 
     private WebView web;
@@ -55,7 +66,10 @@ public class MainActivity extends Activity {
     private Button connectBtn;
 
     private SharedPreferences prefs;
-    private String baseUrl = "";
+    private volatile String baseUrl = "";
+    private String localOrigin = "";
+    private String pairingFragment = "";
+    private LocalServer localServer;
     private ValueCallback<Uri[]> fileCallback;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -73,7 +87,9 @@ public class MainActivity extends Activity {
         progress = findViewById(R.id.progress);
         connectBtn = findViewById(R.id.connect);
 
+        applyWindowTheme(prefs.getString(KEY_THEME, "day"));
         configureWebView();
+        progress.setVisibility(View.VISIBLE);
 
         connectBtn.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -89,20 +105,21 @@ public class MainActivity extends Activity {
             }
         });
 
-        String saved = prefs.getString(KEY_SERVER, "");
-        if (!saved.isEmpty()) {
-            serverInput.setText(saved);
-            serverInput.setSelection(saved.length());
-            attemptConnect();
-        } else {
-            setup.setVisibility(View.VISIBLE);
-            web.setVisibility(View.GONE);
-        }
+        Button local = findViewById(R.id.open_local);
+        local.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { openLocalLibrary(); }
+        });
+        if (!handleConnectionIntent(getIntent())) openLocalLibrary();
     }
 
     // ---------- WebView ----------
 
     private void configureWebView() {
+        // Pairing is handled by the shared login page. HttpOnly first-party
+        // cookies also authenticate images and SSE; never store a pairing code.
+        CookieManager.getInstance().setAcceptCookie(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
+        WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -114,23 +131,43 @@ public class MainActivity extends Activity {
         s.setLoadWithOverviewMode(false);
         s.setUseWideViewPort(true);
         s.setMediaPlaybackRequiresUserGesture(false);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " VelmiraAndroid/0.4.0");
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        s.setUserAgentString(s.getUserAgentString() + " VelmiraAndroid/0.5.1");
         if (Build.VERSION.SDK_INT >= 26) {
             s.setSafeBrowsingEnabled(false);
         }
-        web.setBackgroundColor(Color.rgb(244, 241, 234));
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
 
         web.setWebViewClient(new WebViewClient() {
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // Keep the configured HTTP(S) origin, cookie jar and IndexedDB.
+                // Only static application assets come from the APK. API/media
+                // requests still reach the server or the shared offline store.
+                if (!"GET".equals(request.getMethod()) || !sameOrigin(request.getUrl())) {
+                    return null;
+                }
+                return bundledAsset(request.getUrl());
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+                if ("velmira".equals(scheme)) {
+                    Uri current = view.getUrl() == null ? null : Uri.parse(view.getUrl());
+                    if (!sameOrigin(current)) return true;
+                    if ("connect".equals(uri.getHost())) showSetup();
+                    else if ("home".equals(uri.getHost()) || "local".equals(uri.getHost())) openLocalLibrary();
+                    return true;
+                }
                 if ("http".equals(scheme) || "https".equals(scheme)) {
                     String host = uri.getHost() == null ? "" : uri.getHost();
-                    String baseHost = Uri.parse(baseUrl).getHost();
-                    if (host.equalsIgnoreCase(baseHost)) {
+                    Uri base = Uri.parse(baseUrl);
+                    String baseHost = base.getHost();
+                    int port = uri.getPort() == -1 ? ("https".equals(scheme) ? 443 : 80) : uri.getPort();
+                    int basePort = base.getPort() == -1 ? ("https".equals(base.getScheme()) ? 443 : 80) : base.getPort();
+                    if (host.equalsIgnoreCase(baseHost) && scheme.equals(base.getScheme()) && port == basePort) {
                         return false; // 应用内页面
                     }
                     try {
@@ -143,14 +180,20 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageFinished(WebView view, String url) {
+                CookieManager.getInstance().flush();
+                installThemeObserver(view);
+            }
+
+            @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame()) {
                     ui.post(new Runnable() {
                         @Override
                         public void run() {
                             progress.setVisibility(View.GONE);
-                            showSetup();
-                            setStatus("无法加载页面：" + error.getDescription());
+                            if (baseUrl.equals(localOrigin)) showLocalError("本机界面加载失败，请重新打开。");
+                            else { showSetup(); setStatus("电脑暂不可达，可返回本机书库。" ); }
                         }
                     });
                 }
@@ -158,6 +201,20 @@ public class MainActivity extends Activity {
         });
 
         web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage message) {
+                String text = message.message();
+                Uri current = web.getUrl() == null ? null : Uri.parse(web.getUrl());
+                if (sameOrigin(current) && text.startsWith(THEME_SIGNAL)) {
+                    String theme = text.substring(THEME_SIGNAL.length());
+                    if ("day".equals(theme) || "night".equals(theme) || "sepia".equals(theme)) {
+                        applyWindowTheme(theme);
+                        return true;
+                    }
+                }
+                return super.onConsoleMessage(message);
+            }
+
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
@@ -183,6 +240,49 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    // The page only signals one of three palette names. No JavaScript bridge,
+    // account data or arbitrary native methods are exposed to book content.
+    private void installThemeObserver(WebView view) {
+        Uri current = view.getUrl() == null ? null : Uri.parse(view.getUrl());
+        if (!sameOrigin(current)) return;
+        view.evaluateJavascript("(function(){if(window.__velmiraWindowTheme)return;window.__velmiraWindowTheme=true;"
+            + "function sync(){console.info('" + THEME_SIGNAL + "'+(document.documentElement.dataset.theme||'day'));}"
+            + "new MutationObserver(sync).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});sync();})()", null);
+    }
+
+    private void applyWindowTheme(String theme) {
+        boolean dark = "night".equals(theme);
+        int background = Color.parseColor(dark ? "#14161b" : "sepia".equals(theme) ? "#e9dcc2" : "#f4f1ea");
+        int statusColor = Color.parseColor(dark ? "#1c1f26" : "sepia".equals(theme) ? "#f4e8d0" : "#fffdf8");
+        Window window = getWindow();
+        window.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS | WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(statusColor);
+        window.setNavigationBarColor(background);
+        window.setBackgroundDrawable(new ColorDrawable(background));
+        if (Build.VERSION.SDK_INT >= 28) window.setNavigationBarDividerColor(background);
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.setStatusBarContrastEnforced(false);
+            window.setNavigationBarContrastEnforced(false);
+        }
+        // Keep the WebView within status/navigation/cutout insets. The web
+        // safe-area padding remains zero here, and is used by browser/PWA mode.
+        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(true);
+        View decor = window.getDecorView();
+        int flags = decor.getSystemUiVisibility();
+        flags &= ~(View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        if (!dark) {
+            flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= 26) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        }
+        decor.setSystemUiVisibility(flags);
+        if (web != null) web.setBackgroundColor(background);
+        View content = findViewById(android.R.id.content);
+        if (content != null) content.setBackgroundColor(background);
+        prefs.edit().putString(KEY_THEME, theme).apply();
     }
 
     @Override
@@ -212,8 +312,91 @@ public class MainActivity extends Activity {
 
     // ---------- 连接 ----------
 
+    private void openLocalLibrary() {
+        try {
+            if (localServer == null) localServer = new LocalServer(this);
+            localOrigin = localServer.start();
+            baseUrl = localOrigin;
+            CookieManager.getInstance().setCookie(localOrigin, localServer.getCookie(), new ValueCallback<Boolean>() {
+                @Override public void onReceiveValue(Boolean accepted) {
+                    CookieManager.getInstance().flush(); showWeb();
+                }
+            });
+        } catch (Exception error) {
+            showLocalError("本机书库暂时无法启动，请重试。" );
+        }
+    }
+
+    private void showLocalError(String message) {
+        android.widget.LinearLayout screen = new android.widget.LinearLayout(this);
+        screen.setOrientation(android.widget.LinearLayout.VERTICAL);
+        screen.setPadding(32, 80, 32, 32);
+        TextView text = new TextView(this); text.setText(message); text.setTextSize(18);
+        Button retry = new Button(this); retry.setText("重新打开本机书库");
+        retry.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { recreate(); }
+        });
+        screen.addView(text); screen.addView(retry); setContentView(screen);
+    }
+
+    private boolean sameOrigin(Uri uri) {
+        if (baseUrl.isEmpty() || uri == null) return false;
+        Uri base = Uri.parse(baseUrl);
+        String scheme = uri.getScheme(), host = uri.getHost();
+        if (scheme == null || host == null || uri.getUserInfo() != null) return false;
+        int port = uri.getPort() == -1 ? ("https".equals(scheme) ? 443 : 80) : uri.getPort();
+        int basePort = base.getPort() == -1 ? ("https".equals(base.getScheme()) ? 443 : 80) : base.getPort();
+        return scheme.equals(base.getScheme()) && host.equalsIgnoreCase(base.getHost()) && port == basePort;
+    }
+
+    private WebResourceResponse bundledAsset(Uri uri) {
+        String path = uri.getEncodedPath();
+        if (path == null || path.isEmpty() || "/".equals(path)) path = "/index.html";
+        // Never turn arbitrary URLs into AssetManager paths. Encoded path
+        // separators, traversal, absolute paths and user supplied files fail
+        // this allowlist before any APK asset is opened.
+        if (!path.matches("/[A-Za-z0-9_./-]+") || path.contains("//")) return null;
+        for (String part : path.split("/")) {
+            if (".".equals(part) || "..".equals(part)) return null;
+        }
+        String lower = path.toLowerCase(Locale.ROOT);
+        String mime = null;
+        if ("/index.html".equals(path)) mime = "text/html";
+        else if ("/app.js".equals(path) || "/sw.js".equals(path) ||
+                ((path.startsWith("/ui/") || path.startsWith("/util/")) && lower.endsWith(".js"))) mime = "application/javascript";
+        else if (path.startsWith("/styles/") && lower.endsWith(".css")) mime = "text/css";
+        else if ("/manifest.webmanifest".equals(path)) mime = "application/manifest+json";
+        else if (path.startsWith("/icons/")) {
+            if (lower.endsWith(".png")) mime = "image/png";
+            else if (lower.endsWith(".svg")) mime = "image/svg+xml";
+            else if (lower.endsWith(".ico")) mime = "image/x-icon";
+            else if (lower.endsWith(".webp")) mime = "image/webp";
+        }
+        if (mime == null) return null;
+        try {
+            InputStream stream = getAssets().open("web" + path);
+            Map<String, String> headers = new HashMap<String, String>();
+            headers.put("Cache-Control", "no-cache");
+            headers.put("X-Content-Type-Options", "nosniff");
+            String encoding = mime.startsWith("image/") ? null : "UTF-8";
+            return new WebResourceResponse(mime, encoding, 200, "OK", headers, stream);
+        } catch (java.io.IOException missing) {
+            return null;
+        }
+    }
+
     private void attemptConnect() {
-        String candidate = normalize(serverInput.getText().toString());
+        String raw = serverInput.getText().toString().trim();
+        String fragment = "";
+        try {
+            Uri pasted = Uri.parse(raw);
+            String value = pasted.getFragment();
+            if (value != null && value.matches("pair=[A-Za-z0-9_-]{16,200}")) {
+                fragment = "#" + value;
+                raw = pasted.buildUpon().fragment(null).build().toString();
+            }
+        } catch (Exception ignored) { }
+        String candidate = normalize(raw);
         if (candidate == null) {
             setStatus("请输入服务地址，例如 http://192.168.1.10:8765");
             return;
@@ -222,6 +405,12 @@ public class MainActivity extends Activity {
         connectBtn.setEnabled(false);
         progress.setVisibility(View.VISIBLE);
         setStatus("正在连接 " + candidate + " …");
+        // Opening the bundled application does not require a running server.
+        // Its local store decides which books are available offline.
+        baseUrl = candidate;
+        pairingFragment = fragment;
+        prefs.edit().putString(KEY_SERVER, candidate).apply();
+        showWeb();
 
         new Thread(new Runnable() {
             @Override
@@ -233,12 +422,11 @@ public class MainActivity extends Activity {
                         connectBtn.setEnabled(true);
                         progress.setVisibility(View.GONE);
                         if (!ok) {
-                            setStatus("连接失败：这个地址上没有运行 Velmira。请确认电脑端已启动服务、手机与电脑在同一 Wi-Fi。");
+                            setStatus("服务暂不可达，已打开离线界面。可阅读此前缓存的书籍；首次使用请在电脑服务可达时配对和缓存。");
+                            Toast.makeText(MainActivity.this, "服务暂不可达，可继续阅读已缓存书籍", Toast.LENGTH_LONG).show();
                             return;
                         }
-                        baseUrl = candidate;
-                        prefs.edit().putString(KEY_SERVER, candidate).apply();
-                        showWeb();
+                        setStatus("服务可达，书库会自动同步。");
                     }
                 });
             }
@@ -297,19 +485,52 @@ public class MainActivity extends Activity {
         if (!s.startsWith("http://") && !s.startsWith("https://")) {
             return null;
         }
+        Uri address = Uri.parse(s);
+        if (address.getHost() == null || address.getHost().isEmpty() || address.getUserInfo() != null ||
+                address.getQuery() != null || address.getFragment() != null ||
+                (address.getPath() != null && !address.getPath().isEmpty() && !"/".equals(address.getPath())) ||
+                address.getPort() < -1 || address.getPort() == 0 || address.getPort() > 65535) {
+            return null;
+        }
         return s;
     }
 
     private void showWeb() {
+        progress.setVisibility(View.GONE);
         setup.setVisibility(View.GONE);
         web.setVisibility(View.VISIBLE);
-        web.loadUrl(baseUrl + "/");
+        String suffix = pairingFragment;
+        pairingFragment = ""; // Never persist or reuse a one-time invitation.
+        web.loadUrl(baseUrl + "/" + suffix);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleConnectionIntent(intent);
+    }
+
+    private boolean handleConnectionIntent(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction()) || !"text/plain".equals(intent.getType())) return false;
+        String shared = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (shared == null || shared.length() > 2048) return false;
+        Uri uri;
+        try { uri = Uri.parse(shared.trim()); } catch (Exception invalid) { return false; }
+        if (uri.getFragment() == null || !uri.getFragment().matches("pair=[A-Za-z0-9_-]{16,200}")) return false;
+        String base = uri.buildUpon().fragment(null).build().toString();
+        if (normalize(base) == null) return false;
+        showSetup();
+        serverInput.setText(shared.trim());
+        setStatus("已收到电脑配对链接。点击连接即可配对，链接仅使用一次，不会保存。");
+        return true;
     }
 
     private void showSetup() {
         web.setVisibility(View.GONE);
         setup.setVisibility(View.VISIBLE);
-        serverInput.setText(baseUrl.isEmpty() ? prefs.getString(KEY_SERVER, "") : baseUrl);
+        serverInput.setText(prefs.getString(KEY_SERVER, ""));
+        setStatus("可选：粘贴电脑生成的连接链接，或填写服务地址。手机本地阅读无需连接电脑。" );
     }
 
     private void setStatus(String text) {
@@ -330,7 +551,8 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
-        menu.add(Menu.NONE, 1, 0, "服务器设置");
+        menu.add(Menu.NONE, 3, 0, "本机书库");
+        menu.add(Menu.NONE, 1, 1, "连接电脑（可选）");
         menu.add(Menu.NONE, 2, 1, "重新加载");
         return true;
     }
@@ -341,6 +563,7 @@ public class MainActivity extends Activity {
             showSetup();
             return true;
         }
+        if (item.getItemId() == 3) { openLocalLibrary(); return true; }
         if (item.getItemId() == 2) {
             if (web.getVisibility() == View.VISIBLE) {
                 web.reload();
@@ -358,11 +581,24 @@ public class MainActivity extends Activity {
                 web.loadUrl(baseUrl + "/");
                 return;
             }
-            // 书架直接返回设置，避免 WebView 历史把用户带回刚退出的阅读页。
-            showSetup();
-            return;
+            if (!baseUrl.equals(localOrigin)) { openLocalLibrary(); return; }
+            super.onBackPressed(); return;
         }
-        super.onBackPressed();
+        // A QR scanner may share the one-time invitation while the app is
+        // closed. Consume it before opening the local library so the user can
+        // confirm the desktop connection instead of losing the fragment.
+        if (!handleConnectionIntent(getIntent())) openLocalLibrary();
+    }
+
+    @Override
+    public void dump(String prefix, FileDescriptor fd, PrintWriter writer, String[] args) {
+        super.dump(prefix, fd, writer, args);
+        Window window = getWindow();
+        writer.println(prefix + "Velmira window theme:");
+        writer.println(prefix + "  theme=" + (prefs == null ? "day" : prefs.getString(KEY_THEME, "day")));
+        writer.println(prefix + "  statusBarColor=" + String.format(Locale.ROOT, "#%08x", window.getStatusBarColor()));
+        writer.println(prefix + "  navigationBarColor=" + String.format(Locale.ROOT, "#%08x", window.getNavigationBarColor()));
+        writer.println(prefix + "  systemUiVisibility=" + String.format(Locale.ROOT, "0x%08x", window.getDecorView().getSystemUiVisibility()));
     }
 
     @Override
@@ -370,6 +606,7 @@ public class MainActivity extends Activity {
         if (web != null) {
             web.destroy();
         }
+        if (localServer != null) localServer.close();
         super.onDestroy();
     }
 }

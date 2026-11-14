@@ -59,7 +59,7 @@ try {
   await waitFor('!!window.__velmira && !document.querySelector("#btn-ai").disabled');
   await evaluate('document.querySelector("#btn-ai").click()');
   await waitFor('!!document.querySelector(".drawer-ai.open")');
-  await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs") && document.querySelector(".manga-tabs").children.length===4');
+  await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs") && document.querySelector(".manga-tabs").children.length===5');
   await clickText('漫画与画风设置'); await waitFor('!!document.querySelector("[aria-label=图像后端]")');
   await set('图像后端', 'mock'); await clickText('保存设置'); await sleep(300);
   await clickText('检测已保存的连接与模型');

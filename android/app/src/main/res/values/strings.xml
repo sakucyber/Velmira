@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Velmira</string>
-    <string name="tagline">连接桌面端 Velmira 服务</string>
-    <string name="hint_server">http://192.168.1.10:8765</string>
-    <string name="label_server">服务地址</string>
-    <string name="action_connect">连接</string>
-    <string name="action_settings">服务器设置</string>
+    <string name="tagline">连接电脑书库 · 可选</string>
+    <string name="hint_server">粘贴连接链接或电脑地址</string>
+    <string name="label_server">连接链接 / 服务地址</string>
+    <string name="action_connect">连接电脑书库</string>
+    <string name="action_settings">连接电脑（可选）</string>
     <string name="action_reload">重新加载</string>
-    <string name="tip_how">在桌面端运行 Velmira（scripts/run.ps1），手机与电脑连同一个 Wi-Fi，输入电脑的局域网 IP 和端口。</string>
-    <string name="tip_find_ip">Windows 查看 IP：ipconfig 中的 IPv4 地址。</string>
-    <string name="status_idle">输入地址后点「连接」</string>
+    <string name="tip_how">手机可独立导入 TXT、EPUB 和 CBZ 阅读。连接电脑书库时，在电脑的局域网设置点击“连接新设备”，用系统相机扫码，或将连接链接分享给 Velmira。</string>
+    <string name="tip_find_ip">也可在此粘贴连接链接。手动连接时填写电脑 IP，例如 http://192.168.1.10:8765。</string>
+    <string name="status_idle">本机书库无需配置；电脑地址可以稍后再填。</string>
     <string name="status_connecting">正在连接…</string>
     <string name="status_failed">连接失败：</string>
     <string name="status_bad_server">这个地址上没有运行 Velmira</string>

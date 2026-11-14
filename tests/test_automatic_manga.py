@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from server.app import db
 from server.app.ai import director
 from server.app.main import create_app
-from server.app.manga import automatic as a, queue
+from server.app.manga import automatic as a, queue, storyboard
 from manga_fixture import seed
 
 
@@ -37,10 +37,10 @@ class AutomaticTests(unittest.TestCase):
         self.story_calls = []
         async def story(**kw):
             material = json.loads(kw["user"]); self.story_calls.append(material)
-            return {"panels": [{"character_id": "m3-char", "shot": shot, "action": action, "caption": caption, "dialogue": "", "speaker": ""}
+            return {"panels": [{"kind": "solo", "subjects": [{"character_id": "m3-char", "position": "center", "pose": action}], "environment": "quiet park", "lighting": "daylight", "emotion": "", "source_quote": material["text"], "shot": shot, "action": action, "caption": caption, "dialogue": "", "speaker": ""}
                                for shot, action, caption in [("medium", "walk into the park", "走入公园。"), ("reaction", "stop beside the bench", "随后停下脚步。")]]}
         self.story_provider = SimpleNamespace(complete=AsyncMock(side_effect=story))
-        p = patch.object(a, "make_provider", return_value=self.story_provider); p.start(); self.addCleanup(p.stop)
+        p = patch.object(storyboard, "make_provider", return_value=self.story_provider); p.start(); self.addCleanup(p.stop)
         async def plan(material, config, **kwargs):
             return {"summary": {"summary": material["action"]}, "visual_prompt": "A single adult in a quiet park, coherent daylight, consistent clothing, face clearly visible."}
         self.plan = AsyncMock(side_effect=plan)
@@ -85,6 +85,8 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(sum(j["kind"] == "reference" for j in jobs), 1)
         self.assertEqual(sum(j["kind"] == "panel" for j in jobs), 4)
         self.assertTrue(all(j["status"] == "needs_review" and j["face_score"] is None for j in jobs))
+        self.assertEqual(self.story_provider.complete.await_count, 2)
+        self.plan.assert_not_awaited()
         self.assertEqual(self.sql("SELECT accepted FROM form_refs"), [{"accepted": 0}])
         draft = self.client.get(self.base + "/auto/pages").json()
         self.assertEqual([p["chapter"] for p in draft["pages"]], [0, 1])
@@ -98,6 +100,7 @@ class AutomaticTests(unittest.TestCase):
         first = self.call(chapter=1)
         self.advance(4)
         jobs = len(self.sql("SELECT * FROM render_jobs"))
+        self.call()
         self.call(False)
         self.advance(4)
         self.assertEqual(len(self.sql("SELECT * FROM render_jobs")), jobs)
@@ -109,6 +112,32 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual((result["pages"], result["completed_chapters"]), (1, 1))
         self.assertEqual(len(self.sql("SELECT * FROM render_jobs")), 3)
         self.assertEqual(self.story_provider.complete.await_count, 1)
+
+    def test_preview_gate_edit_and_confirm_resume_without_more_text_calls(self):
+        self.client.patch(self.base + '/config', json={'review_storyboards': True})
+        self.call(chapter=1); self.advance(3)
+        state = self.client.get(self.base+'/auto').json()['auto']
+        self.assertEqual(state['status'], 'reviewing')
+        self.assertEqual(self.sql('SELECT * FROM render_jobs'), [])
+        url = self.base+'/storyboards/'+state['board_id']
+        board = self.client.get(url).json()['storyboard']; board['panels'][0]['caption']='走入公园。'
+        changed = self.client.patch(url,json={'revision':board['revision'],'panels':board['panels']}).json()['storyboard']
+        self.assertEqual(self.client.post(url+'/approve',json={'revision':board['revision']}).status_code,409)
+        self.assertEqual(self.client.post(url+'/approve',json={'revision':changed['revision']}).status_code,200)
+        self.finish(); self.assertEqual(self.story_provider.complete.await_count,1); self.plan.assert_not_awaited()
+
+    def test_legacy_unfinished_page_resumes_original_plan_without_replanning(self):
+        self.call(chapter=1);self.advance(3)
+        state=json.loads(self.sql('SELECT state_json FROM auto_manga')[0]['state_json'])
+        for item in state['story']:
+            item['character_id']=item['subjects'][0]['character_id']
+            if item.get('form_ids'):item['form_id']=item['form_ids'][0]
+        state.pop('board_id');state.pop('board_revision')
+        self.sql('UPDATE auto_manga SET state_json=?',(json.dumps(state),))
+        calls=self.story_provider.complete.await_count
+        self.finish()
+        self.assertEqual(self.story_provider.complete.await_count,calls)
+        self.assertGreater(self.plan.await_count,0)
 
     def test_streaming_generates_at_ten_waits_for_late_chapter_and_keeps_pause_owner(self):
         for idx in range(2, 12):
@@ -164,7 +193,7 @@ class AutomaticTests(unittest.TestCase):
 
     def test_story_recovers_on_third_attempt(self):
         self.call()
-        story = {"panels": [{"character_id": "m3-char", "shot": "medium", "action": "walk", "caption": "走入公园。", "dialogue": "", "speaker": ""}]}
+        story = {"panels": [{"kind": "solo", "subjects": [{"character_id": "m3-char", "position": "center", "pose": "walk"}], "environment": "park", "lighting": "", "emotion": "", "source_quote": "Neutral sample", "shot": "medium", "action": "walk", "caption": "走入公园。", "dialogue": "", "speaker": ""}]}
         self.story_provider.complete.side_effect = [RuntimeError("private"), {"panels": []}, story]
         self.advance()
         self.assertEqual(self.story_provider.complete.await_count, 3)
@@ -253,7 +282,7 @@ class AutomaticTests(unittest.TestCase):
 
     def test_changed_outfit_reference_preserves_previous_character_face(self):
         self.sql("UPDATE characters SET frozen=0,identity_block=NULL,identity_hash=NULL,card_json=?", (json.dumps({"evidence": [
-            {"field": "outfit", "value": "red jacket", "ch": 0}, {"field": "outfit", "value": "blue jacket", "ch": 1}]}),))
+            {"field": "outfit", "value": "red jacket", "ch": 0}, {"field": "outfit", "value": "blue jacket", "ch": 1, "quote": "Later sample"}]}),))
         self.call(); self.finish()
         refs = self.sql("SELECT snapshot_json FROM render_jobs WHERE kind='reference' ORDER BY created_at,rowid")
         self.assertEqual(len(refs), 2)
@@ -264,14 +293,51 @@ class AutomaticTests(unittest.TestCase):
         self.assertIn("blue jacket", second["prompt"])
         self.assertIn("same character and face as reference", second["prompt"])
 
-    def test_no_cast_produces_narrative_transition_without_invented_person(self):
+    def test_no_cast_generates_real_environment_with_review_required(self):
         self.sql("UPDATE scenes SET plan_json='{}' WHERE chapter_id=1")
         self.story_provider.complete.side_effect = None
-        self.story_provider.complete.return_value = {"panels": [{"character_id": "", "shot": "wide", "caption": "夜幕降临，街道逐渐安静下来。"}]}
+        self.story_provider.complete.return_value = {"panels": [{"kind": "environment", "subjects": [], "shot": "wide", "caption": "夜幕降临，街道逐渐安静下来。", "action": "An empty street becomes quiet", "environment": "street", "lighting": "night", "emotion": "", "source_quote": "Later sample", "dialogue": "", "speaker": ""}]}
         self.call(chapter=1)
         self.assertEqual(self.finish()["pages"], 1)
-        self.assertEqual(self.sql("SELECT * FROM render_jobs"), [])
-        self.assertEqual(self.client.get(self.base + "/auto/pages").json()["pages"][0]["pending_review"], 0)
+        jobs = self.sql("SELECT form_id,snapshot_json FROM render_jobs")
+        self.assertEqual(len(jobs), 1)
+        self.assertIsNone(jobs[0]["form_id"])
+        self.assertIn("no people", json.loads(jobs[0]["snapshot_json"])["prompt"])
+        self.assertEqual(self.client.get(self.base + "/auto/pages").json()["pages"][0]["pending_review"], 1)
+
+    def test_diagnose_maps_provider_status_without_network_or_raw_logs(self):
+        self.call()
+        self.call(False)
+        for code, title in [("provider_auth", "API 密钥无效或已过期"),
+                            ("provider_rate_limit", "API 请求过于频繁"),
+                            ("provider_billing", "API 账户余额或额度不足"),
+                            ("provider_server_error", "AI 服务暂时故障")]:
+            state = json.dumps({"last_error_code": code, "last_error_message": "Bearer sk-secret"})
+            self.sql("UPDATE auto_manga SET status='error',enabled=0,message='Bearer sk-secret',state_json=?", (state,))
+            response = self.client.get(self.base + "/auto/diagnose")
+            self.assertEqual(response.status_code, 200, response.text)
+            body = response.json()
+            self.assertEqual(body["checks"][0]["code"], code)
+            self.assertEqual(body["checks"][0]["title"], title)
+            self.assertNotIn("sk-secret", json.dumps(body))
+            self.assertNotIn("Bearer", json.dumps(body))
+
+    def test_provider_http_failure_survives_automatic_task_and_diagnosis(self):
+        from server.app.ai.providers import ProviderRequestError
+        for status, code, detail in [(401, "provider_auth", "API Key"), (429, "provider_rate_limit", "并发")]:
+            self.call()
+            self.story_provider.complete.side_effect = ProviderRequestError(
+                "upstream Bearer sk-secret", status_code=status, error_code="http_error")
+            self.advance()
+            self.sql("INSERT INTO task_logs(book_id,run_id,stage,level,message,created_at) VALUES('m3-book','unknown','rendering','error','Bearer sk-secret raw request',1)")
+            with patch("urllib.request.build_opener") as network:
+                response = self.client.get(self.base + "/auto/diagnose")
+                network.assert_not_called()
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["checks"][0]["code"], code)
+            self.assertIn(detail, response.json()["checks"][0]["detail"])
+            self.assertNotIn("sk-secret", response.text)
+            self.assertNotIn("raw request", response.text)
 
 
 if __name__ == "__main__":

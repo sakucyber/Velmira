@@ -135,7 +135,8 @@ async def extract_ai(book_id: str, payload: dict | None = Body(default=None)):
         from ..ai.settings import load_settings
         shared = load_settings()
         if config["provider"] in {"mock", "offline"} and shared["enabled"]:
-            config.update(provider="openai-compatible", base_url=shared["base_url"], model=shared["model"], api_key_env="", local_settings=True)
+            from ..ai.director import text_config
+            config.update(**text_config(), api_key_env="")
         requested_provider = payload.get("provider")
         provider_name = str(requested_provider or config["provider"] or "mock").lower()
         if not config["enabled"] and not requested_provider:
@@ -174,6 +175,8 @@ async def extract_ai(book_id: str, payload: dict | None = Body(default=None)):
         snapshot = {"provider": provider_name, "model": config.get("model"), "base_url": config.get("base_url"),
                     "api_key_env": config.get("api_key_env"), "temperature": config.get("temperature"),
                     "prompt_version": prompt_version}
+        if config.get("routing"):
+            snapshot["routing"] = config["routing"]
         result = await extract_segments(conn=conn, book_id=book_id, segments=segments, provider=provider,
                                         provider_name=provider_name, config_snapshot=snapshot,
                                         prompt_version=prompt_version, force=force)

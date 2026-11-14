@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- API credentials, AI history and private memories stay on this device. -->
+    <exclude domain="sharedpref" path="velmira-ai-service.xml" />
+</full-backup-content>

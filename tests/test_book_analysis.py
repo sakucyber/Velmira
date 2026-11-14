@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from server.app import db
-from server.app.ai import book_analysis as ba, settings, director
+from server.app.ai import book_analysis as ba, settings, director, chapter_memory
 from server.app.ai.models import stable_json
 from server.app.main import create_app
 from server.app.manga.models import digest
@@ -61,7 +61,17 @@ class BookAnalysisTests(unittest.TestCase):
     def run_job(self, provider=None):
         job = self.claim()
         provider = provider or SimpleNamespace(complete=AsyncMock(return_value=output()))
-        with patch.object(ba, "make_provider", return_value=provider):
+        # Keep the existing analysis failure/caching scenarios focused on their
+        # own stage, while exercising the new semantic compression call too.
+        async def stage_complete(**kwargs):
+            if kwargs.get("system") == chapter_memory.COMPRESS_SYSTEM:
+                material = json.loads(kwargs["user"])
+                text = ""
+                while chapter_memory.token_count(text, "gpt-oss-120b")[0] < 110:
+                    text += "Ari keeps the supplied objects and remembers the described events. "
+                return {"memory": text, "facts": [{"kind":"event","character_id":"Ari","field":"chapter_event","value":"The supplied event occurred.","quote":material["text"][:80]}] if material["text"] else []}
+            return await provider.complete(**kwargs)
+        with patch.object(ba, "make_provider", return_value=SimpleNamespace(complete=stage_complete)):
             asyncio.run(ba.process(job))
         return self.client.get(self.endpoint).json()
 
@@ -160,9 +170,9 @@ class BookAnalysisTests(unittest.TestCase):
         try:
             cid = conn.execute("SELECT id FROM characters WHERE name='Ari'").fetchone()[0]
             context = ba.relevant_context(conn, "m3-book", 1, cid, {"key_props": ["key"]})
-            self.assertEqual([c["chapter"] for c in context["chapters"]], [0, 1])
+            self.assertEqual([c["chapter"] for c in context["chapters"]], [0])
             self.sql("UPDATE chapters SET title='Modified' WHERE idx=0")
-            self.assertEqual([c["chapter"] for c in ba.relevant_context(conn, "m3-book", 1, cid, {})["chapters"]], [1])
+            self.assertEqual([c["chapter"] for c in ba.relevant_context(conn, "m3-book", 1, cid, {})["chapters"]], [])
         finally: conn.close()
 
     def test_auto_discovery_and_plan_readiness(self):
@@ -178,7 +188,8 @@ class BookAnalysisTests(unittest.TestCase):
         with patch.object(director, "make_provider", return_value=mock):
             response = self.client.post("/api/books/m3-book/manga/plan", json={"scene_id": "m3-scene", "form_id": "form_m3-char"})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["plan"]["scope"]["related_chapters"], [0])
+        # At the opening of chapter zero there is no preceding chapter memory.
+        self.assertEqual(response.json()["plan"]["scope"]["related_chapters"], [])
 
     def test_comic_warmup_target_prefix_and_stale_cache(self):
         for idx in range(1, 12): self.add_chapter(idx, "Ari returned to the garden wearing a red coat.")

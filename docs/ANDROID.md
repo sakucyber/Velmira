@@ -1,47 +1,81 @@
 # Velmira Android（通用 APK）
 
-Velmira 的 Android 客户端：用 WebView 连接**局域网里的 Velmira 桌面服务**，手机上继续读同一书库。系统要求 Android 7.0+（minSdk 24），一个 APK 覆盖所有 ABI（纯 Java + WebView，无原生库）。
+v0.5.1 APK 内置阅读界面、手机本地书库和云端 AI 请求代理，打开即可使用，无需电脑或服务器地址。可从手机导入 TXT、EPUB、CBZ，离线阅读、搜索，并保存进度、书签和批注。配置模型密钥后，可直接在手机使用文本 AI 和生图。系统要求 Android 7.0+（minSdk 24），纯 Java + WebView，一个 APK 覆盖所有 ABI。
 
-## 为什么是「连接桌面服务」而不是离线版
+## 安装与首次使用
 
-Velmira 的后端是 Python（FastAPI + SQLite），桌面端也依赖它。Android 客户端复用同一套 Web 界面与 API，把它当作移动端遥控/阅读器：
+1. 安装 APK 并打开应用。
+2. 首次可选择主题、字号和书架密度，也可点击「跳过，直接进入」。以后可在「设置 → 阅读显示」重新个性化。
+3. 在本机书库点击「导入文件」，从系统文件选择器选择 TXT、EPUB 或 CBZ。
+4. 导入后直接阅读；书籍和阅读记录自动保存在手机，无需再次下载。
 
-- 书库、阅读、书签、注释、实时书库、离线进度都在桌面端数据库里，手机与电脑看到同一份数据；
-- 手机与电脑需要在同一 Wi-Fi；桌面端启动服务后，手机填电脑的局域网 IP 与端口（默认 8765）；
-- 完全离线、手机本地存书的版本需要把后端移植到 Android（或嵌入 Python 运行时），属于后续工作，不在本 APK 范围。
+阅读显示、本机书库、模型、提示词、长期记忆、联网搜索和电脑连接均在「设置」中管理。返回键从阅读页回书架，在本机书架返回则退出应用。清除应用数据或卸载应用会删除手机中的书库和阅读记录。
+
+## 本机离线能力
+
+本机导入的 TXT、EPUB 正文与安全内嵌图片、CBZ 漫画页可以直接离线使用。目录、正文搜索、进度、书签和批注由手机本地服务处理，不依赖电脑、云端模型或外部网络。首次启动为空书架，APK 不捆绑书籍。
+
+已生成的 AI 文字结果和保存到应用内的图片也可在本机查看。调用云端文本、生图和联网搜索需要手机联网。本机模式不运行电脑书库的同步协议；手机本机书库与可选连接的电脑书库分别保存，当前不会自动合并。
+
+本地导入单文件上限 64 MB；EPUB / CBZ 解压内容上限 512 MB，单图上限 32 MB，CBZ 最多 2000 页。EPUB 的脚本、外链和复杂排版不执行，正文按阅读器的统一样式显示。
+
+## 手机 AI
+
+书架与小说阅读器均提供「AI」入口。工作台可总结章节、整理人物与人格、编写六格漫画分镜、自由问答，以及按描述或分镜结果生成图片。文本分析可选择参考作品和章节；选择自由创作时不发送书籍原文。结果与生成图片保存在当前手机。
+
+在阅读器中鼠标拖选（桌面）或长按选中文字（手机）后，浮动菜单提供「翻译」和「AI 解释」。翻译与解释只处理当前选区，结果可复制，不写入书籍或长期记忆；手机端复用本机配置的文本模型池并支持自动降级。
+
+首次使用时，进入「设置 → 模型与降级」填写对应厂商的 API 密钥，保存连接，再启用文本或生图模型池。预置的默认文本模型为 `gpt-6-luna`，默认生图为 `agnes-image-2.5-flash`，依次以 `agnes-image-2.1-flash`、`agnes-image-2.0-flash` 备用。APK 不嵌入任何模型密钥，预置模型池默认关闭；也可添加自己的 OpenAI 兼容服务、模型与连接。
+
+模型池支持拖动优先顺序、自动降级、轮询与最少并发调度；厂商连接可分别设置 RPM 与并发上限。在设置中还能管理文本/生图提示词、人物人格与梗知识等长期记忆，以及 Tavily、Brave 或 SearXNG 联网搜索。启用的全局和作品记忆会按设定上限用于手机文本与生图请求。
+
+桌面端「设置 → 翻译服务」可选择文本 AI 模型池、Bilibili 免费兼容接口、Microsoft Translator 或自有 OpenAI 兼容 API。密钥直接保存到本机配置，设置接口不会回显；Bilibili 地址默认填为 `https://index-translate.bilibili.com/v1`，模型默认 `Index-Translate-35B-A3B`。Microsoft 翻译需要订阅密钥，部分区域还需要填写区域标识。
+
+手机独立模式通过 APK 内的 Java 代理直接请求已配置的云端服务，无需电脑。整本分析、角色参考图、批量分镜生成与自动漫画任务队列组成的完整任务链仍由电脑服务运行。
+
+## 可选连接电脑
+
+需要阅读电脑中的书时，在电脑「设置 → 局域网访问」点击「连接新设备」，用手机相机扫描二维码，或把连接链接分享给 Velmira。二维码邀请 5 分钟有效且只能使用一次，手机不需要手动输入地址：
+
+1. 电脑端启动局域网服务：`powershell -File scripts/run.ps1 -BindAddress 0.0.0.0`，或 `desktop\Velmira.exe -bind 0.0.0.0`。
+2. 用 `ipconfig` 查看电脑的 IPv4 地址，手机与电脑连接同一个 Wi-Fi，确认防火墙允许访问 8765 端口。
+3. 扫码后点「连接电脑书库」；若相机或分享不可用，也可填写 `http://<电脑IP>:8765`，再输入电脑端生成的配对码。USB 调试也可用 `adb reverse tcp:8765 tcp:8765`。
+4. 手机使用受限的阅读会话；模型密钥与管理操作留在服务端。
+
+连接后切换到电脑书库。可在「设置 → 离线与同步」逐书「下载到本设备」；下载完成后，即使电脑关机或手机断网，也能读取对应正文和图片，搜索缓存正文、保存进度、书签和批注。联网且会话有效后可自动同步或手动同步，冲突保留供用户选择。这些下载和待同步操作保存在当前来源的 IndexedDB 与图片存储中，每台设备需分别下载。
+
+远端缓存按服务地址（协议、主机、端口）隔离。更换电脑 IP 或端口会进入另一份缓存。「清除本机下载」只删除对应远端书籍的手机副本，有未同步操作时会阻止清除。电脑可撤销同步设备；撤销不会远程擦除已有下载。
+
+电脑连接界面和远端设置均提供返回手机本机书库的入口；也可使用应用菜单「本机书库」。远端功能仍需要电脑服务和相应授权，云端 AI 与联网搜索还需要网络。
+
+## 内置界面的实现
+
+构建时从 `web/` 复制静态 HTML、JavaScript、CSS、manifest 和图标到 APK。本机模式由应用内的 Java HTTP 服务提供界面与阅读 API，仅监听 `127.0.0.1`，默认端口 18765；端口占用时自动选择并保存可用端口。应用自动建立本地会话并打开 WebView，用户无需输入这个地址。
+
+书籍、章节、进度、书签和批注保存在应用私有目录的 SQLite，导入源文件和图片保存在私有文件目录。手机 AI 设置、密钥、记忆和历史记录保存在设备私有配置中，并从 Android 云备份和设备迁移中排除；密钥不返回给 WebView。生成图片会下载到应用私有文件目录。阅读和 AI API、媒体均需要本地 HttpOnly 会话 Cookie，写请求验证同源来源。应用退出时关闭本地服务，下次启动重新打开已有书库。
+
+连接电脑模式继续使用所填 HTTP(S) 来源；WebView 将同源静态 GET 请求映射到包内界面，API 和图片使用网络及共享离线存储逻辑。两种模式均不使用 `file://`。系统栏主题通过受限的本地消息同步，API 密钥不会经过主题消息。局域网 HTTP 不支持 Service Worker 时，也能通过 APK 内置资源打开界面。更新内置界面需要安装新版 APK。
 
 ## 构建
 
 ~~~powershell
-# 需要 Android SDK（cmdline-tools + build-tools 35 + platform android-34）
-# 项目脚本可用 .toolchains/android/sdk，或设置 ANDROID_HOME
+# Android SDK：cmdline-tools + build-tools 35 + platform android-34
+# 脚本默认查找 .toolchains/android/sdk，也可设置 ANDROID_HOME。
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
-# 产物：dist/Velmira-universal.apk
+# 默认产物：dist/Velmira-universal.apk
+
+# 指定输出名称：
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Out dist/Velmira-mobile-ai-v0.5.1.apk
 ~~~
 
-脚本不依赖 Gradle：aapt2 编译资源 → aapt2 link → javac → d8 → zipalign → apksigner（v2/v3 签名）。首次构建会在 `android/keystore/debug.jks` 生成自签名密钥（口令 velmira），仅用于侧载测试；正式发布请换成自己的 keystore。
+脚本不依赖 Gradle：aapt2 编译与链接资源，javac/d8 编译代码，jar 加入内置 Web 资源，zipalign 对齐，再由 apksigner 签名并校验 v2/v3 签名及必要资源。使用 jar 打包静态资源，以确保 Windows 上的 ZIP 条目使用 Android 可识别的 `/` 路径分隔符。
 
-## 安装与使用
+首次构建会在 `android/keystore/debug.jks` 生成测试自签名密钥（口令 `velmira`）；正式分发应使用自己的签名密钥。APK 不包含书库、模型密钥或服务端配置。
 
-1. 电脑端启动局域网服务：`powershell -File scripts/run.ps1 -BindAddress 0.0.0.0`（或 `desktop\Velmira.exe -bind 0.0.0.0`）；
-2. 查电脑局域网 IP：`ipconfig` 里的 IPv4 地址，确认 8765 端口可访问（Windows 防火墙放行 Python/端口）；
-3. 手机安装 APK（允许「安装未知来源应用」），打开 Velmira，输入 `http://<电脑IP>:8765`，点「连接」；
-4. 连接成功后进入书架。返回键：阅读页 → 回书架；书架 → 服务器设置；设置页 → 退出。
+## 验证与兼容性
 
-支持的手机端交互：书架/阅读/书签/注释/搜索/目录/漫画翻页，主题与字号；导入文件走系统文件选择器（TXT/EPUB/CBZ），上传到桌面服务。
+当前 APK 为 0.5.1（versionCode 5）。本版验证结果集中记录在 [OFFLINE-VALIDATION.md](OFFLINE-VALIDATION.md)，构建或浏览器检查不能代替目标 Android 设备的安装与离线验证。
 
-USB 调试时也可用 `adb reverse tcp:8765 tcp:8765`，手机填写 `http://127.0.0.1:8765`，无需更改防火墙或局域网监听。
+此前 0.4.0 已在 OPPO PECM30（Android 12、WebView 151）实测连接、TXT 阅读、批注、滑动翻页、进度、书签、返回导航、文件选择器导入 TXT/EPUB/CBZ 和漫画翻页，详见 [REPORT-v0.4.md](../tests/REPORT-v0.4.md)。该记录不能代替本次离线能力的真机验证；Android 7 和其他 WebView 版本仍需设备测试。
 
-2026-11-12 验证状态：APK 构建及 v2/v3 签名校验通过，并已在 OPPO PECM30（Android 12、WebView 151）上通过无线 ADB 安装和实测。覆盖连接、书库实时同步、TXT 阅读、双下划线批注点击、滑动翻页、进度、书签、返回导航，以及系统文件选择器导入 TXT / EPUB / CBZ、漫画翻页和连接失败提示。另通过 390×844 浏览器触摸专项回归。验证记录见 [REPORT-v0.4.md](../tests/REPORT-v0.4.md)。
-
-本轮修复了系统选择器隐藏可导入文件、导入成功后返回书架无法再次导入、书架返回键回跳阅读页的问题。Android 7 的 Safe Browsing API 判断已按系统版本修正；Android 7 兼容性尚未在对应设备上实测。
-
-## 已知限制
-
-- 依赖桌面端服务在线；手机与电脑必须同一网络（或可路由的局域网/VPN）。
-- 首次连接使用明文 HTTP（局域网），未做 TLS；不要在公网暴露 8765。
-- 真机覆盖 Android 12 的上述机型；其他 Android / WebView 版本尚未实测。
-- 桌面端服务默认绑定 127.0.0.1：要在手机上访问，需要监听局域网地址：
-  - Web 版：`powershell -File scripts/run.ps1 -BindAddress 0.0.0.0`
-  - 桌面端：`desktop\Velmira.exe -bind 0.0.0.0`
-  - Windows 防火墙需放行 8765 端口。
+桌面服务默认仅监听 `127.0.0.1`。手机联网同步需显式启用局域网监听，或使用 USB 转发/VPN 等可达连接。局域网默认地址使用 HTTP；公网部署应由受控入口提供 HTTPS。

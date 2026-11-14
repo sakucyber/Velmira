@@ -1,3 +1,5 @@
+//go:build !portable32
+
 // Velmira desktop — a MyGo app that launches the local Velmira server
 // (Python + FastAPI) and shows its web UI in a native window.
 //
@@ -331,7 +333,7 @@ func backendCommand(root string, port int) (*exec.Cmd, error) {
 		}
 	}
 
-	return exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port)), nil
+	return exec.Command(py, "-m", "uvicorn", "server.app.main:app", "--host", *flagBind, "--port", strconv.Itoa(port), "--no-proxy-headers"), nil
 }
 
 func backendLogPath() string {

@@ -8,7 +8,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .models import MangaError
 
-LAYOUTS = {"1x1": 1, "2x1": 2, "2x2": 4, "2x3": 6, "3x2": 6, "1+2": 3, "2+1": 3}
+# Each layout's value is its exact panel capacity.  The asymmetric layouts
+# are deliberate: auto pages must never render an empty placeholder cell.
+LAYOUTS = {
+    "1x1": 1,
+    "2x1": 2,
+    "1+2": 3,
+    "2+1": 3,
+    "1+2+2": 5,
+    "2+2+1": 5,
+    "2x2": 4,
+    "2+3": 5,
+    "2x3": 6,
+    "3x2": 6,
+    "3+4": 7,
+    "2+2+2+1": 7,
+}
 DEFAULTS = {"layout": "auto", "width": 1200, "height": 1800, "gutter": 8,
             "font": "sans", "font_size": 32, "title": "", "panels": []}
 
@@ -36,21 +51,32 @@ def validate(payload):
     if spec["font"] not in ("sans", "serif"):
         raise MangaError("字体须为 sans 或 serif")
     spec["title"] = text(spec["title"], 100, "页标题")
-    if not isinstance(spec["panels"], list) or not 1 <= len(spec["panels"]) <= 6:
-        raise MangaError("一页须包含 1–6 格")
+    if not isinstance(spec["panels"], list) or not 1 <= len(spec["panels"]) <= 7:
+        raise MangaError("一页须包含 1–7 格")
     panels = []
     for p in spec["panels"]:
-        if not isinstance(p, dict) or set(p) - {"job_id", "caption", "dialogue", "speaker", "bubble", "align", "fit"}:
+        if not isinstance(p, dict) or set(p) - {"job_id", "caption", "dialogue", "speaker", "bubble", "align", "fit", "source_span"}:
             raise MangaError("分格内容格式无效")
-        p = {"caption": "", "dialogue": "", "speaker": "", "bubble": "rounded", "align": "left", "fit": "contain", **p}
+        p = {"caption": "", "dialogue": "", "speaker": "", "bubble": "rounded", "align": "left", "fit": "contain", "source_span": None, **p}
         for key, limit in [("job_id", 100), ("caption", 300), ("dialogue", 400), ("speaker", 40)]:
             p[key] = text(p.get(key), limit, key)
         if not p["job_id"] or p["bubble"] not in ("rounded", "ellipse") or p["align"] not in ("left", "right") or p["fit"] not in ("contain", "cover"):
             raise MangaError("分格图像、气泡或适配方式无效")
+        span = p["source_span"]
+        if span is not None:
+            if not isinstance(span, dict) or set(span) - {"chapter", "start", "end", "start_para", "start_offset", "end_para", "end_offset", "quote"}:
+                raise MangaError("分格原文范围格式无效")
+            for key in ("chapter", "start", "end", "start_para", "start_offset", "end_para", "end_offset"):
+                if key in span and (isinstance(span[key], bool) or not isinstance(span[key], int) or span[key] < 0):
+                    raise MangaError("分格原文位置无效")
+            if "start" in span and "end" in span and span["end"] < span["start"]:
+                raise MangaError("分格原文范围倒置")
+            if "quote" in span and (not isinstance(span["quote"], str) or len(span["quote"]) > 20000):
+                raise MangaError("分格原文摘录无效")
         panels.append(p)
     spec["panels"] = panels
     if spec["layout"] == "auto":
-        spec["layout"] = {1: "1x1", 2: "2x1", 3: "1+2", 4: "2x2", 5: "2x3", 6: "2x3"}[len(panels)]
+        spec["layout"] = {1: "1x1", 2: "2x1", 3: "1+2", 4: "2x2", 5: "1+2+2", 6: "2x3", 7: "2+2+2+1"}[len(panels)]
     if len(panels) > LAYOUTS[spec["layout"]]:
         raise MangaError("分格数量超过当前模板，请切换模板或移除分格")
     return spec

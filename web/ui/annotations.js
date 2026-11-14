@@ -9,7 +9,7 @@
    选区跨段时收缩到起点所在段（契约 7.5 / M1 计划第 4 节）。
    DOM 高亮渲染由 paging.js 负责，本模块只发 API 并通知 reader 重建。
    ============================================================ */
-import { el, apiPost, apiPatch, apiDelete, toast } from '../util/core.js';
+import { el, apiPost, apiPatch, apiDelete, toast, getAuthState } from '../util/core.js';
 
 const COLORS = [
   { id: 'yellow', name: '黄色' },
@@ -18,7 +18,7 @@ const COLORS = [
   { id: 'pink', name: '粉色' },
 ];
 
-export function createAnnotationUI({ layer, bookId, column, getAnnotations, canActivate = () => true, onCreated, onUpdated, onDeleted }) {
+export function createAnnotationUI({ layer, bookId, column, getAnnotations, getContext, canActivate = () => true, onCreated, onUpdated, onDeleted }) {
   let menu = null;        // 当前浮动菜单
   let menuKind = null;    // 'selection' | 'mark'
   let pending = null;     // { chapter, para, start, end, text } 或已有 annotation 对象
@@ -109,8 +109,15 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, canA
     const h = node.offsetHeight || 42;
     let left = rect.left + rect.width / 2 - w / 2;
     left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
-    let top = rect.top - h - 8;
-    if (top < 8) top = Math.min(window.innerHeight - h - 8, rect.bottom + 8);
+    // Android WebView also shows its native selection toolbar above the
+    // selected text. Keep our annotation/AI actions below the selection on
+    // narrow touch screens so that toolbar does not cover 翻译 and AI解释.
+    const touchLayout = window.innerWidth <= 640 || window.matchMedia?.('(pointer: coarse)').matches;
+    let top = touchLayout ? rect.bottom + 8 : rect.top - h - 8;
+    if (top < 8 || top + h > window.innerHeight - 8) {
+      top = Math.min(window.innerHeight - h - 8, rect.top - h - 8);
+    }
+    top = Math.max(8, top);
     node.style.left = Math.round(left) + 'px';
     node.style.top = Math.round(top) + 'px';
   }
@@ -151,6 +158,9 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, canA
     menu.appendChild(el('span', 'ann-sep'));
     menu.appendChild(actionBtn('笔记', '写笔记（同时黄色高亮）', () => openNoteEditor(null)));
     menu.appendChild(actionBtn('复制', '复制选中文字', copyPending));
+    menu.appendChild(el('span', 'ann-sep'));
+    menu.appendChild(actionBtn('翻译', '翻译选中文字', () => runSelectionAI('translate'), 'ann-act ann-act-ai'));
+    menu.appendChild(actionBtn('AI解释', '解释选中文字', () => runSelectionAI('explain'), 'ann-act ann-act-ai'));
     place(menu, loc.rect);
   }
 
@@ -165,6 +175,122 @@ export function createAnnotationUI({ layer, bookId, column, getAnnotations, canA
       toast('已复制 ' + p.text.length + ' 字');
     } catch (e) {
       toast('复制失败（浏览器未授权剪贴板）');
+    }
+  }
+
+  /* ---------------- 选中文本 AI：翻译 / 解释 ---------------- */
+  function selectionApi(mode) {
+    const prefix = getAuthState().standalone ? '/api/mobile-ai/' : '/api/ai/';
+    return prefix + (mode === 'translate' ? 'translate' : 'explain');
+  }
+
+  function translationTarget(text) {
+    // The settings page describes the automatic policy: Chinese → English,
+    // other source languages → Simplified Chinese. Users can still choose a
+    // dedicated provider in settings; this hint only supplies its target.
+    const han = (String(text).match(/[\u3400-\u9fff]/g) || []).length;
+    return han >= Math.max(1, String(text).length * 0.08) ? 'English' : '简体中文';
+  }
+
+  function removeAiModal() {
+    if (modal && modal.classList.contains('selection-ai-layer')) { modal.remove(); modal = null; }
+  }
+
+  // Render the model's explanation as a small, dependency-free Markdown
+  // subset. Build DOM nodes instead of assigning innerHTML so model output can
+  // never inject scripts, event handlers or unsafe URLs into the reader.
+  function appendMarkdownInline(parent, source) {
+    const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\*[^*\n]+\*|_[^_\n]+_|\[([^\]\n]+)\]\(([^)\n]+)\))/g;
+    let cursor = 0, match;
+    const addText = text => { if (text) parent.append(document.createTextNode(text)); };
+    while ((match = pattern.exec(String(source))) !== null) {
+      addText(String(source).slice(cursor, match.index));
+      const token = match[0];
+      if (token.startsWith('`')) {
+        const code = el('code', null, token.slice(1, -1)); parent.append(code);
+      } else if (token.startsWith('**') || token.startsWith('__')) {
+        parent.append(el('strong', null, token.slice(2, -2)));
+      } else if (token.startsWith('*') || token.startsWith('_')) {
+        parent.append(el('em', null, token.slice(1, -1)));
+      } else {
+        let url;
+        try { url = new URL(match[3], location.href); } catch { url = null; }
+        if (url && ['http:', 'https:'].includes(url.protocol)) {
+          const link = el('a', null, match[2]); link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; parent.append(link);
+        } else addText(token);
+      }
+      cursor = match.index + token.length;
+    }
+    addText(String(source).slice(cursor));
+  }
+
+  function renderMarkdown(parent, source) {
+    parent.replaceChildren();
+    const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
+    let list = null, ordered = false, inCode = false, codeLines = [];
+    const endList = () => { list = null; };
+    const flushCode = () => { if (!codeLines.length) return; parent.append(el('pre', 'selection-ai-code', codeLines.join('\n'))); codeLines = []; };
+    for (const line of lines) {
+      if (/^\s*```/.test(line)) { if (inCode) { flushCode(); inCode = false; } else { endList(); inCode = true; } continue; }
+      if (inCode) { codeLines.push(line); continue; }
+      if (!line.trim()) { endList(); continue; }
+      const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+      const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+      const numbered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      if (heading) { endList(); const node = el('h' + heading[1].length, 'selection-ai-markdown-heading'); appendMarkdownInline(node, heading[2]); parent.append(node); continue; }
+      if (bullet || numbered) {
+        const isOrdered = !!numbered;
+        if (!list || ordered !== isOrdered) { endList(); ordered = isOrdered; list = el(isOrdered ? 'ol' : 'ul', 'selection-ai-markdown-list'); parent.append(list); }
+        const item = el('li'); appendMarkdownInline(item, (bullet || numbered)[1]); list.append(item); continue;
+      }
+      endList();
+      const quote = line.match(/^\s*>\s?(.*)$/);
+      const block = el(quote ? 'blockquote' : 'p'); appendMarkdownInline(block, quote ? quote[1] : line.trim()); parent.append(block);
+    }
+    if (inCode) flushCode();
+  }
+
+  function showAiModal(mode, text, result, loading = false) {
+    removeAiModal();
+    const title = mode === 'translate' ? '翻译结果' : 'AI 解释';
+    modal = el('div', 'note-layer selection-ai-layer');
+    const box = el('div', 'note-dialog selection-ai-dialog'); box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', title);
+    box.append(el('div', 'note-title', title), el('blockquote', 'note-quote', text));
+    const output = el('div', 'selection-ai-output'); output.setAttribute('aria-live', 'polite');
+    if (loading) output.textContent = '正在请求 AI…'; else if (mode === 'explain') renderMarkdown(output, result); else output.textContent = result;
+    box.append(output);
+    const acts = el('div', 'note-actions');
+    const close = el('button', 'btn', '关闭'); close.type = 'button'; close.addEventListener('click', removeAiModal); acts.append(close);
+    if (!loading) {
+      const copy = el('button', 'btn btn-primary', '复制结果'); copy.type = 'button'; copy.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(result); toast('已复制 AI 结果'); } catch { toast('复制失败'); }
+      }); acts.append(copy);
+    }
+    box.append(acts); modal.append(box);
+    modal.addEventListener('click', e => { if (e.target === modal) removeAiModal(); });
+    document.body.append(modal);
+    if (!loading) setTimeout(() => close.focus(), 30);
+  }
+
+  async function runSelectionAI(mode) {
+    const p = pending;
+    hideMenu(); clearSelection();
+    if (!p || !p.text) return;
+    showAiModal(mode, p.text, '', true);
+    try {
+      let data;
+      const context = getContext ? getContext(p.chapter, p.para, p.text) : p.text;
+      data = await apiPost(selectionApi(mode), {
+        text: p.text,
+        context,
+        ...(mode === 'translate' ? { target_language: translationTarget(p.text) } : {}),
+        ...(getAuthState().standalone ? { book_id: bookId } : {}),
+      });
+      const result = String(data?.text || data?.result || data?.translation || data?.explanation || '').trim();
+      if (!result) throw new Error('模型没有返回结果');
+      showAiModal(mode, p.text, result);
+    } catch (err) {
+      showAiModal(mode, p.text, '请求失败：' + (err.message || '请检查文本模型设置'));
     }
   }
 

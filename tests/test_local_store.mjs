@@ -1,0 +1,72 @@
+// Fast data-layer regression. IndexedDB itself is covered by cdp_offline.mjs.
+import assert from 'node:assert/strict';
+
+const values = new Map();
+globalThis.localStorage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)) };
+const { localStore } = await import('../web/util/local-store.js');
+await localStore.putBook({ id: 'book-test', title: 'Offline test', format: 'txt', chapter_count: 1 });
+await localStore.putChapter('book-test', 0, { idx: 0, title: '第一章', paragraphs: ['测试正文。'] });
+assert.equal((await localStore.getChapter('book-test', 0)).paragraphs[0], '测试正文。');
+assert.equal((await localStore.listBooks()).length, 1);
+await assert.rejects(() => localStore.putBook({ id: 'secret', api_key: 'not-a-real-key' }), /密钥/);
+await localStore.putBookmark({ id: 'bm-test', book_id: 'book-test', chapter: 0, para: 0, offset: 0 });
+assert.equal((await localStore.listBookmarks('book-test')).length, 1);
+await localStore.putAnnotation({ id: 'ann-test', book_id: 'book-test', chapter: 0, para: 0, start_offset: 0, end_offset: 2, text: '测试', color: 'yellow' });
+assert.equal((await localStore.listAnnotations('book-test'))[0].text, '测试');
+await localStore.enqueue('annotation', 'upsert', 'ann-test', { book_id: 'book-test', chapter: 0, para: 0, start_offset: 0, end_offset: 2, text: '测试', note: '离线写入', sync_revision: 4, api_key: 'must-not-copy' });
+const batch = await localStore.syncBatch();
+assert.equal(batch.operations.length, 1);
+assert.equal(batch.operations[0].base_revision, 4);
+assert.equal(batch.operations[0].seq, 1);
+assert.equal(batch.operations[0].payload.api_key, undefined);
+assert.equal(batch.operations[0].payload.id, undefined);
+await localStore.acknowledge([batch.operations[0].op_id]);
+assert.equal((await localStore.pendingOps()).length, 0);
+console.log('[PASS] local store isolation, reader entities, strict operation payload, revision and acknowledgment');
+
+for (let index = 0; index < 605; index++) await localStore.enqueue('progress', 'upsert', 'book-' + index, { chapter: 0, para: 0, offset: index, updated_at: 1000 });
+let requests = 0, remoteCursor = 0;
+globalThis.fetch = async (url, options = {}) => {
+  let value;
+  if (url === '/api/sync/device') value = { device: { last_seq: 0 } };
+  else if (url === '/api/sync/push') {
+    requests += 1; const batch = JSON.parse(options.body);
+    assert.ok(batch.operations.length <= 100);
+    assert.equal(new Set(batch.operations.map(op => op.seq)).size, batch.operations.length);
+    value = { accepted: batch.operations.map(op => ({ op_id: op.op_id, cursor: ++remoteCursor })), duplicates: [], conflicts: [] };
+  } else if (url.startsWith('/api/sync/pull')) value = { operations: [], cursor: remoteCursor, has_more: false };
+  else if (url.startsWith('/api/sync/snapshot')) value = { books: [], progress: [], bookmarks: [], annotations: [], cursor: remoteCursor, has_more: false };
+  else throw new Error('Unexpected URL ' + url);
+  return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
+};
+await Promise.all([localStore.sync(), localStore.sync()]);
+assert.equal(requests, 7);
+assert.equal((await localStore.allPendingOps()).length, 0);
+console.log('[PASS] multi-batch push, concurrent sync calls serialize and no pending edits remain');
+
+await localStore.putAnnotation({ id: 'conflict-ann', book_id: 'book-test', chapter: 0, para: 0, start_offset: 0, end_offset: 2, text: '测试', note: '本机版本', sync_revision: 7 });
+const disputed = await localStore.enqueue('annotation', 'upsert', 'conflict-ann', (await localStore.listAnnotations('book-test')).find(a => a.id === 'conflict-ann'));
+const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
+await localStore.meta('sync:conflicts', [{ op_id: disputed.opId, entity: 'annotation', entity_id: 'conflict-ann', reason: 'revision_conflict', revision: 9, current_updated_at: futureTimestamp }]);
+await localStore.resolveConflict(disputed.opId, 'local');
+let queued = await localStore.allPendingOps();
+assert.equal(queued.length, 1); assert.equal(queued[0].baseRevision, 9); assert.equal(queued[0].payload.note, '本机版本');
+assert.equal(queued[0].payload.updated_at, futureTimestamp + 1);
+await localStore.meta('sync:conflicts', [{ op_id: queued[0].opId, entity: 'annotation', entity_id: 'conflict-ann', reason: 'revision_conflict', revision: 10 }]);
+const previousDevice = localStore.deviceId, previousOp = queued[0].opId;
+await localStore.resetDevice();
+queued = await localStore.allPendingOps();
+assert.notEqual(localStore.deviceId, previousDevice); assert.equal(queued.length, 1); assert.equal(queued[0].seq, 1);
+assert.notEqual(queued[0].opId, previousOp); assert.equal(queued[0].deviceId, localStore.deviceId);
+assert.equal(queued[0].payload.note, '本机版本'); assert.equal((await localStore.meta('sync:conflicts'))[0].op_id, queued[0].opId);
+await localStore.resolveConflict(queued[0].opId, 'server');
+assert.equal((await localStore.allPendingOps()).length, 0); assert.equal((await localStore.meta('sync:conflicts')).length, 0);
+assert.ok(!(await localStore.listAnnotations('book-test')).some(a => a.id === 'conflict-ann'));
+console.log('[PASS] keep-local revision, device reset preserves outbox/conflicts, and keep-server removes the local draft');
+await localStore.commitLocalEdit('progress', 'upsert', 'book-test', { chapter: 0, para: 0, offset: 2, updated_at: 1000 });
+const progressConflict = (await localStore.allPendingOps())[0];
+await localStore.meta('sync:conflicts', [{ op_id: progressConflict.opId, entity: 'progress', entity_id: 'book-test', reason: 'server_newer', revision: 12, current_updated_at: futureTimestamp }]);
+await localStore.resolveConflict(progressConflict.opId, 'local');
+assert.equal((await localStore.allPendingOps())[0].payload.updated_at, futureTimestamp + 1);
+assert.equal((await localStore.getProgress('book-test')).updated_at, futureTimestamp + 1);
+console.log('[PASS] explicit local choice beats a future server timestamp for both progress and annotations');

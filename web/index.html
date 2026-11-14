@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f1ea">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
 <title>Velmira</title>
 <script>
   // 尽早应用主题，避免首屏闪白（原生脚本，不产生额外请求）
@@ -11,8 +13,11 @@
     var _velmira = JSON.parse(localStorage.getItem('velmira.r1') || '{}');
     if (_velmira && ['day', 'night', 'sepia'].includes(_velmira.theme)) document.documentElement.dataset.theme = _velmira.theme;
   } catch (e) { /* ignore */ }
+  document.querySelector('meta[name="theme-color"]').content = ({day:'#f4f1ea',night:'#14161b',sepia:'#e9dcc2'})[document.documentElement.dataset.theme];
+  document.querySelector('meta[name="color-scheme"]').content = document.documentElement.dataset.theme === 'night' ? 'dark' : 'light';
 </script>
 <link rel="icon" href="data:,">
+<link rel="manifest" href="./manifest.webmanifest">
 <link rel="stylesheet" href="./styles/main.css">
 </head>
 <body>
@@ -30,7 +35,7 @@
     <div class="app-shell">
       <aside class="app-rail" aria-label="主导航">
         <div class="rail-top">
-          <a class="rail-brand" href="/" aria-label="Velmira 书架"><span class="wordmark">Velmira</span><span class="rail-ver">v0.4</span></a>
+          <a class="rail-brand" href="/" aria-label="Velmira 书架"><span class="wordmark">Velmira</span><span class="rail-ver">v0.5</span></a>
         </div>
 
         <nav class="rail-nav" aria-label="书库视图">

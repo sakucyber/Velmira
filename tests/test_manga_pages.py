@@ -1,10 +1,12 @@
 """M4 composition, versioning and portable CBZ checks with disposable data."""
 import io
 import json
+import asyncio
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import zipfile
 from xml.etree import ElementTree as ET
 
@@ -13,7 +15,7 @@ from PIL import Image
 
 from server.app import db, importer
 from server.app.main import create_app
-from server.app.manga import composition as c, pages as p, queue
+from server.app.manga import composition as c, pages as p, queue, storyboard
 from server.app.manga.models import MangaError
 from manga_fixture import seed
 
@@ -79,6 +81,60 @@ class PageTests(unittest.TestCase):
         overflow = {"width": 640, "height": 960, "layout": "3x2", "panels": [{"job_id": self.job, "caption": "汉" * 300, "dialogue": "字" * 400}]}
         self.call("/pages", overflow, status=409)
         self.assertEqual(self.call("/pages", method="GET")["pages"], [])
+
+    def test_long_source_quote_is_metadata_and_never_typeset(self):
+        quote = "仅供定位的原文。" * 750
+        span = {"chapter": 0, "start": 0, "end": len(quote), "quote": quote}
+        spec = c.validate({**self.spec, "panels": [{**self.spec["panels"][0], "source_span": span}]})
+        self.assertEqual(spec["panels"][0]["source_span"]["quote"], quote)
+        source = self.root / "quote-source.png"
+        Image.new("RGB", (64, 64), "red").save(source)
+        without, with_quote = self.root / "without-quote.png", self.root / "with-quote.png"
+        c.compose(c.validate(self.spec), [source], without)
+        c.compose(spec, [source], with_quote)
+        self.assertEqual(without.read_bytes(), with_quote.read_bytes())
+        with self.assertRaises(MangaError):
+            c.validate({**self.spec, "panels": [{"job_id": self.job, "source_span": {**span, "quote": "字" * 20001}}]})
+
+    def test_legacy_page_accepts_new_source_metadata_but_captured_span_stays_checked(self):
+        page = self.create()
+        snap = json.loads(self.sql("SELECT snapshot_json FROM render_jobs WHERE id=?", (self.job,))[0]["snapshot_json"])
+        span = {"chapter": 0, "start": 0, "end": 14, "quote": "Neutral sample"}
+        snap["source_span"] = span
+        self.sql("UPDATE render_jobs SET snapshot_json=? WHERE id=?", (json.dumps(snap), self.job))
+        self.assertEqual(self.call("/pages", method="GET")["pages"][0]["status"], "ready")
+        self.call("/exports", status=201)
+        # A new save captures the locator and must detect subsequent remapping.
+        captured = json.loads(self.sql("SELECT sources_json FROM manga_pages WHERE id=?", (page["id"],))[0]["sources_json"])
+        captured[0]["source_span"] = span
+        self.sql("UPDATE manga_pages SET sources_json=? WHERE id=?", (json.dumps(captured), page["id"]))
+        self.assertEqual(self.call("/pages", method="GET")["pages"][0]["status"], "ready")
+        snap["source_span"] = {**span, "end": 8, "quote": "Neutral "}
+        self.sql("UPDATE render_jobs SET snapshot_json=? WHERE id=?", (json.dumps(snap), self.job))
+        self.assertEqual(self.call("/pages", method="GET")["pages"][0]["status"], "stale")
+        self.call("/exports", status=409)
+
+    def test_page_candidates_accept_storyboard_snapshot_without_scene(self):
+        panel = {"kind": "environment", "shot": "wide", "subjects": [], "action": "a quiet park",
+                 "environment": "a park", "lighting": "", "emotion": "", "caption": "宁静公园",
+                 "dialogue": "", "speaker": "", "source_quote": "Neutral sample"}
+        provider = SimpleNamespace(complete=AsyncMock(return_value={"panels": [panel]}))
+        with patch.object(storyboard.director, "text_config", return_value={"provider": "mock", "base_url": "http://fixture", "model": "fixture"}), \
+                patch.object(storyboard, "make_provider", return_value=provider):
+            board = asyncio.run(storyboard.create("m3-book", "m3-scene"))
+        conn = db.get_conn()
+        try:
+            with conn:
+                job = dict(storyboard.enqueue(conn, "m3-book", board["id"], 0))
+        finally:
+            conn.close()
+        self.assertNotIn("scene", json.loads(job["snapshot_json"]))
+        self.sql("UPDATE render_jobs SET status='running' WHERE id=?", (job["id"],))
+        queue.process(job["id"])
+        result = self.call("/page-panels", method="GET")["panels"]
+        candidate = next(item for item in result if item["id"] == job["id"])
+        self.assertEqual(candidate["summary"], "宁静公园")
+        self.assertIsNone(candidate["error"])
 
     def test_reject_unreviewed_cross_book_reference_and_stale_images(self):
         pending = self.panel(approve=False)
@@ -203,6 +259,25 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(pages), 2)
         self.assertEqual([p["spec"]["layout"] for p in pages], ["1x1", "2x1"])
         self.assertEqual(pages[1]["spec"]["panels"][0]["job_id"], ids[0])
+
+
+class SourceIntegrityTests(unittest.TestCase):
+    def test_compatibility_only_ignores_absent_new_optional_fields(self):
+        saved = {"job_id": "render_1", "image_path": "assets/1.png", "image_hash": "sha",
+                 "config_hash": "cfg", "chapter": 2, "para": 3}
+        actual = {**saved, "board_id": "board_1", "source_span": {"chapter": 2, "start": 0, "end": 9}}
+        self.assertTrue(p.same_sources([actual], [saved]))
+        self.assertTrue(p.same_sources([actual], [actual]))
+        for key in saved:
+            with self.subTest(required=key):
+                self.assertFalse(p.same_sources([{**actual, key: "changed"}], [saved]))
+                self.assertFalse(p.same_sources([actual], [{k: v for k, v in saved.items() if k != key}]))
+        for key in ("board_id", "source_span"):
+            with self.subTest(optional=key):
+                self.assertFalse(p.same_sources([{**actual, key: "changed"}], [actual]))
+                self.assertFalse(p.same_sources([{k: v for k, v in actual.items() if k != key}], [actual]))
+        self.assertFalse(p.same_sources([actual], [{**saved, "unknown": 1}]))
+        self.assertFalse(p.same_sources([actual], []))
 
 
 if __name__ == "__main__": unittest.main()

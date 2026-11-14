@@ -9,7 +9,7 @@ from PIL import Image
 
 from .. import config, db
 from ..ai.models import identity_hash, render_identity, stable_json, CARD_FIELDS
-from .models import DEFAULTS, SHOTS, MangaError, build_prompt, check_identity, digest, resolve_form, validate_config
+from .models import DEFAULTS, SHOTS, STYLE_PRESETS, MangaError, build_prompt, check_identity, digest, resolve_form, validate_config
 
 
 def uid(prefix):
@@ -25,14 +25,40 @@ def configuration(conn, book_id):
     book(conn, book_id)
     row = conn.execute("SELECT config_json FROM render_configs WHERE book_id=?", (book_id,)).fetchone()
     saved = json.loads(row[0]) if row else {}
+    legacy_anime = "Japanese anime illustration, expressive anime eyes, refined cel shading, clean line art, rich colors, cinematic composition"
+    legacy_negative = "nsfw, worst quality, bad anatomy, watermark, text, speech bubbles, extra fingers, duplicate person, crowd, background people, additional faces"
     if saved and "style_preset" not in saved:
         # Migrate the previous built-in default to anime, preserving explicit custom styles.
-        from .models import STYLE_PRESETS
-        if saved.get("style") == STYLE_PRESETS["semi_realistic"]["prompt"]:
+        builtin = next((key for key, value in STYLE_PRESETS.items() if saved.get("style") == value["prompt"]), None)
+        if builtin and builtin != "semi_realistic":
+            saved["style_preset"] = builtin
+        elif saved.get("style") in (None, "", DEFAULTS["style"], legacy_anime, STYLE_PRESETS["semi_realistic"]["prompt"]):
             saved["style"] = DEFAULTS["style"]
+            saved["style_preset"] = "anime"
         else:
             saved["style_preset"] = "custom"
-    return {**DEFAULTS, **saved}
+    if saved.get("style_preset") in STYLE_PRESETS and not saved.get("style"):
+        saved["style"] = STYLE_PRESETS[saved["style_preset"]]["prompt"]
+    if saved.get("style_preset") == "anime" and saved.get("style") == legacy_anime:
+        saved["style"] = DEFAULTS["style"]
+    if saved.get("negative") == legacy_negative and saved.get("style_preset", "anime") == "anime":
+        saved["negative"] = DEFAULTS["negative"]
+    if saved.get("style_preset", "anime") != "anime" and saved.get("negative", DEFAULTS["negative"]) == DEFAULTS["negative"]:
+        from .models import GENERAL_NEGATIVE
+        saved["negative"] = GENERAL_NEGATIVE
+    shared = {}
+    if not saved:
+        from ..ai.settings import load_settings
+        from ..ai.routing import is_enabled
+        image = load_settings("image")
+        if is_enabled("image"):
+            # A new book follows the configured cloud image pool. Existing
+            # book choices, including explicit ComfyUI settings, stay intact.
+            shared = {"provider": "openai-images", "width": 1024, "height": 1024}
+        elif image["enabled"] and image["base_url"] and image["model"]:
+            shared = {"provider": "openai-images", "width": 1024, "height": 1024,
+                      **{k: image[k] for k in ("base_url", "model", "rpm", "max_concurrency", "reference_api")}}
+    return {**DEFAULTS, **shared, **saved}
 
 
 def form_row(conn, book_id, form_id):
@@ -61,6 +87,7 @@ def stale(conn, form_id):
     conn.execute("UPDATE form_refs SET accepted=0 WHERE form_id=?", (form_id,))
     conn.execute("DELETE FROM auto_manga_refs WHERE ref_id IN (SELECT id FROM form_refs WHERE form_id=?)", (form_id,))
     conn.execute("UPDATE render_jobs SET status='stale',error='人物身份已变化，请按新版重新生成',updated_at=? WHERE form_id=? AND status!='cancelled'", (int(time.time()), form_id))
+    conn.execute("UPDATE render_jobs SET status='stale',error='同框人物身份已变化，请重新生成',updated_at=? WHERE id IN (SELECT job_id FROM render_cast WHERE form_id=?) AND status!='cancelled'", (int(time.time()), form_id))
 
 
 def asset_path(relative):
@@ -189,6 +216,11 @@ def enqueue(conn, book_id, payload, *, automatic=False):
         text_plan = resolve_plan(conn, book_id, payload["plan_id"], {**payload, "form_id": form["id"]}, cfg)
     prompt = build_prompt(cfg, form["identity_block"], scene, shot, action, ref is not None,
                           visual_prompt=text_plan["visual_prompt"] if text_plan else None)
+    from ..ai.features import image_prompt, load as feature_settings
+    prompt = image_prompt(prompt)
+    negative = feature_settings()["prompts"]["negative"]
+    if negative.strip():
+        cfg = {**cfg, "negative": cfg["negative"] + ", " + negative}
     snapshot = {"version": 1, "config": cfg, "form": dict(form), "reference": ref, "scene": scene,
                 "scene_hash": digest(scene), "chapter": chapter, "para": para, "shot": shot, "action": action,
                 "seed": seed, "prompt": prompt, "prompt_hash": identity_hash(prompt), "flashback": flashback}

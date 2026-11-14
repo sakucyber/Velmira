@@ -314,3 +314,11 @@ body.comic-mode .reader-main { background: #0f1116; }
   .comic-img.is-page-in { animation: none; }
   .comic-spinner { animation: none; border-top-color: #e08a58; }
 }
+
+.storyboard-card { border: 1px solid var(--border, #7775); border-radius: 10px; padding: 12px; margin: 12px 0; min-width: 0; }
+.storyboard-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 8px; }
+.storyboard-editor textarea { width: 100%; min-height: 62px; box-sizing: border-box; resize: vertical; }
+.storyboard-editor select { max-width: 100%; }
+.storyboard-subject { padding: 8px; border: 1px solid var(--border, #7775); border-radius: 8px; }
+.storyboard-reference-summary { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: var(--surface-2, #f5f5f5); }
+.storyboard-reference-image { display: block; margin: 8px auto 4px; border-radius: 6px; border: 1px solid var(--border, #7775); }

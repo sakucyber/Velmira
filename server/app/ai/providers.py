@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from .models import CARD_FIELDS
 
 GPT_OSS_CONTEXT_TOKENS = 128000
-MAX_OUTPUT_TOKENS = 3000
+MAX_OUTPUT_TOKENS = 6000
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -21,23 +21,37 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request_json(url, *, api_key="", body=None):
+class ProviderRequestError(RuntimeError):
+    """A safe failure category; never retain an upstream response body or key."""
+
+    def __init__(self, message, *, status_code=None, error_code="request_failed"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+def request_json(url, *, api_key="", body=None, timeout=120):
     request = urllib.request.Request(url, data=json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None)
     request.add_header("Content-Type", "application/json")
     request.add_header("User-Agent", "Velmira/0.4")
     if api_key:
         request.add_header("Authorization", "Bearer " + api_key)
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=120) as response:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             raw = response.read(4 * 1024 * 1024 + 1)
             if len(raw) > 4 * 1024 * 1024:
-                raise RuntimeError("文本 API 返回内容过大")
+                raise ProviderRequestError("文本 API 返回内容过大", error_code="invalid_response")
             return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # Do not persist arbitrary gateway error bodies, which may echo credentials.
-        raise RuntimeError(f"文本 API 请求失败（HTTP {exc.code}）") from None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        raise RuntimeError("文本 API 连接失败或返回格式无效，请检查连接、模型和密钥") from None
+        raise ProviderRequestError(f"文本 API 请求失败（HTTP {exc.code}）", status_code=exc.code,
+                                   error_code="http_error") from None
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        timed_out = isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
+        raise ProviderRequestError("文本 API 请求超时" if timed_out else "文本 API 连接失败，请检查连接、模型和密钥",
+                                   error_code="timeout" if timed_out else "connection_error") from None
+    except ValueError:
+        raise ProviderRequestError("文本 API 返回格式无效", error_code="invalid_response") from None
 
 
 class TextProvider(Protocol):
@@ -148,42 +162,90 @@ class OpenAICompatProvider:
     async def complete(self, *, system: str, user: str, schema: dict | None = None, temperature: float = 0.2) -> dict | str:
         return await asyncio.to_thread(self._complete_sync, system, user, schema, temperature)
 
-    def _complete_sync(self, system: str, user: str, schema: dict | None, temperature: float) -> dict | str:
+    async def complete_validated(self, *, validate, system: str, user: str,
+                                 schema: dict | None = None, temperature: float = 0.2) -> dict | str:
+        """Validate routed candidates before committing to one model's response.
+
+        The caller retains the final normalization step. Validators used here
+        check response data and may update an in-memory correction prompt, but
+        must not persist application state.
+        """
+        return await asyncio.to_thread(self._complete_sync, system, user, schema, temperature, validate)
+
+    def _complete_sync(self, system: str, user: str, schema: dict | None, temperature: float, validate=None) -> dict | str:
         if not isinstance(system, str) or not isinstance(user, str):
             raise ValueError("文本模型仅接受文字输入")
+        if self.local_settings:
+            from .features import text_system
+            system = text_system(system)
+        if self.local_settings:
+            from . import routing
+            if routing.is_enabled("text"):
+                def invoke(cfg):
+                    raw = self._complete_once(system, user, schema, temperature, cfg)
+                    if validate is not None:
+                        try:
+                            validate(raw)
+                        except Exception:
+                            raise ProviderRequestError("文本 API 输出未通过结构校验", error_code="invalid_response") from None
+                    return raw
+                return routing.run("text", invoke)
+            from .settings import load_settings
+            cfg = {**load_settings(), "base_url": self.base_url, "model": self.model, "credential_slot": "text"}
+        else:
+            cfg = {"base_url": self.base_url, "model": self.model}
+        return self._complete_once(system, user, schema, temperature, cfg)
+
+    def _complete_once(self, system, user, schema, temperature, cfg):
+        model = cfg["model"]
+        max_tokens = cfg.get("max_tokens", MAX_OUTPUT_TOKENS)
         # UTF-8 byte count is a conservative upper bound for this byte-level tokenizer.
         # Reserve output and message framing without requiring tokenizer weights locally.
-        if self.model.lower().split("/")[-1] == "gpt-oss-120b":
+        if model.lower().split("/")[-1] == "gpt-oss-120b":
             input_bound = len(system.encode("utf-8")) + len(user.encode("utf-8")) + 1024
-            if input_bound + MAX_OUTPUT_TOKENS > GPT_OSS_CONTEXT_TOKENS:
+            if input_bound + max_tokens > GPT_OSS_CONTEXT_TOKENS:
                 raise ValueError("文本上下文超过 gpt-oss-120b 的保守 128K 预算，请缩小片段范围")
-        url = self.base_url.rstrip("/")
+        url = cfg["base_url"].rstrip("/")
         if not url.endswith("/chat/completions"):
             url += "/chat/completions"
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": max(0.0, min(2.0, float(temperature))),
-            "max_tokens": MAX_OUTPUT_TOKENS,
+            "temperature": max(0.0, min(2.0, float(cfg.get("temperature", temperature)))),
+            "max_tokens": max_tokens,
         }
         if schema:
             body["response_format"] = {"type": "json_object"}
         if self.local_settings:
             from .settings import api_key_for
-            key = api_key_for(self.base_url)
+            key = api_key_for(cfg["base_url"], cfg.get("credential_slot", "text"))
         else:
             key = os.environ.get(self.api_key_env, "") if self.api_key_env else ""
-        payload = request_json(url, api_key=key, body=body)
+        from .limits import request_slot
+        if not cfg.get("json_mode", True):
+            body.pop("response_format", None)
+        with request_slot((cfg["base_url"], "text"), cfg.get("rpm", 0), cfg.get("max_concurrency", 1),
+                          wait_timeout=0 if cfg.get("_route_id") else None):
+            payload = request_json(url, api_key=key, body=body, timeout=cfg.get("timeout", 120))
         try:
             content = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("文本 provider 返回缺少 choices[0].message.content") from exc
+        except (KeyError, IndexError, TypeError):
+            raise ProviderRequestError("文本 provider 返回缺少 choices[0].message.content", error_code="invalid_response") from None
         if isinstance(content, str):
             stripped = content.strip()
+            if not stripped:
+                raise ProviderRequestError("文本 API 返回空内容", error_code="invalid_response")
             try:
-                return json.loads(stripped)
+                result = json.loads(stripped)
             except json.JSONDecodeError:
+                if schema and cfg.get("_route_id"):
+                    raise ProviderRequestError("文本 API 未返回有效 JSON", error_code="invalid_response") from None
                 return stripped
+            if schema and cfg.get("_route_id") and not isinstance(result, dict):
+                raise ProviderRequestError("文本 API 未返回 JSON 对象", error_code="invalid_response")
+            return result
+        if not isinstance(content, dict) or not content:
+            raise ProviderRequestError("文本 API 返回内容格式无效", error_code="invalid_response")
         return content
 
 

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  M1（Velmira v0.4.0）一键独立验收：
+  M1（Velmira v0.4.2）一键独立验收：
   冷启动隔离服务 -> TXT M0 回归(41) -> M1 API(A/C/D/E/F) -> 品牌/体积/node --check ->
   单测(37) -> 重启持久化 -> CDP 前端实测(G) -> 旧库升级(I) -> 清理。
   只写 tests/ 与 scripts/，不改 server/ web/ docs/ book/。
@@ -33,7 +33,7 @@ $failures = @()
 function Step($name) { Write-Host ""; Write-Host "=== $name ===" -ForegroundColor Cyan }
 function Start-Server([int]$p, [string]$logName) {
   $log = Join-Path $root ("tests/" + $logName)
-  $proc = Start-Process -FilePath "python" -ArgumentList "-m","uvicorn","server.app.main:app","--host","127.0.0.1","--port","$p" -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError ($log + ".err") -WindowStyle Hidden
+  $proc = Start-Process -FilePath "python" -ArgumentList "-m","uvicorn","server.app.main:app","--host","127.0.0.1","--port","$p","--no-proxy-headers" -WorkingDirectory $root -PassThru -RedirectStandardOutput $log -RedirectStandardError ($log + ".err") -WindowStyle Hidden
   for ($i = 0; $i -lt 80; $i++) {
     Start-Sleep -Milliseconds 250
     try { $h = Invoke-RestMethod -Uri "http://127.0.0.1:$p/api/health" -TimeoutSec 2; if ($h.ok) { return @{ proc = $proc; health = $h } } } catch { }
@@ -53,9 +53,9 @@ try {
   $started = Start-Server $Port "m1_verify_server.log"
   $server = $started.proc
   Write-Host ("health=" + ($started.health | ConvertTo-Json -Compress))
-  if ($started.health.name -ne "Velmira" -or $started.health.version -ne "0.4.0") { $failures += "健康检查 name/version 不符" }
+  if ($started.health.name -ne "Velmira" -or $started.health.version -ne "0.4.2") { $failures += "健康检查 name/version 不符" }
 
-  Step "2. TXT M0 回归（tests/verify_m0.py，版本断言已更新 0.4.0）"
+  Step "2. TXT M0 回归（tests/verify_m0.py，版本断言已更新 0.4.2）"
   python tests/verify_m0.py --base "http://127.0.0.1:$Port" 2>&1 | Select-Object -Last 4
   if ($LASTEXITCODE -ne 0) { $failures += "verify_m0.py FAIL（exit $LASTEXITCODE）" }
 
@@ -85,7 +85,8 @@ try {
   $cssTotal = (Get-ChildItem web -Recurse -Filter *.css | Measure-Object -Property Length -Sum).Sum
   Write-Host ("JS=" + $jsTotal + " B (" + [math]::Round($jsTotal / 1024, 1) + " KB)/" + $jsFiles.Count + " 文件；CSS=" + $cssTotal + " B；index.html=" + (Get-Item web/index.html).Length + " B；node fail=" + $bad)
   if ($bad -gt 0) { $failures += "node --check 失败 $bad" }
-  if ($jsTotal -ge 230 * 1024) { $failures += "JS 总量超 230KB" }
+  # Includes the optional settings and offline modules in the unminified total.
+  if ($jsTotal -ge 400 * 1024) { $failures += "JS 总量超 400KB" }
   if (-not (Select-String -Path web/ui/library.js -Pattern 'fmt-badge' -SimpleMatch -Quiet)) { $failures += "书库未发现格式徽标实现" }
 
   Step "5. 单测（37）"

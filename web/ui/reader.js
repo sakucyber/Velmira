@@ -7,10 +7,11 @@
 import {
   $, el, store, toast, debounce, clamp, intOrNull, fmtPercent,
   THEMES, FONT_SIZE, applyTheme, applyFontSize, normalizeFontSize,
-  apiGet, apiPut, apiPost, apiDelete, apiPatch,
+  apiGet, apiPut, apiPost, apiDelete, apiPatch, getAuthState,
 } from '../util/core.js';
 
 export async function mountReader({ bookId, params, debug }) {
+  const standalone = !!getAuthState().standalone;
   const dom = {
     title: $('#book-title'),
     chapterLabel: $('#chapter-label'),
@@ -57,10 +58,18 @@ export async function mountReader({ bookId, params, debug }) {
     bookmarksLoaded: false,
     annotations: [],
   };
+  if (standalone) {
+    state.segmentsAvailable = false;
+    dom.segmentsBtn.hidden = true;
+    dom.aiBtn.hidden = false;
+    dom.aiBtn.title = '手机 AI：文本分析与生图';
+  }
 
   // 分页内核按需动态加载：CBZ 漫画分支不需要 paging.js（省 1 个首屏请求）
   let pager = null;
   let rightComics = null, rightComicsPromise, autoStatus = null;
+  let readingSync = null, readingSyncPromise = null;
+  let readingHighlightNode = null;
 
   let panels = null;
   let chapterAc = null;
@@ -175,12 +184,17 @@ export async function mountReader({ bookId, params, debug }) {
   }
 
   bindEvents();
+  // Load the synchronized novel/comic view after the first chapter is ready.
+  // A missing map is a normal state (no generated panels yet), so it must not
+  // block or alter the ordinary text reader.
+  startReadingSync();
   // Start after the reading viewport is ready; controls also remain available on phones.
   const autoToggle = el('button', 'btn btn-tool auto-manga-toggle', '自动漫画');
   autoToggle.type = 'button'; autoToggle.setAttribute('role', 'switch');
   autoToggle.setAttribute('aria-label', '自动生成连贯漫画'); autoToggle.setAttribute('aria-checked', 'false'); autoToggle.disabled = true;
   const autoView = el('button', 'btn btn-tool auto-manga-view', '漫画进度'); autoView.type = 'button';
   dom.settingsBtn.parentElement.prepend(autoToggle, autoView);
+  if (standalone) { autoToggle.hidden = true; autoView.hidden = true; }
   let autoBusy = false, autoTimer;
   const autoAc = new AbortController();
   function showAuto(value) {
@@ -191,6 +205,7 @@ export async function mountReader({ bookId, params, debug }) {
     autoToggle.disabled = autoBusy;
     autoToggle.title = value.message;
     autoView.textContent = value.pages ? '漫画 · ' + value.pages + ' 页' : value.status === 'error' ? '漫画 · 已中断' : '漫画进度';
+    if (readingSync) { readingSync.refresh?.(); return; }
     if (rightComics) rightComics.update(value, state.chapter);
     else if (value.pages && !rightComicsPromise) {
       rightComicsPromise = import('./reader-comics.js').then(({ mountReaderComics }) => {
@@ -222,7 +237,7 @@ export async function mountReader({ bookId, params, debug }) {
     } catch { /* Reading remains usable when the status service is temporarily unavailable. */ }
     if (!autoAc.signal.aborted) autoTimer = setTimeout(refreshAuto, 5000);
   }
-  setTimeout(refreshAuto, 800);
+  if (!standalone) setTimeout(refreshAuto, 800);
   window.addEventListener('pagehide', () => { autoAc.abort(); clearTimeout(autoTimer); }, { once: true });
   updatePercentFromUrl();
   updateDebug();
@@ -346,9 +361,9 @@ export async function mountReader({ bookId, params, debug }) {
       if (err && err.name === 'AbortError') return;
       if (token !== loadToken) return;
       dom.chapterLabel.textContent = '第 ' + (idx + 1) + ' 章 · 加载失败';
-      const errNode = el('p', 'load-error', '章节加载失败，请检查网络后重试');
+      const errNode = el('p', 'load-error', '此章节尚未保存到本机，请联网打开或先下载这本书');
       dom.column.replaceChildren(errNode);
-      toast('章节加载失败');
+      toast('此章节尚未离线保存');
       return;
     }
     if (token !== loadToken) return;
@@ -357,10 +372,12 @@ export async function mountReader({ bookId, params, debug }) {
     dom.chapterLabel.textContent = chapterHead;
     dom.chapterLabel.title = chapterHead;
     const paragraphs = data.paragraphs || [];
+    const illustrations = Array.isArray(data.illustrations) ? data.illustrations : [];
+    const paragraphFormats = Array.isArray(data.paragraph_formats) ? data.paragraph_formats : [];
     const chapterTitle = data.title || '';
     data = null; // 释放章节 JSON 外壳，正文数组交给 pager 持有
 
-    await pager.load(idx, chapterTitle, paragraphs, target);
+    await pager.load(idx, chapterTitle, paragraphs, target, illustrations, paragraphFormats);
     if (token !== loadToken) return;
     playChapterIn();
 
@@ -377,6 +394,7 @@ export async function mountReader({ bookId, params, debug }) {
     updatePercentUI();
     updateBookmarkBtn();
     if (debug) logDebug('chapter');
+    readingSync?.refresh?.();
   }
 
   function goChapter(idx) {
@@ -426,6 +444,58 @@ export async function mountReader({ bookId, params, debug }) {
     checkFinished();
     updateArrowState();
     updateDebug();
+    if (readingSync) readingSync.update(info);
+  }
+
+  function startReadingSync() {
+    if (readingSync || readingSyncPromise || standalone) return;
+    readingSyncPromise = import('./reading-sync.js').then(({ mountReadingSync }) => mountReadingSync({
+      bookId,
+      main: dom.main,
+      foot: document.querySelector('.reader-foot'),
+      viewport: dom.viewport,
+      pager,
+      getState: () => state,
+      getParagraphs: () => (pager && Array.isArray(pager.paragraphs) ? pager.paragraphs : []),
+      navigate: jumpTo,
+      onTextProgress: ({ chapter, para, offset }) => {
+        if (chapter !== state.chapter || !pager) return;
+        return pager.gotoPara(para, offset).then(() => {
+          state.para = para; state.offset = offset;
+          persist(); syncUrl(); scheduleSave();
+          readingHighlightNode?.classList.remove('reading-sync-spoken');
+          const node = dom.column.querySelector('[data-i="' + para + '"]');
+          readingHighlightNode = node;
+          node?.classList.add('reading-sync-spoken');
+          try {
+            if (!node || typeof Highlight === 'undefined' || !CSS.highlights) return;
+            const points = Array.from(node.textContent || '');
+            const start = points.slice(0, Math.max(0, Number(offset) || 0)).join('').length;
+            const end = points.slice(0, Math.max(0, Number(offset) || 0) + 1).join('').length;
+            const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+            const range = document.createRange(); let text; let count = 0; let foundStart = false;
+            while ((text = walker.nextNode())) {
+              const length = text.nodeValue.length;
+              if (!foundStart && start <= count + length) { range.setStart(text, Math.max(0, start - count)); foundStart = true; }
+              if (foundStart && end <= count + length) { range.setEnd(text, Math.max(0, end - count)); break; }
+              count += length;
+            }
+            if (foundStart) CSS.highlights.set('velmira-reading-cursor', new Highlight(range));
+          } catch (_) { /* Paragraph highlighting is the compatible fallback. */ }
+        }).catch(() => {});
+      },
+    })).then((value) => {
+      readingSync = value || null;
+      if (readingSync) {
+        rightComics?.destroy?.(); rightComics = null;
+        dom.main.querySelectorAll('.reader-comics:not(.reader-sync-comics)').forEach(node => node.remove());
+        pager.relocate().then(() => pager.reapplyAnnotations());
+      }
+      return readingSync;
+    })
+      .catch(() => null)
+      .finally(() => { readingSyncPromise = null; });
+    return readingSyncPromise;
   }
 
   function syncUrl() {
@@ -479,6 +549,10 @@ export async function mountReader({ bookId, params, debug }) {
     } else {
       await pager.gotoPara(para, offset);
     }
+    // A programmatic jump may point inside a displayed page.  Keep its exact
+    // character anchor rather than persisting only that page's first line.
+    state.para = para; state.offset = offset;
+    persist(); syncUrl(); scheduleSave();
     flashPara(para, q);
   }
 
@@ -564,6 +638,7 @@ export async function mountReader({ bookId, params, debug }) {
   /* ================= M2 AI scene / 人物卡 ================= */
   async function loadAIStudio() {
     const p = await ensurePanels();
+    if (standalone) { p.openMobileAI({ chapter: state.chapter, onSettings: openSettings }); return; }
     const render = (data) => p.updateAI(data, runAIExtract, freezeCharacter);
     p.openAI({ scenes: [], characters: [] }, runAIExtract, freezeCharacter);
     try {
@@ -693,6 +768,13 @@ export async function mountReader({ bookId, params, debug }) {
       bookId,
       column: dom.column,
       getAnnotations: () => state.annotations,
+      getContext: (_chapter, para, selected) => {
+        const paragraphs = (pager && Array.isArray(pager.paragraphs)) ? pager.paragraphs : [];
+        const index = Math.max(0, Number(para) || 0);
+        // Keep the request bounded while giving explanation/translation a little
+        // surrounding context. The selected text is always included verbatim.
+        return paragraphs.slice(Math.max(0, index - 1), Math.min(paragraphs.length, index + 2)).join('\n').slice(0, 6000) || selected;
+      },
       canActivate: () => Date.now() >= suppressClickUntil,
       onCreated: onAnnotationCreated,
       onUpdated: onAnnotationUpdated,
@@ -750,7 +832,7 @@ export async function mountReader({ bookId, params, debug }) {
         theme = next; applyTheme(theme); persist(); pager.reapplyAnnotations();
       },
       onFont: changeFontSize,
-    }, section === 'manga' ? 'manga' : 'reading');
+    }, typeof section === 'string' ? section : 'reading');
   }
 
   /* ================= 面板 ================= */
@@ -840,6 +922,8 @@ export async function mountReader({ bookId, params, debug }) {
 
     window.addEventListener('pagehide', () => {
       scheduleSave.flush();
+      readingSync?.destroy?.();
+      try { CSS.highlights?.delete('velmira-reading-cursor'); } catch (_) {}
       if (chapterAc) chapterAc.abort();
       if (segmentsAc) segmentsAc.abort();
       if (annUI) annUI.hideAll();

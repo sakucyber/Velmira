@@ -1,7 +1,7 @@
 """EPUB 导入器（契约 7.3）：container.xml → OPF → manifest/spine → XHTML 正文段落。
 
-设计取舍（M1-PLAN §1）：
-- 只取文本，不渲染内嵌样式/图片（封面/插图留 M2）；
+设计取舍：
+- 保留纯文本定位、安全行内强调与包内光栅插图；不执行原始 HTML/CSS/script；
 - 按 spine 顺序一项 = 一章；段落用 HTMLParser 按块级标签切分（去 script/style，
   &nbsp; 归一，连续空行合并）；
 - 标题优先 h1/h2/h3，其次 nav.xhtml / toc.ncx 对应项，缺失回退「第N部分」；
@@ -45,6 +45,9 @@ _BLOCK_TAGS = frozenset({
 })
 _HEADING_TAGS = frozenset({"h1", "h2", "h3"})
 _SKIP_TAGS = frozenset({"script", "style", "noscript", "svg", "math", "template"})
+_IMAGE_MEDIA = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+MAX_EPUB_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_EPUB_IMAGE_TOTAL = 128 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +193,27 @@ def _is_text_item(item: dict) -> bool:
     return item.get("href", "").lower().endswith(_TEXT_EXTS)
 
 
+def _raster_resource(book: _ZipBook, items: dict[str, dict], base_dir: str, href: str):
+    """Resolve only package-local raster resources; never fetch external data."""
+    parsed = urllib.parse.urlsplit(href)
+    if parsed.scheme or parsed.netloc or not href or href.startswith(("data:", "/")) or parsed.query:
+        return None
+    path = _resolve(base_dir, href)
+    if not path:
+        return None
+    asset = next((entry for entry in items.values() if entry.get("href") == path), None)
+    media = (asset or {}).get("media-type", "").lower()
+    if media not in _IMAGE_MEDIA:
+        suffix = posixpath.splitext(path)[1].lower()
+        media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(suffix, "")
+    if media not in _IMAGE_MEDIA:
+        return None
+    data = book.read(path)
+    if data is None or len(data) > MAX_EPUB_IMAGE_BYTES:
+        return None
+    return path, media, data
+
+
 class _AnchorCollector(HTMLParser):
     """收集 nav.xhtml 里 <a href> 文本：按文档顺序后写覆盖先写 → 叶子标题优先。"""
 
@@ -292,6 +316,7 @@ class _BodyParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.blocks: list[tuple[str, str]] = []
+        self.images: list[tuple[int, str, str]] = []
         self._buf: list[str] = []
         self._skip = 0
         self._in_body = False
@@ -310,11 +335,20 @@ class _BodyParser(HTMLParser):
         if name in _SKIP_TAGS:
             self._skip += 1
             return
+        if self._skip:
+            return
         if name == "body":
             self._in_body = True
             self._flush()
             return
         if not self._in_body:
+            return
+        if name == "img":
+            attrs = dict(attrs)
+            # An inline image is anchored after its surrounding text paragraph,
+            # keeping existing paragraph indices and annotation offsets intact.
+            before = len(self.blocks) + bool(_clean_text("".join(self._buf)))
+            self.images.append((before, attrs.get("src", ""), _clean_text(attrs.get("alt", ""))[:300]))
             return
         if name in _BLOCK_TAGS:
             self._flush()
@@ -350,7 +384,58 @@ class _BodyParser(HTMLParser):
         self._buf.append(data)
 
 
-def _chapter_from_xhtml(html_text: str, fallback_title: str | None, part_no: int) -> ChapterData:
+class _InlineFormatParser(HTMLParser):
+    """Collect only harmless inline emphasis ranges, measured in plain text."""
+    _INLINE = {"strong": "strong", "b": "strong", "em": "em", "i": "em", "u": "u", "s": "s", "del": "s"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[list[dict]] = []
+        self._body = False; self._skip = 0; self._length = 0; self._active: list[tuple[str, int]] = []; self._spans: list[dict] = []
+
+    def _flush(self):
+        if self._length or self._active:
+            self._spans.extend({"kind": kind, "start": start, "end": self._length} for kind, start in self._active if self._length > start)
+            self.blocks.append(self._spans)
+        self._active = []; self._spans = []; self._length = 0
+
+    def handle_starttag(self, tag, attrs):
+        name = tag.lower()
+        if name in _SKIP_TAGS: self._skip += 1; return
+        if name == "body": self._body = True; return
+        if not self._body: return
+        if name in _BLOCK_TAGS: self._flush()
+        elif name in self._INLINE: self._active.append((self._INLINE[name], self._length))
+
+    def handle_startendtag(self, tag, attrs):
+        if tag.lower() in _BLOCK_TAGS: self._flush()
+
+    def handle_endtag(self, tag):
+        name = tag.lower()
+        if name in _SKIP_TAGS:
+            self._skip = max(0, self._skip - 1); return
+        if not self._body: return
+        if name in _BLOCK_TAGS: self._flush()
+        elif name in self._INLINE:
+            for idx in range(len(self._active) - 1, -1, -1):
+                if self._active[idx][0] == self._INLINE[name]:
+                    kind, start = self._active.pop(idx)
+                    if self._length > start: self._spans.append({"kind": kind, "start": start, "end": self._length})
+                    break
+        if name == "body": self._body = False
+
+    def handle_data(self, data):
+        if self._body and not self._skip: self._length += len(_clean_text(data))
+
+
+def inline_formats(html_text: str) -> list[list[dict]]:
+    parser = _InlineFormatParser()
+    try: parser.feed(html_text); parser.close()
+    except Exception: pass
+    return parser.blocks
+
+
+def _chapter_content(html_text: str, fallback_title: str | None, part_no: int):
     parser = _BodyParser()
     try:
         parser.feed(html_text)
@@ -362,28 +447,35 @@ def _chapter_from_xhtml(html_text: str, fallback_title: str | None, part_no: int
     if blocks and blocks[0][0] in _HEADING_TAGS:
         title = blocks[0][1]
         blocks = blocks[1:]
+    removed = len(parser.blocks) - len(blocks)
     paragraphs = [text for _kind, text in blocks if text]
     if not title:
         title = (fallback_title or "").strip() or f"第{part_no}部分"
-    return ChapterData(title=title, paras=paragraphs, chars=sum(len(p) for p in paragraphs))
+    chapter = ChapterData(title=title, paras=paragraphs, chars=sum(len(p) for p in paragraphs))
+    images = [(max(0, min(len(paragraphs), before - removed)), href, alt) for before, href, alt in parser.images]
+    return chapter, images
 
 
-def _is_metadata_or_empty(chapter: ChapterData, href: str) -> bool:
-    if not chapter.paras:
+def _chapter_from_xhtml(html_text: str, fallback_title: str | None, part_no: int) -> ChapterData:
+    return _chapter_content(html_text, fallback_title, part_no)[0]
+
+
+def _is_metadata_or_empty(chapter: ChapterData, href: str, has_images: bool = False) -> bool:
+    if not chapter.paras and not has_images:
         return True
     if chapter.title in _SKIP_TITLES:
         return True
     stem = posixpath.splitext(posixpath.basename(href))[0].strip().lower()
     if stem in _SKIP_STEMS:
         return True
-    return bool(_META_FIRST_PARA_RE.match(chapter.paras[0]))
+    return bool(chapter.paras and _META_FIRST_PARA_RE.match(chapter.paras[0]))
 
 
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
-def parse_book(raw: bytes, filename: str) -> ParsedBook:
+def parse_book(raw: bytes, filename: str, *, return_assets: bool = False):
     """解析 EPUB 字节流 → 与 txt 相同的章节结构（encoding 固定 utf-8）。"""
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -399,6 +491,8 @@ def parse_book(raw: bytes, filename: str) -> ParsedBook:
         nav_titles = _nav_titles(book, items)
 
         chapters: list[ChapterData] = []
+        formats: list[list[list[dict]]] = []
+        assets = []; asset_paths = set(); total_image_bytes = 0; occurrences = []
         for idref in spine:
             item = items.get(idref)
             if not item or not _is_text_item(item):
@@ -406,12 +500,27 @@ def parse_book(raw: bytes, filename: str) -> ParsedBook:
             raw_xhtml = book.read(item["href"])
             if raw_xhtml is None:
                 continue
-            chapter = _chapter_from_xhtml(
-                _decode(raw_xhtml), nav_titles.get(item["href"]), len(chapters) + 1
-            )
-            if _is_metadata_or_empty(chapter, item["href"]):
+            chapter, image_refs = _chapter_content(_decode(raw_xhtml), nav_titles.get(item["href"]), len(chapters) + 1)
+            chapter_images = []
+            for before, href, alt in image_refs:
+                resource = _raster_resource(book, items, posixpath.dirname(item["href"]), href)
+                if resource is not None:
+                    chapter_images.append((before, alt, resource))
+            if _is_metadata_or_empty(chapter, item["href"], bool(chapter_images)):
                 continue
+            chapter_idx = len(chapters)
+            for before, alt, (path, media, data) in chapter_images:
+                if path not in asset_paths:
+                    if total_image_bytes + len(data) > MAX_EPUB_IMAGE_TOTAL:
+                        continue
+                    asset_paths.add(path); total_image_bytes += len(data)
+                    assets.append((chapter_idx, path, media, data))
+                occurrences.append((chapter_idx, before, path, alt))
             chapters.append(chapter)
+            inline = inline_formats(_decode(raw_xhtml))
+            if chapter.paras and inline and len(inline) > len(chapter.paras):
+                inline = inline[1:]
+            formats.append(inline[:len(chapter.paras)])
 
     if not chapters:
         raise BookImportError("empty_file", "EPUB 未解析出任何章节正文", 400)
@@ -419,7 +528,7 @@ def parse_book(raw: bytes, filename: str) -> ParsedBook:
     fallback_title, fallback_author = title_author_from_filename(filename)
     title = (meta_title or fallback_title or "未命名").strip() or "未命名"
     author = (meta_author or fallback_author or "").strip() or None
-    return ParsedBook(
+    parsed = ParsedBook(
         title=title,
         author=author,
         encoding="utf-8",
@@ -428,3 +537,4 @@ def parse_book(raw: bytes, filename: str) -> ParsedBook:
         paragraph_count=sum(len(ch.paras) for ch in chapters),
         chapters=chapters,
     )
+    return (parsed, assets, formats, occurrences) if return_assets else parsed

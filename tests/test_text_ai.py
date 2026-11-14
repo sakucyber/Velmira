@@ -82,6 +82,28 @@ class TextAITests(unittest.TestCase):
         if "key_dpapi" in settings.load_settings():
             self.assertNotIn("local-test-credential", (self.root / "text-api.json").read_text())
 
+    def test_selected_text_translation_and_explanation_are_ephemeral(self):
+        with patch("server.app.api.text_ai.retry.complete", new=AsyncMock(side_effect=["译文", "这是解释。"])) as complete:
+            translated = self.client.post("/api/ai/translate", json={"text": "The greenhouse was quiet.", "target_language": "简体中文", "context": "附近段落"})
+            explained = self.client.post("/api/ai/explain", json={"text": "甲翻开书页。", "context": "附近段落"})
+        self.assertEqual(translated.status_code, 200, translated.text)
+        self.assertEqual(translated.json()["text"], "译文")
+        self.assertEqual(explained.status_code, 200, explained.text)
+        self.assertEqual(explained.json()["text"], "这是解释。")
+        self.assertEqual(complete.await_count, 2)
+        self.assertEqual(self.sql("SELECT COUNT(*) AS count FROM manga_text_plans")[0]["count"], 0)
+
+    def test_translation_provider_settings_hide_key_and_allow_bilibili_without_key(self):
+        initial = self.client.get("/api/translation/settings")
+        self.assertEqual(initial.status_code, 200)
+        saved = self.client.patch("/api/translation/settings", json={
+            "provider": "bilibili", "enabled": True,
+            "base_url": "https://index-translate.bilibili.com/v1", "model": "gpt-4o-mini",
+        })
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertFalse(saved.json()["settings"]["key_configured"])
+        self.assertNotIn("api_key", saved.json()["settings"])
+
     def test_rejects_invalid_settings_and_disabled_director(self):
         for values in [{"base_url": "http://remote.example/v1"}, {"base_url": "https://user:pass@text.example/v1"},
                        {"base_url": "https://text.example/v1?key=private"}, {"enabled": 1},
@@ -89,6 +111,15 @@ class TextAITests(unittest.TestCase):
             self.assertEqual(self.save_settings(**values).status_code, 400)
         self.save_settings(enabled=False)
         self.plan(status=409)
+
+    def test_local_server_without_json_mode_still_validates_output(self):
+        self.save_settings(json_mode=False, rpm=25, max_concurrency=5)
+        provider=OpenAICompatProvider('https://text.example/v1','test-director',local_settings=True)
+        with patch('server.app.ai.providers.request_json',return_value={'choices':[{'message':{'content':'{"ok":true}'}}]}) as request:
+            result=provider._complete_sync('Only JSON','test',{'type':'object'},.2)
+        self.assertEqual(result,{'ok':True})
+        self.assertNotIn('response_format',request.call_args.kwargs['body'])
+        self.assertEqual(self.save_settings(max_concurrency=9).status_code,400)
 
     def test_two_stages_cache_and_model_change(self):
         provider = self.provider()

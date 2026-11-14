@@ -54,6 +54,9 @@ def status(conn, job_id, value, **fields):
 
 
 def valid_snapshot(conn, job, snap):
+    if snap.get("board_id"):
+        from .storyboard import check_snapshot
+        return check_snapshot(conn, job, snap)
     form = conn.execute("SELECT * FROM character_forms WHERE id=?", (job["form_id"],)).fetchone()
     check_identity(form)
     character = conn.execute("SELECT frozen,identity_hash,version FROM characters WHERE id=?", (form["character_id"],)).fetchone()
@@ -88,6 +91,7 @@ def generate_attempt(conn, job, snap, provider, attempt_id, seed):
     run_id = auto[0] if auto and snap.get("automatic_draft") else job["id"]
     report = task_log.reporter(job["book_id"], run_id, "rendering")
     label = "人物参考图" if job["kind"] == "reference" else "漫画分格"
+    last_exc = None
     for number in range(1, MAX_ATTEMPTS + 1):
         if _stop.is_set() or conn.execute("SELECT status FROM render_jobs WHERE id=?", (job["id"],)).fetchone()[0] != "running":
             return None
@@ -107,7 +111,8 @@ def generate_attempt(conn, job, snap, provider, attempt_id, seed):
                     pid = uid("image_")
                     with conn:
                         conn.execute("UPDATE render_attempts SET prompt_id=?,workflow_json=? WHERE id=?", (pid, stable_json({"provider": cfg["provider"], "model": cfg["model"]}), attempt_id))
-                raw = provider.generate(snap, asset_path(ref["path"]) if ref else None, pid)
+                refs = [asset_path(p["reference"]["path"]) for p in snap["cast"]] if snap.get("cast") else []
+                raw = provider.generate(snap, refs if len(refs) > 1 else asset_path(ref["path"]) if ref else None, pid)
             elif provider:
                 if not pid:
                     capabilities = provider.probe()
@@ -136,6 +141,7 @@ def generate_attempt(conn, job, snap, provider, attempt_id, seed):
             report(label + " · 图片已保存")
             return path
         except Exception as exc:
+            last_exc = exc
             # A known failed Comfy task can be submitted again. An uncertain
             # submission or a poll timeout must keep querying the same prompt.
             if cfg["provider"] == "comfyui" and isinstance(exc, MangaError) and (exc.code in {"render_failed", "invalid_workflow", "image_missing"} or submitting and exc.code == "comfy_error"):
@@ -146,6 +152,11 @@ def generate_attempt(conn, job, snap, provider, attempt_id, seed):
                 conn.execute("UPDATE render_attempts SET error=? WHERE id=?", (message, attempt_id))
             report(message, "warning" if number < MAX_ATTEMPTS else "error")
             if number == MAX_ATTEMPTS:
+                if isinstance(last_exc, MangaError):
+                    raise MangaError("图像 AI 已尝试 3 次仍失败，请检查连接、模型和服务端任务记录",
+                                     "image_retries_exhausted", 502,
+                                     status_code=getattr(last_exc, "status_code", None),
+                                     error_code=getattr(last_exc, "error_code", None) or getattr(last_exc, "code", None)) from None
                 raise MangaError("图像 AI 已尝试 3 次仍失败，请检查连接、模型和服务端任务记录", "image_retries_exhausted", 502) from None
             if _stop.wait(RETRY_DELAY * number):
                 return None
@@ -185,13 +196,23 @@ def process(job_id):
                 status(conn, job_id, "stale", error=str(exc)); return
             result = {"status": "needs_review", "reason": "reference_requires_confirmation"}
             if job["kind"] == "panel":
-                result = evaluate_face(asset_path(snap["reference"]["path"]), asset_path(path), cfg) if provider else {"status": "unavailable", "reason": "mock_output"}
+                mode = snap.get("panel", {}).get("kind", "solo")
+                if mode != "solo":
+                    result = {"status": "needs_review", "reason": "双人画面须复核两人身份及互动" if mode == "duo" else "环境空镜须复核场景与原文"}
+                else:
+                    result = evaluate_face(asset_path(snap["reference"]["path"]), asset_path(path), cfg) if provider else {"status": "unavailable", "reason": "mock_output"}
             if finish_attempt(conn, job, snap, attempt_id, idx, path, result):
                 return
         status(conn, job_id, "needs_review", error="重试次数已耗尽")
     except Exception as exc:
         log.warning("render job %s failed", job_id)
-        safe = str(exc) if isinstance(exc, MangaError) else "图像 AI 请求异常；请检查连接、模型和服务端任务记录"
+        from ..ai.diagnostics import provider_failure, public_failure
+        diagnostic = provider_failure(exc)
+        if diagnostic != "provider_failed":
+            hint = public_failure(diagnostic)
+            safe = "[" + diagnostic + "] " + hint["title"] + "；" + hint["detail"]
+        else:
+            safe = str(exc) if isinstance(exc, MangaError) else "图像 AI 请求异常；请检查连接、模型和服务端任务记录"
         safe = safe[:500]
         conn.execute("UPDATE render_attempts SET error=? WHERE job_id=? AND status='running'", (safe, job_id))
         status(conn, job_id, "error", error=safe)
@@ -200,19 +221,41 @@ def process(job_id):
 
 
 async def loop():
+    active = {}
     while not _stop.is_set():
+        for key, task in list(active.items()):
+            if task.done():
+                try:
+                    task.result()
+                except Exception:
+                    log.exception("image worker failed")
+                del active[key]
         conn = db.get_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT id FROM render_jobs WHERE status='queued' ORDER BY created_at,rowid LIMIT 1").fetchone()
+            row = None
+            for candidate in conn.execute("SELECT id,snapshot_json FROM render_jobs WHERE status='queued' ORDER BY created_at,rowid LIMIT 100"):
+                cfg = json.loads(candidate["snapshot_json"])["config"]
+                endpoint = (cfg["provider"], cfg["base_url"])
+                capacity = cfg.get("max_concurrency", 1) if cfg["provider"] == "openai-images" else 1
+                if cfg["provider"] == "openai-images":
+                    from ..ai import routing
+                    if routing.is_enabled("image"):
+                        endpoint = ("openai-images", "model-pool")
+                        capacity = routing.capacity("image")
+                if len(active) < 8 and sum(k[1] == endpoint for k in active) < capacity:
+                    row = candidate
+                    break
             claimed = row and conn.execute("UPDATE render_jobs SET status='running',updated_at=? WHERE id=? AND status='queued'", (int(time.time()), row[0])).rowcount
             conn.commit()
         finally:
             conn.close()
         if claimed:
-            await asyncio.to_thread(process, row[0])
+            active[(row[0], endpoint)] = asyncio.create_task(asyncio.to_thread(process, row[0]))
         else:
             await asyncio.sleep(.5)
+    if active:
+        await asyncio.gather(*active.values(), return_exceptions=True)
 
 
 def start():

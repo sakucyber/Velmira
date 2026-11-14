@@ -5,7 +5,7 @@
    按需懒加载（dynamic import），不影响首屏请求预算。
    搜索/片段/注释接口失败时静默降级，不阻塞阅读。
    ============================================================ */
-import { el, clear, debounce, apiGet, apiDelete, fmtTime, normalizeFontSize, toast } from '../util/core.js';
+import { el, clear, debounce, apiGet, apiDelete, fmtTime, normalizeFontSize, toast, getAuthState } from '../util/core.js';
 
 // 搜索契约只允许 <b>；所有其它标签和实体解码结果均作为文本节点。
 export function renderSnippet(target, snippet) {
@@ -319,6 +319,16 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
     open('ai', 'AI 分析与人物卡', (area) => renderAI(area, data, onExtract, onFreeze));
   }
 
+  function openMobileAI(options = {}) {
+    open('mobile-ai', '手机 AI', area => {
+      const ac = new AbortController(); disposePanel = () => ac.abort();
+      area.append(el('p', 'settings-help', '正在打开手机 AI…'));
+      import('./mobile-ai.js').then(({ mountMobileAIStudio }) => {
+        if (!ac.signal.aborted) return mountMobileAIStudio({ area, signal: ac.signal, bookId, ...options });
+      }).catch(err => { if (!ac.signal.aborted) area.replaceChildren(el('p', 'settings-help', err.message || 'AI 加载失败')); });
+    });
+  }
+
   function updateAI(data, onExtract, onFreeze) {
     if (!shell || kind !== 'ai') return;
     renderAI(body, data, onExtract, onFreeze);
@@ -488,11 +498,22 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
 
   function openSettings(options, section = 'reading') {
     open('settings', '设置', (container) => {
-      const nav = el('div', 'settings-tabs'); const area = el('div', 'settings-reading');
+      const standalone = !!getAuthState().standalone;
+      if (!document.querySelector('link[data-ai-settings-style]')) {
+        const link = el('link'); link.rel = 'stylesheet'; link.href = '/styles/ai-settings.css'; link.dataset.aiSettingsStyle = 'true'; document.head.append(link);
+      }
+      const nav = el('div', 'settings-tabs settings-groups'); const area = el('div', 'settings-reading');
       const manga = el('section', 'settings-manga'); manga.setAttribute('aria-label', '漫画与画风设置');
+      const globalSections = new Map();
+      const sections = standalone ? [['models', '模型与降级'], ['offline', '本机书库'], ['search', '联网搜索'], ['memory', '长期记忆'], ['prompts', '提示词'], ['security', '连接电脑']]
+        : [['models', '模型库'], ['offline', '离线与同步'], ['translation', '翻译服务'], ['search', '联网搜索'], ['memory', '长期记忆'], ['prompts', '提示词'], ['security', '局域网访问']];
+      for (const [id, label] of sections) {
+        const page = el('section', 'settings-global settings-' + id); page.setAttribute('aria-label', label); page.hidden = true;
+        globalSections.set(id, { page, controller: null, loaded: false });
+      }
       let controller;
       let mangaReady = false;
-      disposePanel = () => controller?.abort();
+      disposePanel = () => { controller?.abort(); for (const item of globalSections.values()) item.controller?.abort(); };
       const loadManga = (area, selectedBook) => {
         controller?.abort();
         const ac = new AbortController(); controller = ac;
@@ -504,28 +525,74 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       };
       const choose = (value) => {
         area.hidden = value !== 'reading'; manga.hidden = value !== 'manga';
-        for (const b of nav.children) b.setAttribute('aria-pressed', String(b.dataset.section === value));
+        for (const [id, item] of globalSections) item.page.hidden = value !== id;
+        for (const b of nav.querySelectorAll('button[data-section]')) {
+          b.setAttribute('aria-pressed', String(b.dataset.section === value));
+          if (b.dataset.section === value) b.closest('details').open = true;
+        }
         container.scrollTop = 0;
+        const item = globalSections.get(value);
+        if (item && !item.loaded) {
+          item.loaded = true; item.controller = new AbortController();
+          const signal = item.controller.signal;
+          item.page.replaceChildren(el('p', 'settings-help', '正在加载…'));
+          const mobileAI = standalone && ['models', 'search', 'memory', 'prompts'].includes(value);
+          const module = mobileAI ? import('./mobile-ai.js') : standalone ? import('./offline-settings.js') : value === 'models' ? import('./model-library.js') : value === 'security' ? import('./security-settings.js') : value === 'offline' ? import('./offline-settings.js') : import('./ai-settings.js');
+          module.then(mod => {
+            if (signal.aborted) return;
+            const mount = mobileAI ? mod.mountMobileAISettings : standalone ? (value === 'security' ? mod.mountStandaloneConnectionSettings : mod.mountOfflineSettings)
+            : value === 'models' ? mod.mountModelLibrary : value === 'security' ? mod.mountSecuritySettings : value === 'offline' ? mod.mountOfflineSettings : value === 'translation' ? mod.mountTranslationSettings : mod.mountAISettings;
+            return mount({ area: item.page, signal, section: value, bookId });
+          }).catch(err => {
+            if (signal.aborted) return;
+            item.loaded = false; item.page.replaceChildren(el('p', 'settings-help', err.message || '设置加载失败，请重新打开此页。'));
+          });
+        }
         if (value === 'manga' && !mangaReady) {
           mangaReady = true;
-          if (bookId) { loadManga(manga, bookId); return; }
-          const books = options.books || [];
-          if (!books.length) { manga.append(el('p', 'settings-help', '请先导入一本 TXT 或 EPUB 小说，再设置漫画与画风。')); return; }
-          const label = el('label', 'manga-field', '选择小说');
-          const select = el('select'); select.setAttribute('aria-label', '选择小说');
-          const placeholder = el('option', null, '请选择要设置的小说'); placeholder.value = ''; select.append(placeholder);
-          for (const book of books) { const option = el('option', null, book.title); option.value = book.id; select.append(option); }
-          const content = el('div'); label.append(select); manga.append(label, content);
-          select.addEventListener('change', () => loadManga(content, select.value));
-          loadManga(content, '');
+          if (bookId && !options.comic) { loadManga(manga, bookId); return; }
+          const renderBooks = (books) => {
+            if (!manga.isConnected) return;
+            manga.replaceChildren();
+            if (!books.length) { manga.append(el('p', 'settings-help', '请先导入一本 TXT 或 EPUB 小说，再设置它的漫画与画风。模型库、联网搜索、长期记忆和提示词可直接设置。')); return; }
+            const label = el('label', 'manga-field', '选择小说');
+            const select = el('select'); select.setAttribute('aria-label', '选择小说');
+            const placeholder = el('option', null, '请选择要设置的小说'); placeholder.value = ''; select.append(placeholder);
+            for (const book of books) { const option = el('option', null, book.title); option.value = book.id; select.append(option); }
+            const content = el('div'); label.append(select); manga.append(label, content);
+            select.addEventListener('change', () => loadManga(content, select.value));
+            loadManga(content, '');
+          };
+          if (options.books) renderBooks(options.books);
+          else {
+            controller = new AbortController(); const signal = controller.signal;
+            apiGet('/api/books', signal).then(data => { if (!signal.aborted) renderBooks(data.books.filter(book => book.format !== 'cbz')); })
+              .catch(err => { if (!signal.aborted) manga.textContent = err.message; });
+          }
         }
       };
-      for (const [id, title] of [['reading', '阅读与快捷键'], ...(!options.comic ? [['manga', '漫画与画风设置']] : [])]) {
-        const button = el('button', 'btn', title); button.type = 'button'; button.dataset.section = id;
-        button.addEventListener('click', () => choose(id)); nav.appendChild(button);
+      const tabs = standalone ? [['reading', '阅读显示'], ['offline', '本机书库'], ['models', '模型与降级'], ['search', '联网搜索'], ['memory', '长期记忆'], ['prompts', '提示词'], ['security', '连接电脑']]
+        : [['reading', '阅读与快捷键'], ['offline', '离线与同步'], ['models', '模型库'], ['manga', '漫画与画风设置'], ['translation', '翻译服务'], ['search', '联网搜索'], ['memory', '长期记忆'], ['prompts', '提示词'], ['security', '局域网访问']];
+      const tabGroups = standalone
+        ? [['阅读', ['reading', 'offline']], ['AI 引擎', ['models', 'memory', 'prompts']], ['扩展功能', ['search']], ['系统与网络', ['security']]]
+        : [['阅读', ['reading', 'offline']], ['AI 引擎', ['models', 'memory', 'prompts']], ['扩展功能', ['manga', 'translation', 'search']], ['系统与网络', ['security']]];
+      const titles = new Map(tabs);
+      for (const [name, ids] of tabGroups) {
+        const group = el('details', 'settings-tab-group'); group.dataset.settingsGroup = name;
+        group.appendChild(el('summary', 'settings-tab-group-label', name));
+        const choices = el('div', 'settings-tab-group-choices'); group.appendChild(choices);
+        group.addEventListener('toggle', () => {
+          if (group.open) for (const sibling of nav.children) if (sibling !== group) sibling.open = false;
+        });
+        for (const id of ids) {
+          if (!titles.has(id)) continue;
+          const button = el('button', 'btn', titles.get(id)); button.type = 'button'; button.dataset.section = id;
+          button.addEventListener('click', () => choose(id)); choices.appendChild(button);
+        }
+        nav.appendChild(group);
       }
-      container.append(nav, area, manga);
-      choose(section === 'manga' && !options.comic ? 'manga' : 'reading');
+      container.append(nav, area, manga, ...[...globalSections.values()].map(item => item.page));
+      choose(tabs.some(([id]) => id === section) ? section : 'reading');
       area.append(el('h3', 'settings-heading', '阅读显示'));
       area.append(el('p', 'settings-help', '设置即时生效，并在本机记住。'));
       const title = el('div', 'settings-label', '主题');
@@ -587,6 +654,16 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
       const list = el('dl', 'settings-shortcuts');
       for (const [keys, action] of shortcuts) { const term = el('dt'); term.append(el('kbd', null, keys)); list.append(term, el('dd', null, action)); }
       area.append(list, el('p', 'settings-help', '输入文字或打开设置时，翻页快捷键暂停。触屏可左右滑动翻页，点击批注文字可查看内容。'));
+      if (standalone) {
+        const personalize = el('button', 'btn', '重新个性化'); personalize.type = 'button';
+        personalize.addEventListener('click', async () => {
+          close(false);
+          const { showOnboarding } = await import('./onboarding.js');
+          const result = await showOnboarding({ force: true });
+          if (result.changed) location.reload();
+        });
+        area.append(el('h3', 'settings-heading', '个性化'), personalize);
+      }
     });
   }
 
@@ -621,7 +698,7 @@ export function createPanels({ layer, bookId, onJump, onSegmentJump, onChapterSe
 
   return {
     openToc, openSearch, openSegments, updateSegments, openTheme, openSettings,
-    openBookmarks, updateBookmarks, openNotes, updateNote, openAI, updateAI,
+    openBookmarks, updateBookmarks, openNotes, updateNote, openAI, updateAI, openMobileAI,
     close, isOpen, isSegmentsOpen, openAutomatic,
   };
 }

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from .. import db
 from ..ai.models import CARD_FIELDS, identity_hash, render_identity, stable_json
 from ..manga import service as s
-from ..manga.models import MangaError, check_identity, validate_config, STYLE_PRESETS
+from ..manga.models import MangaError, check_identity, validate_config, STYLE_PRESETS, GENERATION_PRESETS
 from ..manga.provider import ComfyProvider, ImageAPIProvider
 from ..manga.queue import valid_snapshot
 
@@ -50,7 +50,23 @@ def get_job(conn, book_id, job_id):
 @router.get("/config")
 def get_config(book_id: str):
     with connection(book_id) as conn:
-        return {"config": s.configuration(conn, book_id), "styles": STYLE_PRESETS}
+        presets = [{"id": key, "label": value["label"], "description": value["description"],
+                    "max_attempts": value["max_attempts"], "timeout": value["timeout"],
+                    "face_threshold": value["face_threshold"],
+                    "review_storyboards": value["review_storyboards"]}
+                   for key, value in GENERATION_PRESETS.items()]
+        return {"config": s.configuration(conn, book_id), "styles": STYLE_PRESETS, "presets": presets}
+
+
+@router.get("/reading-map")
+def reading_map(book_id: str, chapter: int | None = Query(None, ge=0), run_id: str | None = None):
+    from ..manga.reading_map import reading_map as build
+    # Mapping reads use a read connection and do not synchronize identities.
+    conn = db.get_conn()
+    try:
+        return build(conn, book_id, chapter, run_id)
+    finally:
+        conn.close()
 
 
 @router.patch("/config")
@@ -186,7 +202,9 @@ def review_ref(book_id: str, ref_id: str, payload: dict = Body(...)):
                 conn.execute("UPDATE render_jobs SET status='stale',error='自动参考图已被撤销' WHERE id IN (SELECT job_id FROM render_attempts WHERE id=?)", (ref_id,))
             jobs = conn.execute("SELECT id,snapshot_json FROM render_jobs WHERE form_id=? AND status!='cancelled'", (form["id"],)).fetchall()
             for job in jobs:
-                if (json.loads(job["snapshot_json"]).get("reference") or {}).get("id") == ref_id:
+                snapshot = json.loads(job["snapshot_json"])
+                references = [p["reference"] for p in snapshot.get("cast", [])] or [snapshot.get("reference") or {}]
+                if any(ref.get("id") == ref_id for ref in references):
                     conn.execute("UPDATE render_jobs SET status='stale',error='参考图已撤销',updated_at=? WHERE id=?", (int(time.time()), job["id"]))
         conn.execute("UPDATE form_refs SET accepted=? WHERE id=?", (int(payload["accepted"]), ref_id))
         return {"ok": True}
@@ -215,6 +233,12 @@ def jobs(book_id: str, limit: int = Query(default=30, ge=1, le=100)):
 @router.get("/jobs/{job_id}")
 def job(book_id: str, job_id: str):
     with connection(book_id) as conn:
+        row = get_job(conn, book_id, job_id)
+        if row["status"] not in {"stale", "cancelled"}:
+            try:
+                valid_snapshot(conn, row, json.loads(row["snapshot_json"]))
+            except (ValueError, OSError) as exc:
+                conn.execute("UPDATE render_jobs SET status='stale',error=? WHERE id=?", (str(exc), job_id))
         return {"job": s.public_job(conn, get_job(conn, book_id, job_id))}
 
 
@@ -241,6 +265,11 @@ def job_action(book_id: str, job_id: str, action: str, payload: dict = Body(defa
         elif action == "reroll":
             if row["status"] in {"queued", "running"}:
                 raise MangaError("请先等待或取消当前任务", "job_conflict", 409)
+            if snap.get("board_id"):
+                from ..manga.storyboard import enqueue
+                return {"job": s.public_job(conn, enqueue(conn, book_id, snap["board_id"], snap["panel_index"],
+                    form_ids=[p["form"]["id"] for p in snap["cast"]], automatic=snap.get("automatic_draft", False),
+                    seed=payload.get("seed", (snap["seed"] + 7919) % (2**53))))}
             request = {"kind": row["kind"], "form_id": row["form_id"], "shot": snap["shot"], "action": snap["action"], "flashback": snap["flashback"], "seed": payload.get("seed", (snap["seed"] + 7919) % (2**53))}
             if row["scene_id"]:
                 request.update(scene_id=row["scene_id"], para=snap["para"])
@@ -248,6 +277,8 @@ def job_action(book_id: str, job_id: str, action: str, payload: dict = Body(defa
                 request["plan_id"] = snap["text_plan"]["id"]
             return {"job": s.public_job(conn, s.enqueue(conn, book_id, request))}
         elif action == "reference":
+            if snap.get("panel", {}).get("kind", "solo") != "solo":
+                raise MangaError("请使用单人图片作为人物参考图", "single_reference_required", 409)
             if row["status"] not in {"done", "needs_review", "approved"} or not row["image_path"]:
                 raise MangaError("请先完成出图，再选择参考图", "job_conflict", 409)
             valid_snapshot(conn, row, snap)

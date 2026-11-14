@@ -43,6 +43,17 @@ desktop\Velmira.exe
 desktop\Velmira.exe -screenshot docs\screenshots\desktop-app.png -wait 6s
 ~~~
 
+Linux 原生桌面包在 Linux 主机上构建：
+
+~~~bash
+bash scripts/build-desktop-linux.sh
+# 输出 dist/Velmira-desktop-v0.5.1-linux-amd64.tar.gz 或 arm64 包
+~~~
+
+Linux 运行时需要 GTK 3、WebKitGTK 4.1、Python 3 和 `python3-venv`。
+包内 `Velmira` 启动器会在第一次运行时创建私有虚拟环境并安装后端依赖，
+之后可以离线启动。`install.sh` 会创建用户级桌面菜单项。
+
 命令行参数：
 
 | 参数 | 作用 |
@@ -80,7 +91,8 @@ go build -trimpath -ldflags "-H=windowsgui -s -w" -o Velmira.exe .
 ## 已知限制
 
 - 源码运行仍可使用本机 Python；分发目录由 `build-desktop-bundle.ps1` 生成目录模式的 `backend/Velmira-backend/`，目标机器无需安装 Python，也避免每次启动解压单文件后端。分发包数据存放在 `%LOCALAPPDATA%\Velmira\data`；源码工作区继续使用项目 `data/`，`DATA_DIR` 可覆盖两者。
-- 目前只测 Windows（WebView2）；MyGo 支持 macOS/Linux，进程管理在非 Windows 上退化为普通 `Kill`。
+- Windows 使用 WebView2，Linux 使用 WebKitGTK；Linux 包需要目标发行版提供 GTK/WebKitGTK 动态库。
+  当前自动化窗口验收仍以 Windows 为主，Linux 原生包已完成交叉编译和资源/启动器校验，需在目标 Linux 桌面环境做最终显示验收。
 - 窗口只有一个；多窗口、托盘、自动更新等桌面能力留给后续。
 
 ## 许可

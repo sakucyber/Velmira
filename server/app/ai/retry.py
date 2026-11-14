@@ -15,7 +15,14 @@ async def complete(provider, *, validate=lambda value: value, guard=lambda: None
             actual = {**request}
             if callable(actual.get("user")):
                 actual["user"] = actual["user"]()
-            raw = await provider.complete(**actual)
+            # Inspect the class so AsyncMock/dynamic __getattr__ providers keep
+            # their existing complete() contract. Routed providers can reject a
+            # structurally invalid response before selecting a fallback model.
+            validated = getattr(type(provider), "complete_validated", None)
+            if callable(validated):
+                raw = await validated(provider, validate=validate, **actual)
+            else:
+                raw = await provider.complete(**actual)
         except Exception:
             guard()
             if report:

@@ -13,8 +13,9 @@ from .director import json_object, checked_text
 from .extraction import _merge_character, scene_id
 from .models import CARD_FIELDS, normalize_scene, normalize_character, stable_json
 from .providers import make_provider
+from . import chapter_memory
 
-VERSION = 1
+VERSION = 2
 CHUNK_CHARS = 6000
 COMIC_WARMUP_CHAPTERS = 10
 _task = None
@@ -40,10 +41,8 @@ def source_hash(rows):
 
 
 def current_config():
-    cfg = settings.load_settings()
-    if not cfg["enabled"] or not cfg["base_url"] or not cfg["model"]:
-        raise MangaError("请先配置并启用文本 AI", "text_ai_not_configured", 409)
-    return {"provider": "openai-compatible", "base_url": cfg["base_url"], "model": cfg["model"], "local_settings": True, "analysis_version": VERSION}
+    from .director import text_config
+    return {**text_config(), "analysis_version": VERSION}
 
 
 def chunks(paras, limit=CHUNK_CHARS):
@@ -181,7 +180,7 @@ async def reduce_summary(conn, job, provider, parts):
     return values[0]
 
 
-def save_chapter(conn, job, row, pieces, parts, summary, key):
+def save_chapter(conn, job, row, pieces, parts, summary, key, memory):
     ids = set()
     for idx, (piece, part) in enumerate(zip(pieces, parts)):
         cids = [_merge_character(conn, job["book_id"], c, row["idx"], piece["text"], commit=False) for c in part["characters"]]
@@ -202,6 +201,14 @@ def save_chapter(conn, job, row, pieces, parts, summary, key):
     value = {"title": row["title"], "summary": summary, "character_ids": sorted(ids),
              "entities": sorted({e for p in parts for e in p["entities"]}), "parts": len(parts)}
     conn.execute("INSERT OR REPLACE INTO chapter_summaries VALUES(?,?,?,?,?,?)", (job["book_id"], row["idx"], digest(row), key, stable_json(value), int(time.time())))
+    # The independently compressed capsule and quoted facts commit in the same
+    # transaction as the chapter analysis, never as a replacement for sources.
+    known = {r["name"]: r["id"] for r in conn.execute(
+        "SELECT id,name FROM characters WHERE book_id=?", (job["book_id"],))}
+    for person in conn.execute("SELECT id,aliases_json FROM characters WHERE book_id=?", (job["book_id"],)):
+        for alias in json.loads(person["aliases_json"]): known[alias] = person["id"]
+    memory = {**memory, "facts": [{**fact, "character_id": known.get(fact["character_id"], fact["character_id"])} for fact in memory.get("facts", [])]}
+    chapter_memory.save(conn, job["book_id"], row["idx"], digest(row), memory)
     return value
 
 
@@ -221,9 +228,25 @@ async def process(job):
             with conn:
                 conn.execute("UPDATE book_analysis SET current_chapter=?,current_part=0,total_parts=?,updated_at=? WHERE book_id=?",
                              (row["idx"], len(pieces), int(time.time()), job["book_id"]))
-            old = conn.execute("SELECT summary_json FROM chapter_summaries WHERE book_id=? AND chapter=? AND cache_key=?", (job["book_id"], row["idx"], key)).fetchone()
+            # A chapter is a durable unit of work.  Once its source hash has a
+            # saved analysis, changing the global model configuration must not
+            # make us spend another request on the same prose.  The book job
+            # may still be recreated for new chapters/configuration, but each
+            # valid chapter summary is reused independently.
+            old = conn.execute("SELECT summary_json FROM chapter_summaries WHERE book_id=? AND chapter=? AND source_hash=?", (job["book_id"], row["idx"], digest(row))).fetchone()
             if old:
                 value = json.loads(old[0])
+                # Backfill missing memory from original prose; never compress
+                # an old capsule again or infer facts from an abridged summary.
+                if not conn.execute("SELECT 1 FROM chapter_memory_capsules WHERE book_id=? AND chapter=? AND source_hash=? AND version=?", (job["book_id"], row["idx"], digest(row), chapter_memory.CAPSULE_VERSION)).fetchone():
+                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=[], source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"))
+                    with conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        check_active(conn, job)
+                        fresh = conn.execute("SELECT idx,title,paras_json FROM chapters WHERE book_id=? AND idx=?", (job["book_id"], row["idx"])).fetchone()
+                        if not fresh or dict(fresh) != row:
+                            raise MangaError("压缩期间章节已变化，请重新分析")
+                        chapter_memory.save(conn, job["book_id"], row["idx"], digest(row), memory)
             else:
                 parts = []
                 for idx, piece in enumerate(pieces):
@@ -234,6 +257,9 @@ async def process(job):
                     material = {"chapter": row["idx"], "title": row["title"], "previous_summary": previous,
                                 "preceding_part": parts[-1]["synopsis"] if parts else "", "known_names": names,
                                 "visual_fields": CARD_FIELDS, "text": piece["text"]}
+                    from .memory import retrieve
+                    present = [r["id"] for r in conn.execute("SELECT id,name FROM characters WHERE book_id=?", (job["book_id"],)) if r["name"] in piece["text"]]
+                    material["long_term_memory"] = retrieve(conn, job["book_id"], present, piece["text"])
                     if piece["text"].strip():
                         part = await cached_call(conn, job, provider, part_key, SYSTEM, material,
                             validate=lambda raw: normalize_part(json_object(raw), piece["text"], row["idx"]))
@@ -245,14 +271,24 @@ async def process(job):
                         conn.execute("UPDATE book_analysis SET current_part=?,updated_at=? WHERE book_id=?", (idx + 1, int(time.time()), job["book_id"]))
                     parts.append(part)
                 summary = await reduce_summary(conn, job, provider, parts)
+                memory_key = digest({"memory": key, "version": chapter_memory.CAPSULE_VERSION})
+                cached_memory = conn.execute("SELECT result_json FROM analysis_chunks WHERE book_id=? AND cache_key=?", (job["book_id"], memory_key)).fetchone()
+                if cached_memory:
+                    memory = json.loads(cached_memory[0])
+                else:
+                    memory = await chapter_memory.compress(provider, book_id=job["book_id"], chapter=row["idx"], title=row["title"], pieces=pieces, parts=parts, source_hash=digest(row), model=cfg.get("model"), guard=lambda: check_active(conn, job), report=task_log.reporter(job["book_id"], job["run_id"], "memory"))
+                    with conn:
+                        check_active(conn, job)
+                        cache(conn, job, memory_key, memory)
                 with conn:
                     conn.execute("BEGIN IMMEDIATE")
                     check_active(conn, job)
                     fresh = conn.execute("SELECT idx,title,paras_json FROM chapters WHERE book_id=? AND idx=?", (job["book_id"], row["idx"])).fetchone()
                     if not fresh or dict(fresh) != row:
                         raise MangaError("分析期间章节已变化，请重新分析")
-                    value = save_chapter(conn, job, row, pieces, parts, summary, key)
-            previous = value["summary"]
+                    value = save_chapter(conn, job, row, pieces, parts, summary, key, memory)
+            stored_memory = conn.execute("SELECT text FROM chapter_memory_capsules WHERE book_id=? AND chapter=?", (job["book_id"], row["idx"])).fetchone()
+            previous = stored_memory[0] if stored_memory else ""
             with conn:
                 task_log.record(conn, job["book_id"], job["run_id"], "analysis", f"第 {row['idx'] + 1} 章分析完成，人物卡与章节大意已保存")
             with conn:
@@ -265,45 +301,32 @@ async def process(job):
             conn.execute("UPDATE book_analysis SET status='done',error=NULL,updated_at=? WHERE book_id=?", (int(time.time()), job["book_id"]))
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as exc:
         # Gateway bodies can contain credentials. Persist only a fixed actionable message.
+        from .diagnostics import provider_failure, public_failure
+        code = provider_failure(exc)
+        hint = public_failure(code)
+        safe = ("[" + code + "] " + hint["title"] + "；" + hint["detail"]
+                if code != "provider_failed" else "整书分析中断：文本请求最多尝试 3 次；请检查 API、模型与输出格式，继续时复用已完成内容。")
         with conn:
             conn.execute("UPDATE book_analysis SET status='error',error=?,updated_at=? WHERE book_id=? AND run_id=? AND status='running'",
-                         ("整书分析中断：文本请求最多尝试 3 次；请检查 API、模型与输出格式，继续时复用已完成内容。", int(time.time()), job["book_id"], job["run_id"]))
+                         (safe, int(time.time()), job["book_id"], job["run_id"]))
     finally:
         conn.close()
 
 
 def relevant_context(conn, book_id, chapter, character_id, scene):
-    """Rank prior chapter synopses by cast and entities; future facts never enter prompts."""
-    rows = conn.execute("SELECT * FROM chapter_summaries WHERE book_id=? AND chapter<=? ORDER BY chapter", (book_id, chapter)).fetchall()
-    valid = []
-    for row in rows:
-        source = conn.execute("SELECT idx,title,paras_json FROM chapters WHERE book_id=? AND idx=?", (book_id, row["chapter"])).fetchone()
-        if source and digest(dict(source)) == row["source_hash"]:
-            valid.append({"chapter": row["chapter"], "source_hash": row["source_hash"], **json.loads(row["summary_json"])})
-    current = next((r for r in valid if r["chapter"] == chapter), None)
-    terms = set((current or {}).get("entities", [])) | set(scene.get("key_props", [])) | {scene.get("location", "")}
-    terms.discard("")
-    cast = set((current or {}).get("character_ids", [])) | {character_id}
-    def score(row):
-        return (8 * (character_id in row["character_ids"]) + 3 * len(cast & set(row["character_ids"]))
-                + 4 * len(terms & set(row["entities"])) + 2 * (row["chapter"] == chapter - 1))
-    ranked = sorted((r for r in valid if r["chapter"] < chapter and score(r) > 0), key=lambda r: (score(r), r["chapter"]), reverse=True)[:8]
-    selected = []
-    for row in ([current] if current else []) + ranked:
-        if len(stable_json(selected + [row]).encode("utf-8")) <= 24000:
-            selected.append(row)
-    selected.sort(key=lambda r: r["chapter"])
-    # Bounded character evidence from the time being illustrated.
-    card = conn.execute("SELECT card_json FROM characters WHERE id=? AND book_id=?", (character_id, book_id)).fetchone()
-    evidence = [e for e in json.loads(card[0]).get("evidence", []) if isinstance(e.get("ch"), int) and e["ch"] <= chapter] if card else []
-    bounded = []
-    for item in evidence:
-        if len(stable_json(bounded + [item]).encode("utf-8")) > 4000:
-            break
-        bounded.append(item)
-    return {"chapters": selected, "character_evidence": bounded, "chronology": "只使用目标章节及此前资料；外貌以冻结形态和参考图为准"}
+    """Compatibility shape backed by bounded, position-filtered memory only.
+
+    A caller without an exact source position receives prior chapters only;
+    the full current-chapter summary can disclose its ending before panel one.
+    """
+    point = scene.get("source_start_offset", scene.get("start_offset", 0))
+    context = chapter_memory.snapshot(conn, book_id, chapter, before_offset=point,
+        character_ids=[character_id], text=" ".join(str(x) for x in scene.get("key_props", [])))
+    return {"chapters": [{"chapter": item["chapter"], "summary": item["text"]} for item in context["capsules"]],
+            "character_evidence": context["facts"], "snapshot_hash": context["snapshot_hash"],
+            "chronology": "只使用当前原文位置之前的事实；外貌以生效形态和参考图为准"}
 
 
 def discover(conn):

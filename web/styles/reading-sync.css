@@ -1,0 +1,18 @@
+.reader-sync-comics { position: relative; }
+.reading-sync-controls { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-left: auto; }
+.reading-sync-controls .btn { width: auto; height: 30px; padding: 3px 7px; min-height: 28px; font-size: 12px; white-space: nowrap; }
+.reading-sync-controls .btn.active { color: var(--accent); border-color: currentColor; background: var(--accent-weak); }
+.reading-sync-rate { height: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 12px; }
+.reading-sync-status { margin-left: 8px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.reading-sync-panel { border: 2px solid transparent; border-radius: 10px; transition: border-color .18s ease, box-shadow .18s ease, opacity .18s ease; }
+.reading-sync-panel.is-active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+.reading-sync-panel figcaption { max-height: 3.8em; overflow: hidden; }
+.reader-column p.reading-sync-spoken { background: var(--accent-weak); border-radius: 4px; }
+::highlight(velmira-reading-cursor) { background-color: #f5bc62; color: #251c11; }
+@media (max-width: 800px) {
+  .reader-foot.has-reading-sync { flex-wrap: wrap; height: auto; min-height: 66px; padding-top: 5px; padding-bottom: 5px; gap: 4px 12px; }
+  .reader-foot.has-reading-sync .foot-page { white-space: nowrap; }
+  .reader-foot.has-reading-sync .foot-end { margin-left: auto; }
+  .reading-sync-controls { margin-left: 0; width: 100%; }
+  .reader-comics-head { flex-wrap: wrap; }
+}

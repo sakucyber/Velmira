@@ -383,7 +383,7 @@ def _import_txt(raw: bytes, filename: str) -> dict:
 def _import_epub(raw: bytes, filename: str) -> dict:
     from . import importer_epub
 
-    parsed = importer_epub.parse_book(raw, filename)
+    parsed, assets, formats, occurrences = importer_epub.parse_book(raw, filename, return_assets=True)
     return {
         "format": "epub",
         "title": parsed.title,
@@ -394,6 +394,9 @@ def _import_epub(raw: bytes, filename: str) -> dict:
         "pages": [],
         "paragraph_count": parsed.paragraph_count,
         "chapter_count": len(parsed.chapters),
+        "assets": assets,
+        "formats": formats,
+        "occurrences": occurrences,
     }
 
 
@@ -409,6 +412,8 @@ def _import_cbz(raw: bytes, book_id: str, filename: str, reset: bool) -> dict:
         "encoding": None,
         "total_chars": 0,
         "chapters": [],
+        "assets": [],
+        "formats": [],
         "pages": pages,
         "paragraph_count": 0,
         "chapter_count": len(pages),
@@ -464,6 +469,15 @@ def _import_book(raw: bytes, filename: str, force: bool = False) -> dict:
             (book_id, p["idx"], p["path"], p["width"], p["height"], p["bytes"])
             for p in data["pages"]
         ]
+        asset_rows = [
+            (f"{book_id}-asset-{idx}", book_id, chapter_idx, path, media, blob, len(blob))
+            for idx, (chapter_idx, path, media, blob) in enumerate(data.get("assets", []))
+        ]
+        format_rows = []
+        for chapter_idx, blocks in enumerate(data.get("formats", [])):
+            for para_idx, spans in enumerate(blocks):
+                if spans:
+                    format_rows.append((book_id, chapter_idx, para_idx, json.dumps(spans, ensure_ascii=False)))
 
         # 单事务写入（force 时先清掉旧章节与派生产物）
         with conn:
@@ -476,7 +490,7 @@ def _import_book(raw: bytes, filename: str, force: bool = False) -> dict:
                 )
             else:
                 for table in ("chapters", "segments", "para_fts", "search_index_state",
-                              "book_pages"):
+                    "book_pages", "epub_assets", "epub_paragraph_formats", "epub_illustrations"):
                     conn.execute(f"DELETE FROM {table} WHERE book_id=?", (book_id,))
                 conn.execute(
                     "UPDATE books SET title=?,author=?,format=?,file_path=?,sha256=?,encoding=?,"
@@ -495,6 +509,33 @@ def _import_book(raw: bytes, filename: str, force: bool = False) -> dict:
                     "INSERT INTO book_pages(book_id,idx,path,width,height,bytes)"
                     " VALUES(?,?,?,?,?,?)",
                     page_rows,
+                )
+            if asset_rows:
+                conn.executemany(
+                    "INSERT INTO epub_assets(id,book_id,chapter_idx,path,media_type,image_bytes,bytes) VALUES(?,?,?,?,?,?,?)",
+                    asset_rows,
+                )
+            if data.get("occurrences"):
+                asset_ids = {}
+                for row in asset_rows:
+                    asset_ids.setdefault(row[3], row[0])
+                illustration_rows = []
+                ordinals = {}
+                for chapter_idx, before_para, path, alt in data["occurrences"]:
+                    asset_id = asset_ids.get(path)
+                    if not asset_id:
+                        continue
+                    ordinal = ordinals.get(chapter_idx, 0); ordinals[chapter_idx] = ordinal + 1
+                    illustration_rows.append((book_id, chapter_idx, ordinal, before_para, asset_id, alt or ""))
+                if illustration_rows:
+                    conn.executemany(
+                        "INSERT INTO epub_illustrations(book_id,chapter_idx,ordinal,before_para,asset_id,alt) VALUES(?,?,?,?,?,?)",
+                        illustration_rows,
+                    )
+            if format_rows:
+                conn.executemany(
+                    "INSERT INTO epub_paragraph_formats(book_id,chapter_idx,para_idx,formats_json) VALUES(?,?,?,?)",
+                    format_rows,
                 )
 
         _PARA_COUNTS[book_id] = int(data["paragraph_count"])

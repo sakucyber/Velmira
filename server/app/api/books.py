@@ -353,6 +353,8 @@ def get_toc(book_id: str):
 @router.get("/api/books/{book_id}/chapters/{idx}")
 def get_chapter(book_id: str, idx: int):
     conn = get_conn()
+    illustrations = []
+    paragraph_formats = []
     try:
         if _book_row(conn, book_id) is None:
             return _error(404, "book_not_found", f"书籍不存在：{book_id}")
@@ -360,6 +362,16 @@ def get_chapter(book_id: str, idx: int):
             "SELECT idx, title, chars, paras_json FROM chapters WHERE book_id=? AND idx=?",
             (book_id, idx),
         ).fetchone()
+        illustrations = [{"id": asset["id"], "path": asset["path"], "media_type": asset["media_type"],
+                          "url": f"/api/books/{book_id}/epub/assets/{asset['id']}",
+                          "before_para": asset["before_para"], "ordinal": asset["ordinal"], "alt": asset["alt"]}
+                         for asset in conn.execute("""
+                             SELECT i.ordinal,i.before_para,i.alt,a.id,a.path,a.media_type
+                             FROM epub_illustrations i JOIN epub_assets a ON a.id=i.asset_id
+                             WHERE i.book_id=? AND i.chapter_idx=? ORDER BY i.ordinal
+                         """, (book_id, idx)).fetchall()]
+        paragraph_formats = [{"para": item["para_idx"], "formats": json.loads(item["formats_json"])}
+                             for item in conn.execute("SELECT para_idx,formats_json FROM epub_paragraph_formats WHERE book_id=? AND chapter_idx=? ORDER BY para_idx", (book_id, idx)).fetchall()]
     finally:
         conn.close()
     if row is None:
@@ -370,7 +382,23 @@ def get_chapter(book_id: str, idx: int):
         "title": row["title"],
         "chars": row["chars"],
         "paragraphs": json.loads(row["paras_json"]),
+        "illustrations": illustrations,
+        "paragraph_formats": paragraph_formats,
     }
+
+
+@router.get("/api/books/{book_id}/epub/assets/{asset_id}")
+def get_epub_asset(book_id: str, asset_id: str):
+    """Serve only an imported EPUB raster image belonging to this book."""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT media_type,image_bytes FROM epub_assets WHERE id=? AND book_id=?", (asset_id, book_id)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return _error(404, "asset_not_found", "EPUB 图片不存在")
+    from fastapi.responses import Response
+    return Response(content=row["image_bytes"], media_type=row["media_type"], headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
 
 
 # ---------------------------------------------------------------------------

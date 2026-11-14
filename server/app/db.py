@@ -17,6 +17,26 @@ def init_db() -> None:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
         conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        memory_fact_columns = {row[1] for row in conn.execute("PRAGMA table_info(chapter_memory_facts)")}
+        if "kind" not in memory_fact_columns:
+            conn.execute("ALTER TABLE chapter_memory_facts ADD COLUMN kind TEXT NOT NULL DEFAULT 'state'")
+        # The EPUB asset table was introduced after the first v0.4 builds. Keep
+        # existing local libraries readable when the new chapter mapping column
+        # is added without requiring a destructive database reset.
+        asset_columns = {row[1] for row in conn.execute("PRAGMA table_info(epub_assets)")}
+        if "chapter_idx" not in asset_columns:
+            conn.execute("ALTER TABLE epub_assets ADD COLUMN chapter_idx INTEGER NOT NULL DEFAULT 0")
+        # Older imports displayed unique assets at the chapter end. Seed that
+        # equivalent occurrence only for chapters with no new anchor records.
+        conn.execute("""
+            INSERT OR IGNORE INTO epub_illustrations(book_id,chapter_idx,ordinal,before_para,asset_id,alt)
+            SELECT a.book_id,a.chapter_idx,
+                   ROW_NUMBER() OVER (PARTITION BY a.book_id,a.chapter_idx ORDER BY a.id)-1,
+                   COALESCE(json_array_length(c.paras_json),0),a.id,''
+            FROM epub_assets a LEFT JOIN chapters c ON c.book_id=a.book_id AND c.idx=a.chapter_idx
+            WHERE NOT EXISTS (SELECT 1 FROM epub_illustrations i WHERE i.book_id=a.book_id AND i.chapter_idx=a.chapter_idx)
+        """)
+        conn.commit()
         # 只有首次升级需要去重；同一事务建立唯一索引，启动幂等且保留最早书签。
         conn.execute("BEGIN IMMEDIATE")
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_bookmarks_location'").fetchone():

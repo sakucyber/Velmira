@@ -25,6 +25,39 @@ CREATE TABLE IF NOT EXISTS chapters (
   UNIQUE(book_id, idx)
 );
 
+-- EPUB 图片资源：仅保存 EPUB 内被正文引用的图片，正文端通过受保护 API 读取。
+CREATE TABLE IF NOT EXISTS epub_assets (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter_idx INTEGER NOT NULL DEFAULT 0,
+  path TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  image_bytes BLOB NOT NULL,
+  bytes INTEGER NOT NULL,
+  UNIQUE(book_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_epub_assets_book ON epub_assets(book_id, chapter_idx, path);
+
+-- A resource may occur repeatedly within/across chapters. Anchors count plain
+-- text paragraphs, so book progress and annotation locators remain unchanged.
+CREATE TABLE IF NOT EXISTS epub_illustrations (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter_idx INTEGER NOT NULL,
+  ordinal INTEGER NOT NULL,
+  before_para INTEGER NOT NULL,
+  asset_id TEXT NOT NULL REFERENCES epub_assets(id) ON DELETE CASCADE,
+  alt TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(book_id, chapter_idx, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS epub_paragraph_formats (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter_idx INTEGER NOT NULL,
+  para_idx INTEGER NOT NULL,
+  formats_json TEXT NOT NULL,
+  PRIMARY KEY(book_id, chapter_idx, para_idx)
+);
+
 -- 可恢复的书架移除状态；不删除书籍或其派生数据，兼容已有数据库。
 CREATE TABLE IF NOT EXISTS library_state (
   book_id TEXT PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
@@ -112,6 +145,43 @@ CREATE TABLE IF NOT EXISTS annotations (          -- 高亮/笔记
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_book ON annotations(book_id, chapter, para);
+
+-- Local-first synchronization. Operations are immutable and globally ordered by
+-- rowid so a client can resume after a network interruption with one cursor.
+CREATE TABLE IF NOT EXISTS sync_devices (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS sync_operations (
+  cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+  op_id TEXT NOT NULL UNIQUE,
+  device_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  entity TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  base_revision INTEGER,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(device_id) REFERENCES sync_devices(id) ON DELETE CASCADE,
+  UNIQUE(device_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_operations_cursor ON sync_operations(cursor);
+CREATE INDEX IF NOT EXISTS idx_sync_operations_entity ON sync_operations(entity, entity_id, cursor);
+CREATE TABLE IF NOT EXISTS sync_entity_states (
+  entity TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  payload_json TEXT,
+  revision INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(entity, entity_id)
+);
+CREATE TABLE IF NOT EXISTS sync_device_sessions (
+  device_id TEXT PRIMARY KEY REFERENCES sync_devices(id) ON DELETE CASCADE,
+  session_hash TEXT NOT NULL
+);
 
 -- ============================================================================
 -- M2 AI 增量 DDL（文本抽取、人物卡、scene；幂等，M0/M1 老库可直接升级）
@@ -235,6 +305,48 @@ CREATE TABLE IF NOT EXISTS chapter_summaries (
   summary_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY(book_id, chapter)
+);
+
+-- Bounded chapter continuity memory. Capsules are navigation aids; quoted
+-- facts remain separately auditable and are filtered by source hash/position.
+CREATE TABLE IF NOT EXISTS chapter_memory_capsules (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  text TEXT NOT NULL,
+  tokens INTEGER NOT NULL,
+  token_method TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ok',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(book_id, chapter)
+);
+CREATE TABLE IF NOT EXISTS chapter_memory_facts (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter INTEGER NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'state',
+  character_id TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT NOT NULL,
+  quote TEXT NOT NULL,
+  start_offset INTEGER NOT NULL,
+  end_offset INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chapter_memory_facts_position
+  ON chapter_memory_facts(book_id, chapter, start_offset, character_id, field);
+CREATE TABLE IF NOT EXISTS chapter_memory_history (
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  memory_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(book_id, chapter, revision)
 );
 
 -- M3: versioned identities, reviewed references, reproducible single-panel jobs.
@@ -372,3 +484,40 @@ CREATE TABLE IF NOT EXISTS task_logs (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_task_logs_run ON task_logs(book_id,run_id,id);
+
+-- Editable, source-bound storyboards. One text request describes a whole page.
+CREATE TABLE IF NOT EXISTS storyboards (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  scene_id TEXT NOT NULL REFERENCES scenes(id),
+  cache_key TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  plan_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(book_id,cache_key)
+);
+CREATE TABLE IF NOT EXISTS render_cast (
+  job_id TEXT NOT NULL REFERENCES render_jobs(id) ON DELETE CASCADE,
+  form_id TEXT NOT NULL REFERENCES character_forms(id),
+  PRIMARY KEY(job_id,form_id)
+);
+
+CREATE TABLE IF NOT EXISTS ai_memories (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  content TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  book_id TEXT REFERENCES books(id) ON DELETE CASCADE,
+  character_id TEXT REFERENCES characters(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_memories_scope ON ai_memories(book_id,character_id,enabled);
+CREATE TABLE IF NOT EXISTS ai_web_cache (
+  cache_key TEXT PRIMARY KEY,
+  results_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);

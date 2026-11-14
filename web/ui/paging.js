@@ -10,6 +10,7 @@
    定位 Locator = {chapter, para, offset}，chunk 由 para 推导、不单独持久化。
    ============================================================ */
 import { clamp } from '../util/core.js';
+import { resolveImage } from '../util/local-media.js';
 
 export const MAX_CHUNK_CHARS = 8000;   // 单块最大字数
 const FALLBACK_MIN_CHARS = 2500;       // 超过此字数若仍只有 1 页 → 判定列布局失效
@@ -43,19 +44,25 @@ export class Pager {
     this.chapter = null;
     this.title = '';
     this.paragraphs = null;
+    this.illustrations = [];
+    this.releaseImages = [];
+    this.paragraphFormats = new Map();
     this.chunks = null;
     this.ci = 0;              // 当前块下标
     this.page = 0;
     this.pages = 1;
     this.stride = 0;          // 单页宽度（= viewport.clientWidth）
     this.vertical = false;
+    this.preferScroll = false;
     this.paraPage = null;     // Map<para, page>，仅当前块
     this.pageFirstPara = null; // Int32Array(pages)，每页第一个段落下标
     this.pageLocations = [];
     this.location = null;
 
-    this._raf = 0;
+    this._frameWaits = new Map();
+    this._renderEpoch = 0;
     this._scrollTimer = 0;
+    this._scrollAnchor = null;
     this._turnTimer = 0;
     this._busy = false;
     this.annotations = null;  // 当前章注释（只驻留当前章，切章由 reader 清空）
@@ -66,6 +73,11 @@ export class Pager {
         this._scrollTimer = 0;
         if (!this.vertical) return;
         const vp = this.viewport;
+        // gotoPara() can target a character in the middle of a visible line.
+        // Its native scroll event must not replace that exact anchor with the
+        // first visible character measured from the viewport.
+        if (this._scrollAnchor !== null && Math.abs(vp.scrollTop - this._scrollAnchor) < .5) return;
+        this._scrollAnchor = null;
         // 到达块底部 → 自动衔接下一块；到达顶部 → 衔接上一块
         if (vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 6 && this.ci < this.chunks.length - 1) {
           this._renderChunk(this.ci + 1, this.chunks[this.ci + 1].start, 'start').then(() => this.emit());
@@ -81,7 +93,13 @@ export class Pager {
 
   /* 销毁旧章 DOM 与引用（切章前必须先调用，保证内存里不残留两章正文） */
   clear() {
-    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+    this._renderEpoch++;
+    if (this._scrollTimer) { clearTimeout(this._scrollTimer); this._scrollTimer = 0; }
+    this._scrollAnchor = null;
+    for (const release of this.releaseImages) release(); this.releaseImages = [];
+    for (const [frame, resolve] of this._frameWaits) { cancelAnimationFrame(frame); resolve(); }
+    this._frameWaits.clear();
+    this._busy = false;
     this._clearTurn();
     this.paragraphs = null;
     this.chunks = null;
@@ -90,6 +108,8 @@ export class Pager {
     this.pageLocations = [];
     this.location = null;
     this.annotations = null;
+    this.illustrations = [];
+    this.paragraphFormats = new Map();
     this.page = 0;
     this.pages = 1;
     this.ci = 0;
@@ -104,17 +124,39 @@ export class Pager {
     this.viewport.scrollTop = 0;
   }
 
-  async load(chapter, title, paragraphs, target = {}) {
+  async load(chapter, title, paragraphs, target = {}, illustrations = [], paragraphFormats = []) {
     this.chapter = chapter;
     this.title = title || '';
     this.paragraphs = Array.isArray(paragraphs) ? paragraphs : [];
+    this.illustrations = Array.isArray(illustrations) ? illustrations : [];
+    this.paragraphFormats = new Map((Array.isArray(paragraphFormats) ? paragraphFormats : [])
+      .filter(item => item && Number.isInteger(item.para) && Array.isArray(item.formats))
+      .map(item => [item.para, item.formats]));
     this.chunks = buildChunks(this.paragraphs, this.title);
     const para = clamp(Number(target.para) || 0, 0, Math.max(0, this.paragraphs.length - 1));
     const ci = this.chunkIndexForPara(para);
     const landAt = target.landAt === 'end' ? 'end' : 'start';
-    await this._renderChunk(ci, para, landAt);
+    if (!(await this._renderChunk(ci, para, landAt))) return;
     this._restoreOffset(para, target.offset);
-    this.emit();
+    this.emit(landAt === 'end' ? null : { para, offset: Math.max(0, Number(target.offset) || 0) });
+  }
+
+  // Synchronised automatic reading needs a continuous scroll surface.  This
+  // preference survives chapter clear/load while ordinary manual reading can
+  // restore the original paged layout at the same character locator.
+  async setScrollReading(enabled) {
+    const wanted = !!enabled;
+    this.preferScroll = wanted;
+    if (!this.paragraphs || this.vertical === wanted) return;
+    const location = this.location || { para: this.locatePara(), offset: this.locateOffset() };
+    if (wanted) await this._enableVertical(location.para);
+    else {
+      this.vertical = false;
+      this.viewport.classList.remove('mode-scroll');
+      await this._renderChunk(this.ci, location.para, 'start');
+    }
+    this._restoreOffset(location.para, location.offset);
+    this.emit(location);
   }
 
   /* ---------- 查询 ---------- */
@@ -166,9 +208,10 @@ export class Pager {
     return Array.from(node.textContent.slice(0, offset)).length;
   }
 
-  emit() {
+  emit(anchor = null) {
     if (!this.paragraphs) return;
-    this.location = { para: this.locatePara(), offset: this.locateOffset() };
+    this.location = anchor || { para: this.locatePara(), offset: this.locateOffset() };
+    this._scrollAnchor = anchor && this.vertical ? this.viewport.scrollTop : null;
     this.onChange({
       chapter: this.chapter,
       ...this.location,
@@ -271,20 +314,20 @@ export class Pager {
     const p = clamp(Number(para) || 0, 0, Math.max(0, this.paragraphs.length - 1));
     const ci = this.chunkIndexForPara(p);
     if (this.vertical) {
-      if (ci !== this.ci) await this._renderChunk(ci, p, 'start');
+      if (ci !== this.ci && !(await this._renderChunk(ci, p, 'start'))) return;
       this._scrollToPara(p);
       this._restoreOffset(p, offset);
-      this.emit();
+      this.emit({ para: p, offset: Math.max(0, Number(offset) || 0) });
       return;
     }
     if (ci !== this.ci || !this.paraPage || !this.paraPage.has(p)) {
-      await this._renderChunk(ci, p, 'start');
+      if (!(await this._renderChunk(ci, p, 'start'))) return;
     } else {
       this.page = clamp(this.pageForPara(p), 0, this.pages - 1);
       this.applyTransform();
     }
     this._restoreOffset(p, offset);
-    this.emit();
+    this.emit({ para: p, offset: Math.max(0, Number(offset) || 0) });
   }
 
   /* 跳到指定页（URL 深链 p= 的页码口径，块内页，越界自动夹取；只改 transform） */
@@ -298,27 +341,29 @@ export class Pager {
   /* 重新测量并回到同一阅读位置（resize / 字号变化后调用） */
   async relocate() {
     if (!this.paragraphs) return;
+    const epoch = this._renderEpoch;
     // resize/字号变化已经改变 DOM；使用上次 emit 保存的字符锚点。
     const { para, offset } = this.location || { para: this.locatePara(), offset: 0 };
     if (this.vertical) {
       await this._waitFrames();
+      if (epoch !== this._renderEpoch) return;
       this._scrollToPara(para);
       this._restoreOffset(para, offset);
-      this.emit();
+      this.emit({ para, offset });
       return;
     }
     await this._waitFrames();
+    if (epoch !== this._renderEpoch) return;
     const m = this._measure();
     this._applyMeasure(m);
     this.page = clamp(this.pageForPara(para), 0, this.pages - 1);
     this.applyTransform();
     this._restoreOffset(para, offset);
-    this.emit();
+    this.emit({ para, offset });
   }
 
   destroy() {
     this.viewport.removeEventListener('scroll', this._onScroll);
-    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
     if (this._scrollTimer) { clearTimeout(this._scrollTimer); this._scrollTimer = 0; }
     this.clear();
   }
@@ -383,29 +428,68 @@ export class Pager {
     if (!items.length) return;
     items.sort((x, y) => x.s - y.s || x.e - y.e);
     const frag = document.createDocumentFragment();
-    let cursor = 0;
-    for (const it of items) {
-      if (it.e <= cursor) continue;      // 完全被前一个注释覆盖
-      if (it.s < cursor) it.s = cursor;  // 部分重叠：裁掉重叠部分，避免嵌套 mark
-      if (it.s > cursor) frag.appendChild(document.createTextNode(text.slice(cursor, it.s)));
-      const mark = document.createElement('mark');
-      mark.className = 'ann ann-' + it.color + (it.hasNote ? ' ann-note' : '');
-      mark.setAttribute('data-ann', it.id);
-      mark.tabIndex = 0;
-      mark.setAttribute('role', 'button');
-      mark.setAttribute('aria-label', (it.hasNote ? '查看批注：' : '编辑高亮：') + text.slice(it.s, it.e));
-      mark.setAttribute('aria-haspopup', 'dialog');
-      mark.textContent = text.slice(it.s, it.e);
-      frag.appendChild(mark);
-      cursor = it.e;
+    const formats = (this.paragraphFormats.get(Number(node.dataset.i)) || [])
+      .filter(item => item && Number.isFinite(item.start) && Number.isFinite(item.end) && item.start < item.end);
+    const boundaries = new Set([0, len]);
+    for (const item of items) boundaries.add(item.s), boundaries.add(item.e);
+    for (const item of formats) boundaries.add(Math.max(0, Math.min(len, item.start))), boundaries.add(Math.max(0, Math.min(len, item.end)));
+    const points = [...boundaries].sort((a, b) => a - b);
+    const makeInline = (kind, child) => {
+      const tag = ({bold: 'strong', strong: 'strong', italic: 'em', em: 'em', underline: 'u', u: 'u', strike: 's', s: 's', code: 'code'}[kind]) || 'span';
+      const value = document.createElement(tag);
+      if (tag === 'span') value.className = 'epub-inline-' + String(kind).replace(/[^a-z0-9_-]/gi, '');
+      value.appendChild(child); return value;
+    };
+    const annotationAt = offset => items.find(item => item.s <= offset && item.e > offset);
+    for (let point = 0; point < points.length - 1; point++) {
+      const start = points[point], end = points[point + 1];
+      if (end <= start) continue;
+      let child = document.createTextNode(text.slice(start, end));
+      const activeFormats = formats.filter(item => item.start <= start && item.end >= end);
+      for (let i = activeFormats.length - 1; i >= 0; i--) child = makeInline(activeFormats[i].kind, child);
+      const annotation = annotationAt(start);
+      if (annotation) {
+        const mark = document.createElement('mark');
+        mark.className = 'ann ann-' + annotation.color + (annotation.hasNote ? ' ann-note' : '');
+        mark.setAttribute('data-ann', annotation.id); mark.tabIndex = 0; mark.setAttribute('role', 'button');
+        mark.setAttribute('aria-label', (annotation.hasNote ? '查看批注：' : '编辑高亮：') + text.slice(annotation.s, annotation.e));
+        mark.setAttribute('aria-haspopup', 'dialog'); mark.appendChild(child); child = mark;
+      }
+      frag.appendChild(child);
     }
-    if (cursor < len) frag.appendChild(document.createTextNode(text.slice(cursor)));
+    node.replaceChildren(frag);
+  }
+
+  _renderParagraph(node, text, formats) {
+    if (!Array.isArray(formats) || !formats.length) { node.textContent = text; return; }
+    const boundaries = new Set([0, text.length]);
+    for (const item of formats) {
+      if (!item || !Number.isFinite(item.start) || !Number.isFinite(item.end)) continue;
+      boundaries.add(Math.max(0, Math.min(text.length, item.start)));
+      boundaries.add(Math.max(0, Math.min(text.length, item.end)));
+    }
+    const points = [...boundaries].sort((a, b) => a - b), frag = document.createDocumentFragment();
+    const tags = {bold: 'strong', strong: 'strong', italic: 'em', em: 'em', underline: 'u', u: 'u', strike: 's', s: 's', code: 'code'};
+    for (let i = 0; i < points.length - 1; i++) {
+      const start = points[i], end = points[i + 1]; if (end <= start) continue;
+      let child = document.createTextNode(text.slice(start, end));
+      const active = formats.filter(item => item && item.start <= start && item.end >= end);
+      for (let j = active.length - 1; j >= 0; j--) {
+        const tag = tags[active[j].kind] || 'span', wrap = document.createElement(tag);
+        if (tag === 'span') wrap.className = 'epub-inline-' + String(active[j].kind).replace(/[^a-z0-9_-]/gi, '');
+        wrap.appendChild(child); child = wrap;
+      }
+      frag.appendChild(child);
+    }
     node.replaceChildren(frag);
   }
 
   /* ---------- 内部：渲染 / 测量 ---------- */
 
   async _renderChunk(ci, focusPara, landAt) {
+    const epoch = ++this._renderEpoch;
+    if (!this.chunks?.[ci]) return false;
+    for (const release of this.releaseImages) release(); this.releaseImages = [];
     this.ci = ci;
     this._busy = true;
     this._clearTurn();
@@ -418,25 +502,58 @@ export class Pager {
       h.textContent = this.title;
       frag.appendChild(h);
     }
+    const atParagraph = new Map();
+    for (const item of this.illustrations) {
+      if (!item || typeof item.url !== 'string') continue;
+      const anchor = Number.isInteger(item.before_para) ? clamp(item.before_para, 0, this.paragraphs.length) : this.paragraphs.length;
+      if (!atParagraph.has(anchor)) atParagraph.set(anchor, []);
+      atParagraph.get(anchor).push(item);
+    }
+    const appendIllustrations = async (anchor) => {
+      const items = atParagraph.get(anchor);
+      if (!items?.length) return true;
+      atParagraph.delete(anchor);
+      const gallery = document.createElement('div'); gallery.className = 'epub-illustrations'; gallery.setAttribute('aria-label', '章节插图');
+      gallery.dataset.beforePara = String(anchor);
+      for (const item of items) {
+        const bookId = item.url.match(/^\/api\/books\/([^/]+)\//)?.[1];
+        const media = bookId ? await resolveImage(decodeURIComponent(bookId), item.url) : { url: item.url, release: () => {} };
+        if (epoch !== this._renderEpoch) { media.release(); return false; }
+        this.releaseImages.push(media.release);
+        const image = document.createElement('img'); image.src = media.url; image.alt = item.alt || '章节插图'; image.referrerPolicy = 'no-referrer';
+        image.addEventListener('load', () => { if (epoch === this._renderEpoch) this.relocate(); }, { once: true });
+        gallery.appendChild(image);
+      }
+      if (gallery.childElementCount) frag.appendChild(gallery);
+      return true;
+    };
     for (let i = chunk.start; i <= chunk.end; i++) {
+      if (!(await appendIllustrations(i))) return false;
       const p = document.createElement('p');
       p.id = 'p' + i;
       p.setAttribute('data-i', String(i));
-      p.textContent = this.paragraphs[i];
+      this._renderParagraph(p, this.paragraphs[i], this.paragraphFormats.get(i));
       frag.appendChild(p);
     }
+    if (ci === this.chunks.length - 1 && !(await appendIllustrations(this.paragraphs.length))) return false;
     this.column.appendChild(frag);
     this._applyAnnotations();
     this.column.style.transform = 'translateX(0px)';
     await this._waitFrames();
+    if (epoch !== this._renderEpoch) return false;
 
+    if (this.preferScroll && !this.vertical) {
+      await this._enableVertical(focusPara, epoch);
+      if (epoch !== this._renderEpoch) return false;
+    }
     if (!this.vertical) {
       const m = this._measure();
       // 判定列布局失效：长文本仍挤在 1 页 → 切垂直滚动
       if (m.chars > FALLBACK_MIN_CHARS && m.pages <= 1) {
-        await this._enableVertical(focusPara);
+        await this._enableVertical(focusPara, epoch);
+        if (epoch !== this._renderEpoch) return false;
         this._busy = false;
-        return;
+        return true;
       }
       this._applyMeasure(m);
       if (landAt === 'end') this.page = this.pages - 1;
@@ -447,17 +564,20 @@ export class Pager {
       this._scrollToPara(focusPara);
     }
     this._busy = false;
+    return true;
   }
 
   _waitFrames() {
     return new Promise((resolve) => {
-      if (this._raf) cancelAnimationFrame(this._raf);
-      this._raf = requestAnimationFrame(() => {
-        this._raf = requestAnimationFrame(() => {
-          this._raf = 0;
+      const first = requestAnimationFrame(() => {
+        this._frameWaits.delete(first);
+        const second = requestAnimationFrame(() => {
+          this._frameWaits.delete(second);
           resolve();
         });
+        this._frameWaits.set(second, resolve);
       });
+      this._frameWaits.set(first, resolve);
     });
   }
 
@@ -509,7 +629,7 @@ export class Pager {
     this.pageFirstPara = Int32Array.from(this.pageLocations, (loc) => loc.para);
   }
 
-  async _enableVertical(focusPara) {
+  async _enableVertical(focusPara, epoch = this._renderEpoch) {
     this.vertical = true;
     this.viewport.classList.add('mode-scroll');
     this.column.style.transform = 'none';
@@ -518,6 +638,7 @@ export class Pager {
     this.pages = 1;
     this.page = 0;
     await this._waitFrames();
+    if (epoch !== this._renderEpoch) return;
     this._scrollToPara(focusPara);
     this.onVertical();
   }

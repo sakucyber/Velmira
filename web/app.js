@@ -4,6 +4,33 @@
    /?book=<id>&ch=&p=&para=  → 阅读器
    主题在 index.html 内联脚本里已尽早应用，这里只做路由分发。
    ============================================================ */
+import { bootstrapAuth, getAuthState } from './util/core.js';
+import { localStore } from './util/local-store.js';
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(() => {});
+}
+
+window.addEventListener('velmira:authentication-required', () => location.reload(), { once: true });
+
+if (await bootstrapAuth()) {
+if (getAuthState().standalone) {
+  const { showOnboarding } = await import('./ui/onboarding.js');
+  await showOnboarding();
+}
+let syncBusy = false;
+async function autoSync() {
+  if (getAuthState().standalone || syncBusy || !navigator.onLine || document.hidden || (await localStore.meta('auto-sync')) === false) return;
+  syncBusy = true;
+  try { await localStore.sync(); window.dispatchEvent(new Event('velmira:synced')); }
+  catch { /* Edits stay on the device until the next successful sync. */ }
+  finally { syncBusy = false; }
+}
+window.addEventListener('online', autoSync);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) autoSync(); });
+const syncTimer = setInterval(autoSync, 60000);
+window.addEventListener('pagehide', () => clearInterval(syncTimer), { once: true });
+autoSync();
 const params = new URLSearchParams(location.search);
 const bookId = params.get('book');
 const debug = params.get('debug') === '1';
@@ -42,4 +69,5 @@ if (bookId) {
   libView.hidden = false;
   const { mountLibrary } = await import('./ui/library.js');
   await mountLibrary();
+}
 }

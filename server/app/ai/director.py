@@ -97,17 +97,37 @@ def prepare_material(conn, book_id, payload, render_config=None):
         "book_context": relevant_context(conn, book_id, row["chapter_id"], form["character_id"], scene),
         "action": action, "para": para, "flashback": flashback, "style": cfg["style"],
     }
+    from .memory import retrieve
+    material["long_term_memory"] = retrieve(conn, book_id, [form["character_id"]], segment["text"])
     return material
 
 
 def text_config():
     settings = load_settings()
-    if not settings["enabled"] or not settings["base_url"] or not settings["model"]:
+    from .routing import fingerprint
+    pool = fingerprint("text")
+    # The context-AI switch remains explicit, while an enabled text pool
+    # supplies the endpoint and model.  A standalone address/model is only
+    # required when the pool is disabled.
+    if not settings["enabled"] or (not pool and (not settings["base_url"] or not settings["model"])):
         raise MangaError("请先在出图设置中配置并启用文本 AI", "text_ai_not_configured", 409)
-    return {"provider": "openai-compatible", "base_url": settings["base_url"], "model": settings["model"], "local_settings": True}
+    first = pool["connections"][0] if pool else settings
+    result = {"provider": "openai-compatible", "base_url": first["base_url"], "model": first["model"], "local_settings": True}
+    if pool:
+        result["routing"] = pool
+    from .features import load as feature_settings
+    from .memory import fingerprint as memory_fingerprint
+    result["creative_settings"] = feature_settings()
+    result["memory_version"] = memory_fingerprint()
+    return result
 
 
 async def write_plan(material, settings, *, report=None, guard=lambda: None):
+    from .web_search import enrich
+    context = material.get("book_context", {})
+    terms = [material.get("focus_character", ""), context.get("location", ""),
+             *context.get("entities", []), *context.get("key_props", [])]
+    material = await enrich(material, " ".join(str(term) for term in terms if term)[:500])
     provider = make_provider(settings)
     def summary_value(raw):
         raw = json_object(raw)
@@ -134,10 +154,12 @@ async def write_plan(material, settings, *, report=None, guard=lambda: None):
                                       validate=prompt_value, report=report, guard=guard, label="生图提示词")
     except MangaError as exc:
         raise MangaError("文本 AI 已尝试 3 次：" + str(exc), exc.code, exc.status) from None
-    except Exception:
+    except Exception as exc:
         guard()
-        raise MangaError("文本 AI 已尝试 3 次仍失败，请检查连接与输出；尚未提交生图任务", "text_ai_failed", 502) from None
-    return {"summary": summary, "visual_prompt": prompt}
+        raise MangaError("文本 AI 已尝试 3 次仍失败，请检查连接与输出；尚未提交生图任务", "text_ai_failed", 502,
+                         status_code=getattr(exc, "status_code", None),
+                         error_code=getattr(exc, "error_code", None)) from None
+    return {"summary": summary, "visual_prompt": prompt, "web_context": material.get("web_context")}
 
 
 def resolve_plan(conn, book_id, plan_id, payload, cfg):

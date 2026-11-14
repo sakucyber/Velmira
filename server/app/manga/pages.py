@@ -50,7 +50,9 @@ def sources(conn, book_id, spec):
         if not path.is_file():
             raise MangaError("分镜图片已丢失", "panel_image_missing", 409)
         result.append({"job_id": row["id"], "image_path": row["image_path"], "image_hash": file_hash(path),
-                       "config_hash": row["config_hash"], "chapter": snap["chapter"], "para": snap["para"]})
+                       "config_hash": row["config_hash"], "chapter": snap["chapter"], "para": snap["para"],
+                       **({"board_id": snap["board_id"]} if snap.get("board_id") else {}),
+                       **({"source_span": snap["source_span"]} if isinstance(snap.get("source_span"), dict) else {})})
     return result
 
 
@@ -63,11 +65,28 @@ def page_row(conn, book_id, page_id, deleted=False):
 
 def check_page(conn, row):
     spec = json.loads(row["spec_json"])
-    if sources(conn, row["book_id"], spec) != json.loads(row["sources_json"]):
+    if not same_sources(sources(conn, row["book_id"], spec), json.loads(row["sources_json"])):
         raise MangaError("分镜图或身份已变化，请重新保存漫画页", "manga_page_stale", 409)
     path = s.asset_path(row["image_path"])
     if not path.is_file() or file_hash(path) != row["image_hash"]:
         raise MangaError("漫画页图片丢失或已变化，请重新保存", "manga_page_stale", 409)
+
+
+def same_sources(current, captured):
+    """Only tolerate metadata introduced after an older page was saved."""
+    if not isinstance(captured, list) or len(current) != len(captured):
+        return False
+    required = {"job_id", "image_path", "image_hash", "config_hash", "chapter", "para"}
+    optional = {"board_id", "source_span"}
+    for actual, saved in zip(current, captured):
+        if not isinstance(saved, dict) or not required <= saved.keys():
+            return False
+        # Missing legacy metadata is compatible. Once captured, these fields
+        # remain part of the integrity check just like the image and identity.
+        comparable = {key: value for key, value in actual.items() if key not in optional or key in saved}
+        if comparable != saved:
+            return False
+    return True
 
 
 def public_page(conn, row, verify=True):
@@ -77,8 +96,19 @@ def public_page(conn, row, verify=True):
             check_page(conn, row)
         except (ValueError, OSError) as exc:
             error = str(exc)
+    spec = json.loads(row["spec_json"])
+    captured = json.loads(row["sources_json"])
+    source_map = []
+    for index, panel in enumerate(spec.get("panels", [])):
+        source = captured[index] if index < len(captured) else {}
+        item = {"panel_index": index, "chapter": source.get("chapter"), "para": source.get("para")}
+        # The immutable generation snapshot is authoritative. Editable page
+        # metadata must never silently remap an image to unrelated prose.
+        span = source.get("source_span")
+        if isinstance(span, dict): item["source_span"] = span
+        source_map.append(item)
     return {"id": row["id"], "position": row["position"], "revision": row["revision"], "deleted": bool(row["deleted"]),
-            "spec": json.loads(row["spec_json"]), "status": "stale" if error else "ready", "error": error,
+            "spec": spec, "source_map": source_map, "status": "stale" if error else "ready", "error": error,
             "url": f'/api/books/{row["book_id"]}/manga/pages/{row["id"]}/image?revision={row["revision"]}',
             "updated_at": row["updated_at"]}
 
@@ -151,15 +181,27 @@ def auto_pages(book_id, payload):
     with connection(book_id) as conn:
         rows = sources(conn, book_id, c.validate({**options, "panels": [{"job_id": ids[0]}]}))
         for pid in ids[1:]: rows += sources(conn, book_id, {"panels": [{"job_id": pid}]})
-    # Preserve supplied order within each chapter, never join two chapters on one page.
+    # Preserve supplied order within each chapter, never join two chapters on one
+    # page, and keep the director's storyboard page boundaries under auto layout.
     grouped = {}
-    for row in rows: grouped.setdefault(row["chapter"], []).append(row["job_id"])
-    size = c.LAYOUTS.get(options.get("layout"), 4)
+    automatic_layout = options.get("layout", "auto") == "auto"
+    for row in rows:
+        grouped.setdefault(row["chapter"], []).append(row)
+    size = c.LAYOUTS.get(options.get("layout"), 7)
     specs = []
     for chapter in sorted(grouped):
         items = grouped[chapter]
-        for start in range(0, len(items), size):
-            specs.append({**options, "panels": [{"job_id": pid} for pid in items[start:start + size]]})
+        batches, batch = [], []
+        for item in items:
+            # Adjacent unplanned images may share one page. A planned board is
+            # never combined with another planned board or an unplanned batch.
+            boundary = automatic_layout and batch and item.get("board_id") != batch[-1].get("board_id")
+            if batch and (len(batch) >= size or boundary):
+                batches.append(batch); batch = []
+            batch.append(item)
+        if batch: batches.append(batch)
+        for batch in batches:
+            specs.append({**options, "panels": [{"job_id": item["job_id"]} for item in batch]})
     return create_pages(book_id, specs)
 
 
@@ -193,7 +235,10 @@ def export_book(book_id):
         for row in rows:
             spec, src = json.loads(row["spec_json"]), json.loads(row["sources_json"])
             pages.append({"id": row["id"], "revision": row["revision"], "image_hash": row["image_hash"], "image_path": row["image_path"],
-                          "chapter": src[0]["chapter"], "para": src[0]["para"], "width": spec["width"], "height": spec["height"]})
+                          "chapter": src[0]["chapter"], "para": src[0]["para"], "width": spec["width"], "height": spec["height"],
+                          "source_map": [{"panel_index": index, "chapter": src[index].get("chapter"), "para": src[index].get("para"),
+                                          **({"source_span": src[index]["source_span"]} if isinstance(src[index].get("source_span"), dict) else {})}
+                                         for index, panel in enumerate(spec.get("panels", [])) if index < len(src)]})
         manifest = {"version": 1, "source_book_id": book_id, "title": book["title"] + " · 漫画", "author": book["author"], "pages": pages}
         fingerprint = digest(manifest)
         cached = cached_export(conn, book_id, fingerprint, len(pages))

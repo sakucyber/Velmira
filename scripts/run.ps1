@@ -19,6 +19,6 @@ Write-Host "[run] data dir  = $(if ($env:DATA_DIR) { $env:DATA_DIR } else { Join
 Write-Host "[run] bind      = $BindAddress"
 Write-Host "[run] url       = http://${BindAddress}:$Port/  (本机 http://127.0.0.1:$Port/)"
 
-$args = @("-m", "uvicorn", "server.app.main:app", "--host", $BindAddress, "--port", "$Port")
+$args = @("-m", "uvicorn", "server.app.main:app", "--host", $BindAddress, "--port", "$Port", "--no-proxy-headers")
 if ($Reload) { $args += "--reload" }
 python @args

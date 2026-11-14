@@ -1,0 +1,37 @@
+.mobile-ai { min-width: 0; }
+.mai-card { padding: 14px; margin: 0 0 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); min-width: 0; }
+.mai-card h3 { font-size: 16px; margin: 0 0 10px; }
+.mai-connection-editor > summary { cursor: pointer; font-size: 16px; font-weight: 700; min-height: 42px; line-height: 22px; padding: 10px 0; }
+.mai-connection-editor > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.mai-connection-editor[open] > summary { margin-bottom: 12px; }
+.mai-connection-editor-body { min-width: 0; }
+.mai-field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; font-size: 13px; min-width: 0; }
+.mai-field input, .mai-field textarea, .mai-field select { min-width: 0; max-width: 100%; width: 100%; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 8px; padding: 10px; font: inherit; min-height: 42px; }
+.mai-field textarea { resize: vertical; line-height: 1.65; }
+.mai-field :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mai-check { flex-direction: row; justify-content: space-between; align-items: center; }
+.mai-check input { width: 24px; min-height: 24px; }
+.mai-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.mai-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0; }
+.mai-actions > .mai-field { flex: 1; min-width: 150px; }
+.mai-report { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
+.mai-report[data-error="true"] { color: var(--danger); }
+.mai-connection, .mai-history { border-top: 1px solid var(--line); padding: 14px 0; margin: 8px 0; overflow-wrap: anywhere; }
+.mai-connection > small { display: block; color: var(--muted); margin-top: 6px; }
+.mai-connection > p { font-size: 13px; }
+.mai-pool { padding: 0; list-style: none; }
+.mai-pool-member { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; background: var(--bg); }
+.mai-pool-member.dragging { opacity: .6; border-color: var(--accent); }
+.mai-grip { touch-action: none; cursor: grab; padding: 0 10px; }
+.mai-member-text { flex: 1; min-width: 100px; overflow-wrap: anywhere; }
+.mai-member-text strong, .mai-member-text small { display: block; }
+.mai-member-text small { color: var(--muted); }
+.mai-result-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.8; max-height: 55vh; overflow-y: auto; }
+.mai-history img { max-width: 100%; height: auto; border-radius: 8px; display: block; }
+.mai-history small { color: var(--muted); }
+.mai-sources article { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
+.mai-sources p { font-size: 13px; line-height: 1.6; }
+.drawer-mobile-ai { width: min(680px,100vw); }
+.rail-ai { color: var(--accent); }
+@media(max-width:1023px) { .rail-ai { position: fixed; left: max(116px,calc(116px + env(safe-area-inset-left))); bottom: max(14px,env(safe-area-inset-bottom)); padding: 0 16px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow-soft); width: auto; z-index: 20; } }
+@media(max-width:640px) { .mai-card { padding: 12px; } .mai-grid { grid-template-columns: 1fr; gap: 0; } .mai-pool-member > .mai-actions { margin: 0; } }

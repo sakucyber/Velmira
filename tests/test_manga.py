@@ -63,6 +63,22 @@ class MangaTests(unittest.TestCase):
         self.assertEqual(self.api("/probe")["provider"], "mock")
         self.assertEqual(self.client.get("/api/books/missing/manga/config").status_code, 404)
 
+    def test_generation_presets_preserve_manual_parameters_until_selected(self):
+        legacy = validate_config({"provider": "mock", "timeout": 750, "face_threshold": .66})
+        legacy.pop("preset")
+        read = validate_config({}, legacy)
+        self.assertEqual((read["preset"], read["timeout"], read["face_threshold"]), ("balanced", 750, .66))
+        stable = self.api("/config", {"preset": "stable", "timeout": 800}, "PATCH")["config"]
+        self.assertEqual((stable["timeout"], stable["max_attempts"], stable["review_storyboards"]), (800, 3, True))
+        self.api("/config", {"style_preset": "manga", "face_threshold": .64}, "PATCH")
+        reread = self.api("/config", method="GET")["config"]
+        self.assertEqual((reread["timeout"], reread["face_threshold"], reread["review_storyboards"]), (800, .64, True))
+        fast = self.api("/config", {"preset": "fast"}, "PATCH")["config"]
+        self.assertEqual((fast["timeout"], fast["max_attempts"], fast["review_storyboards"]), (300, 2, False))
+        for invalid in ("unknown", {}, None):
+            with self.subTest(invalid=invalid):
+                self.api("/config", {"preset": invalid}, "PATCH", 400)
+
     def test_parallel_first_load_creates_only_one_base_form(self):
         from concurrent.futures import ThreadPoolExecutor
         self.sql("DELETE FROM character_forms")

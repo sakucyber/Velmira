@@ -19,6 +19,7 @@
 
     <ScrollView
         android:id="@+id/setup"
+        android:visibility="gone"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:fillViewport="true"
@@ -50,6 +51,15 @@
                 android:text="@string/tagline"
                 android:textSize="14sp"
                 android:textColor="@color/muted" />
+
+            <Button
+                android:id="@+id/open_local"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="24dp"
+                android:text="返回本机书库"
+                android:textSize="15sp"
+                android:textColor="@color/ink" />
 
             <TextView
                 android:layout_width="match_parent"

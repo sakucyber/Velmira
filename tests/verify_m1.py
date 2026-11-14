@@ -2,7 +2,7 @@
 """M1 独立验收 API 实测（verifier-m1 所有，tests/ 部分）。
 
 覆盖：A 健康/品牌字段、C EPUB 导入、D CBZ 分页媒体/进度、E 注释 CRUD+校验、
-F 书签、I(部分) 持久化。TXT 回归由 tests/verify_m0.py 负责（版本断言已更新 0.4.0）。
+F 书签、I(部分) 持久化。TXT 回归由 tests/verify_m0.py 负责（版本断言已更新 0.4.2）。
 
 用法：
   python tests/verify_m1.py --base http://127.0.0.1:8787 [--phase api|persist]
@@ -227,7 +227,7 @@ def phase_api():
     global BASE
     # ---------- A 健康/品牌 ----------
     st, hdrs, obj, raw, ms = api("GET", "/api/health")
-    ok = st == 200 and obj.get("name") == "Velmira" and obj.get("version") == "0.4.0"
+    ok = st == 200 and obj.get("name") == "Velmira" and obj.get("version") == "0.4.2"
     add("A1 GET /api/health name/version", "PASS" if ok else "FAIL",
         f"status={st} name={obj.get('name')!r} version={obj.get('version')!r} data_dir={obj.get('data_dir')!r}")
 
@@ -309,7 +309,8 @@ def phase_api():
     expected = dict(entries)[  "page_1.png"]
     ct = hget(hdrs, "Content-Type")
     cc = hget(hdrs, "Cache-Control")
-    add("D5 /media 字节逐字节一致 + 头", "PASS" if st == 200 and raw == expected and "image/png" in ct and "immutable" in cc else "FAIL",
+    # Pairing can be revoked; private media must never stay in a shared cache.
+    add("D5 /media 字节逐字节一致 + 私有缓存头", "PASS" if st == 200 and raw == expected and "image/png" in ct and "private" in cc and "no-store" in cc else "FAIL",
         f"status={st} bytes={len(raw)}=={len(expected)} identical={raw == expected} ctype={ct!r} cache={cc!r}")
     st, hdrs, obj, raw2, _ = api("GET", f"/media/{cbz_id}/1")
     add("D6 /media/1 对应第 2 页字节", "PASS" if st == 200 and raw2 == dict(entries)["page_2.png"] else "FAIL",

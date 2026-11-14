@@ -25,8 +25,10 @@ def panels(book_id: str):
                 p.valid_snapshot(conn, row, snap)
             except (ValueError, OSError) as exc:
                 error = str(exc)
+            scene, panel = snap.get("scene") or {}, snap.get("panel") or {}
+            summary = scene.get("summary") or panel.get("caption") or panel.get("action") or ""
             result.append({"id": row["id"], "status": "stale" if error else row["status"], "error": error,
-                           "chapter": snap["chapter"], "para": snap["para"], "summary": snap["scene"].get("summary", ""),
+                           "chapter": snap["chapter"], "para": snap["para"], "summary": summary,
                            "shot": snap["shot"], "url": f'/api/books/{book_id}/manga/assets/{row["id"]}'})
         return {"panels": result}
 
