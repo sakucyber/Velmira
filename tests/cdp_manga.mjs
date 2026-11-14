@@ -61,7 +61,7 @@ try {
   await waitFor('!!document.querySelector(".drawer-ai.open")');
   await clickText('漫画生成'); await waitFor('!!document.querySelector(".manga-tabs") && document.querySelector(".manga-tabs").children.length===5');
   await clickText('漫画与画风设置'); await waitFor('!!document.querySelector("[aria-label=图像后端]")');
-  await set('图像后端', 'mock'); await clickText('保存设置'); await sleep(300);
+  await set('图像后端', 'mock'); await clickText('立即保存设置'); await sleep(300);
   await clickText('检测已保存的连接与模型');
   await waitFor('document.querySelector(".manga-studio").textContent.includes("占位图仅供流程验证")');
   await evaluate('document.querySelector(".drawer-settings .drawer-close").click()'); await waitFor('!document.querySelector(".drawer-settings.open")');
@@ -122,7 +122,7 @@ try {
   console.log('[PASS] M4 手机编辑器、漫画阅读与小说双向切换');
   await clickText('漫画与画风设置'); await waitFor('!!document.querySelector("[aria-label=默认生图风格]")');
   assert.equal(await evaluate('document.querySelector("[aria-label=默认生图风格]").value'), 'anime');
-  await set('默认生图风格', 'watercolor'); await clickText('保存设置');
+  await set('默认生图风格', 'watercolor'); await clickText('立即保存设置');
   await waitFor('document.querySelector(".manga-studio [aria-label=画风]").value.includes("watercolor")');
   assert.equal((await api(prefix + '/config')).config.style_preset, 'watercolor');
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);

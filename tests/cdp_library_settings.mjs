@@ -120,6 +120,9 @@ sys.stdout.write(base64.b64encode(b.getvalue()).decode())`], { encoding: 'utf8' 
   await waitFor(`!document.querySelector('dialog') && document.querySelector('.book-card[data-id="${text.id}"] .book-title').textContent==='山海之间·修订'`);
   await click(`.book-card[data-id="${text.id}"] .book-more`); await click('.book-details .btn-danger');
   await waitFor(`!document.querySelector('dialog') && !document.querySelector('.book-card[data-id="${text.id}"]')`);
+  // Headless Chrome can lose an immediately preceding localStorage write when
+  // Page.reload follows in the same task; a round-trip also asserts the value.
+  await waitFor('JSON.parse(localStorage.getItem("velmira.shelf")||"{}").density==="compact"');
   await send('Page.reload'); await waitFor('!!window.__lib'); await select('#lib-status', 'archived');
   assert.ok(await evaluate('document.querySelector("#library-view").classList.contains("shelf-compact")'));
   await waitFor(`!!document.querySelector('.book-card[data-id="${text.id}"]')`);

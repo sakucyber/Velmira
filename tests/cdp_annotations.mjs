@@ -122,8 +122,12 @@ try {
   assert.equal(await evaluate("document.querySelectorAll('.ann-note-content img').length"), 0);
   pass('鼠标悬停直接显示完整批注，HTML 作为文字展示');
   await screenshot('annotation-desktop.png');
-  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20, y: 20 });
-  await sleep(250);
+  // Move away from both the mark and the popover. The popover is clamped to
+  // the top-left when the annotated line is the first line, so the old (20,20)
+  // target stayed inside the popover and correctly kept it open.
+  const away = await evaluate('({x: Math.round(innerWidth / 2), y: Math.round(innerHeight - 60)})');
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...away });
+  await sleep(300);
   assert.equal(await evaluate("!!document.querySelector('#ann-popover')"), false);
   pass('鼠标移开自动收起');
 
