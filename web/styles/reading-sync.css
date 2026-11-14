@@ -14,5 +14,7 @@
   .reader-foot.has-reading-sync .foot-page { white-space: nowrap; }
   .reader-foot.has-reading-sync .foot-end { margin-left: auto; }
   .reading-sync-controls { margin-left: 0; width: 100%; }
+  /* Keep every control at a usable touch target on a phone. */
+  .reading-sync-controls .btn { min-width: 44px; }
   .reader-comics-head { flex-wrap: wrap; }
 }

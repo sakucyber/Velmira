@@ -173,10 +173,13 @@ try {
   await shot('automatic-draft-mobile');
   await click('.drawer-automatic .drawer-close');
   await waitFor('!document.querySelector(".drawer-automatic.open")');
+  // Let the mobile sheet's close transition and reflow settle before measuring.
+  await sleep(400);
   assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
   assert.ok(await evaluate('document.querySelector(".auto-manga-toggle").getBoundingClientRect().width>=80'));
   assert.ok(await evaluate('document.querySelector(".reader-comics").getBoundingClientRect().top >= document.querySelector("#reader-viewport").getBoundingClientRect().bottom - 1'));
-  assert.equal(await evaluate('[...document.querySelectorAll(".reading-sync-controls button")].filter(b=>!b.hidden).every(b=>{const r=b.getBoundingClientRect();return r.width>=40&&r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight;})'), true);
+  const syncControls = await evaluate(`[...document.querySelectorAll(".reading-sync-controls button")].filter(b=>!b.hidden).map(b=>{const r=b.getBoundingClientRect();return {text:b.textContent,w:Math.round(r.width),left:Math.round(r.left),right:Math.round(r.right),bottom:Math.round(r.bottom),iw:innerWidth,ih:innerHeight};})`);
+  assert.ok(syncControls.every(b=>b.w>=40&&b.left>=0&&b.right<=b.iw&&b.bottom<=b.ih), JSON.stringify(syncControls));
   assert.equal(await evaluate('document.querySelector("#page-label").getBoundingClientRect().bottom<=innerHeight'), true);
   await sleep(300); await shot('automatic-reader-mobile');
   await send('Page.navigate', { url: base + '/?book=' + book.id + '&ch=1&debug=1' });
