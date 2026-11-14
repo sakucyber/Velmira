@@ -1,6 +1,7 @@
 import { el, apiGet, apiPost, apiPatch, toast } from '../util/core.js';
 import { mountBookAnalysis } from './book-analysis.js';
 import { mountMangaPages } from './manga-pages.js';
+import { mountSinglePage } from './single-page.js';
 import { mountStoryboards } from './storyboards.js';
 import { mountModelRouting } from './model-routing.js';
 
@@ -75,7 +76,7 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     analysisAbort?.abort();
     tabs.replaceChildren(); content.replaceChildren();
     if (settingsOnly) { tabs.hidden = jobsHead.hidden = jobsArea.hidden = true; renderConfig(); return; }
-    for (const [id, label] of [['analysis', '整书分析'], ['storyboard', '整页分镜'], ['generate', '分镜'], ['refs', '人物与参考图'], ['pages', '拼页与导出']]) {
+    for (const [id, label] of [['analysis', '整书分析'], ['storyboard', '整页分镜'], ['single', '无字整页'], ['generate', '分镜'], ['refs', '人物与参考图'], ['pages', '拼页与导出']]) {
       const tab = button(tabs, label, async () => { await load(); active = id; render(); });
       tab.setAttribute('aria-pressed', String(active === id));
     }
@@ -87,11 +88,15 @@ export async function mountManga({ area, bookId, signal, initialTab = 'generate'
     }
     if (active === 'refs') renderRefs();
     if (active === 'analysis') { analysisAbort = new AbortController(); mountBookAnalysis({ area: content, bookId, signal: analysisAbort.signal }); }
+    if (active === 'single') {
+      analysisAbort = new AbortController(); const controller = analysisAbort;
+      mountSinglePage({ area: content, bookId, signal: controller.signal }).catch(err => { if (!controller.signal.aborted) content.textContent = err.message; });
+    }
     if (active === 'pages') {
       const controller = new AbortController(); analysisAbort = controller;
       mountMangaPages({ area: content, bookId, signal: controller.signal }).catch(err => { if (!controller.signal.aborted) toast(err.message, 5000); });
     }
-    jobsHead.hidden = jobsArea.hidden = active === 'pages' || active === 'analysis';
+    jobsHead.hidden = jobsArea.hidden = active === 'pages' || active === 'analysis' || active === 'single';
   }
   function renderGenerate() {
     button(content, '整页分镜预览与编辑', () => { active = 'storyboard'; render(); }, 'btn-primary');

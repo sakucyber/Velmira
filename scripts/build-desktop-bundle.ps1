@@ -2,7 +2,7 @@
 # 目标机器无需另装 Python；数据保存在 %LOCALAPPDATA%\Velmira\data。
 param(
   [string]$Python = "",
-  [string]$Out = "dist\Velmira-desktop-v0.5.2"
+  [string]$Out = "dist\Velmira-desktop-v0.5.3"
 )
 
 # PS5.1 原生命令将诊断写到 stderr；每步以 LASTEXITCODE 检查结果。

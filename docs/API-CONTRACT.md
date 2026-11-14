@@ -287,10 +287,10 @@ curl.exe -X POST "http://127.0.0.1:8765/api/books?filename=book.txt" --data-bina
 ## 7.1 品牌与版本
 
 - 产品名：**Velmira**（UI 标题、document.title、README、健康检查统一）
-- `server/app/config.py: VERSION = "0.5.2"`（当前版本，见第 9 节）
+- `server/app/config.py: VERSION = "0.5.3"`（当前版本，见第 9 节）
 - GET /api/health 变为：
 ~~~json
-{"ok": true, "name": "Velmira", "version": "0.5.2"}
+{"ok": true, "name": "Velmira", "version": "0.5.3"}
 ~~~
 - 前端不得再出现旧品牌名；浏览器标签页格式：`<书名> · Velmira`
 
@@ -427,7 +427,7 @@ data: {"revision": 7, "count": 3}
 
 # 9. v0.4 增量：批注预览与分发
 
-- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.5.2"`；书库标识为 v0.4，APK 版本为 0.5.2。
+- 当前 `GET /api/health` 返回 `name="Velmira"`、`version="0.5.3"`；书库标识为 v0.4，APK 版本为 0.5.3。
 - 注释 API 和数据库结构不变。`note` 为非空文字时，原文 `mark.ann` 额外带 `ann-note` 类，用双下划线标记；普通高亮维持四色背景。
 - 鼠标悬停批注文字直接展示笔记，点击可固定弹层；手机单击、键盘 Enter/空格也可查看。弹层保留改色、编辑、删除操作。
 - 笔记用文本节点渲染，保留换行；弹层限宽/限高，长内容可滚动。点空白、Escape、翻页、切章、调整窗口时收起，不触发额外翻页。
@@ -517,6 +517,7 @@ data: {"revision": 7, "count": 3}
 - 书籍详情中的 `reading_links` 提供小说与漫画版的双向关系及页到章节／段落映射；漫画版继续使用普通书籍进度接口，和原小说进度分开保存。
 
 - `POST /api/ai/probe` 分级返回 `{ok,model,stages,note,elapsed_ms}`：模型列表、最小对话、JSON 输出、原文引文四级，含 `fatal/retryable/detail/suggestion`；`ok` 只由致命级（对话、JSON）决定。
+- `POST /api/books/{book_id}/manga/single-page` 接收 `{chapter,panels?:2-6,size?:portrait|tall|square,scene_id?}`，后台先由文本模型规划分格，再由一次图像请求生成整页，返回 202 与 `{page}`。`GET .../single-page?limit=20` 列出记录，`GET .../single-page/{id}` 返回状态与 `spec.panels`，`GET .../single-page/{id}/image` 返回 PNG。整页不含文字、气泡或旁白；详见 `SINGLE-PAGE-COMIC.md`。
 - `GET .../auto/logs?after=0&limit=100&run_id=...` 返回 `{logs:[{id,stage,level,message,created_at}],run_id,cursor}`。首次返回最近的日志窗口（按 id 正序）；后续用 after=cursor 增量读取，limit 最大 200。当前任务包含其整书分析日志，历史 run 只查对应漫画日志；按书隔离，每本保留最近 1000 条。不记录密钥、小说正文、提示词或原始服务商错误。
 - 自动漫画页面实时显示日志；已完成页在正文右侧按当前章节展示（窄屏在正文下方）。漫画与画风配置统一收进阅读器设置，自动漫画和漫画工作台入口均直达该设置页。
 - `GET /api/books/{book_id}/manga/reading-map?chapter=0&run_id=...` 返回 `{book_id,run_id,offset_unit:"unicode_codepoints",range_end:"exclusive",panels}`。省略 run_id 使用当前自动任务；同时合并有效手工页并按 job_id 去重。每格含 `chapter,start,end,source_quote,job_id,page_id,panel_index,page_url,url,rect,caption,dialogue,speaker,draft,pending_review`；`rect` 为页内归一化 `[x,y,width,height]`，`url` 直接读取单格图片。原文完整哈希或引用不符、资源缺失以及缺少可信来源的旧图片不参与映射。

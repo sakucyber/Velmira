@@ -47,7 +47,7 @@ Linux 原生桌面包在 Linux 主机上构建：
 
 ~~~bash
 bash scripts/build-desktop-linux.sh
-# 输出 dist/Velmira-desktop-v0.5.2-linux-amd64.tar.gz 或 arm64 包
+# 输出 dist/Velmira-desktop-v0.5.3-linux-amd64.tar.gz 或 arm64 包
 ~~~
 
 Linux 运行时需要 GTK 3、WebKitGTK 4.1、Python 3 和 `python3-venv`。

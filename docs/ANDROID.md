@@ -1,6 +1,6 @@
 # Velmira Android（通用 APK）
 
-v0.5.2 APK 内置阅读界面、手机本地书库和云端 AI 请求代理，打开即可使用，无需电脑或服务器地址。可从手机导入 TXT、EPUB、CBZ，离线阅读、搜索，并保存进度、书签和批注。配置模型密钥后，可直接在手机使用文本 AI 和生图。系统要求 Android 7.0+（minSdk 24），纯 Java + WebView，一个 APK 覆盖所有 ABI。
+v0.5.3 APK 内置阅读界面、手机本地书库和云端 AI 请求代理，打开即可使用，无需电脑或服务器地址。可从手机导入 TXT、EPUB、CBZ，离线阅读、搜索，并保存进度、书签和批注。配置模型密钥后，可直接在手机使用文本 AI 和生图。系统要求 Android 7.0+（minSdk 24），纯 Java + WebView，一个 APK 覆盖所有 ABI。
 
 ## 安装与首次使用
 
@@ -65,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 # 默认产物：dist/Velmira-universal.apk
 
 # 指定输出名称：
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Out dist/Velmira-mobile-ai-v0.5.2.apk
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Out dist/Velmira-mobile-ai-v0.5.3.apk
 ~~~
 
 脚本不依赖 Gradle：aapt2 编译与链接资源，javac/d8 编译代码，jar 加入内置 Web 资源，zipalign 对齐，再由 apksigner 签名并校验 v2/v3 签名及必要资源。使用 jar 打包静态资源，以确保 Windows 上的 ZIP 条目使用 Android 可识别的 `/` 路径分隔符。
@@ -74,7 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1 -O
 
 ## 验证与兼容性
 
-当前构建命令生成 0.5.2（versionCode 6）APK。v0.5.1 的真机验证记录见 [OFFLINE-VALIDATION.md](OFFLINE-VALIDATION.md)；0.5.2 尚未完成真机验证，构建或浏览器检查不能代替目标 Android 设备的安装与离线验证。
+当前构建命令生成 0.5.3（versionCode 7）APK。v0.5.1 的真机验证记录见 [OFFLINE-VALIDATION.md](OFFLINE-VALIDATION.md)；0.5.3 尚未完成真机验证，构建或浏览器检查不能代替目标 Android 设备的安装与离线验证。
 
 此前 0.4.0 已在 OPPO PECM30（Android 12、WebView 151）实测连接、TXT 阅读、批注、滑动翻页、进度、书签、返回导航、文件选择器导入 TXT/EPUB/CBZ 和漫画翻页，详见 [REPORT-v0.4.md](../tests/REPORT-v0.4.md)。该记录不能代替本次离线能力的真机验证；Android 7 和其他 WebView 版本仍需设备测试。
 

@@ -1,6 +1,6 @@
 /* Static shell cache only. Private API responses, books and media stay in the
    device LocalStore so cookies and credentials are never put in CacheStorage. */
-const VERSION = 'velmira-shell-v5';
+const VERSION = 'velmira-shell-v6';
 const SHELL = [
   './', './index.html', './app.js', './manifest.webmanifest',
   './styles/main.css', './util/core.js', './ui/library.js', './ui/reader.js',
@@ -10,7 +10,7 @@ const SHELL = [
   './ui/mobile-ai.js', './styles/mobile-ai.css',
   './ui/reader-comics.js', './ui/automatic.js', './ui/book-analysis.js', './ui/manga.js',
   './ui/reading-sync.js', './styles/reading-sync.css',
-  './ui/manga-pages.js', './ui/model-library.js', './ui/model-routing.js', './ui/ai-settings.js',
+  './ui/manga-pages.js', './ui/single-page.js', './ui/model-library.js', './ui/model-routing.js', './ui/ai-settings.js',
   './ui/security-settings.js', './ui/storyboards.js', './styles/ai-settings.css',
   './styles/model-library.css', './styles/comic.css', './icons/icon-192.png', './icons/icon-512.png',
 ];

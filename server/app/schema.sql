@@ -506,6 +506,24 @@ CREATE TABLE IF NOT EXISTS render_cast (
   PRIMARY KEY(job_id,form_id)
 );
 
+-- One image request renders a whole text-free comic page, including gutters.
+CREATE TABLE IF NOT EXISTS single_comic_pages (
+  id TEXT PRIMARY KEY,
+  book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapter INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  panels INTEGER NOT NULL,
+  size TEXT NOT NULL,
+  spec_json TEXT NOT NULL DEFAULT '{}',
+  prompt TEXT NOT NULL DEFAULT '',
+  image_path TEXT,
+  image_hash TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_single_comic_pages_book ON single_comic_pages(book_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS ai_memories (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,

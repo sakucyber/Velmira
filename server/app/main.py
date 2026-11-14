@@ -1,6 +1,6 @@
 """FastAPI 应用入口：建库 → 挂载业务路由 → 可选挂载扩展路由 → 最后挂静态目录。
 
-项目：Velmira v0.5.2；离线同步与实时书库 SSE。
+项目：Velmira v0.5.3；离线同步与实时书库 SSE。
 启动：python -m uvicorn server.app.main:app --host 127.0.0.1 --port 8765
 数据目录：环境变量 DATA_DIR 优先，默认 项目根/data。
 """
@@ -29,9 +29,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     # create_app() 已完成建库；这里避免启动阶段再次读 schema、做迁移事务。
-    from .manga import queue, automatic
+    from .manga import queue, automatic, single_page
     from .ai import book_analysis
     log.info("Velmira %s starting", config.VERSION)
+    single_page.recover()
     queue.start()
     book_analysis.start()
     automatic.start()
@@ -102,6 +103,8 @@ def create_app() -> FastAPI:
     app.include_router(manga_pages_router)
     from .api.auto_manga import router as auto_manga_router
     app.include_router(auto_manga_router)
+    from .api.single_page import router as single_page_router
+    app.include_router(single_page_router)
     from .api.text_ai import router as text_ai_router
     app.include_router(text_ai_router)
     from .api.storyboards import router as storyboards_router

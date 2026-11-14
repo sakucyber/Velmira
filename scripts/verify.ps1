@@ -44,7 +44,7 @@ try {
     Start-Sleep -Milliseconds 250
     try {
       $h = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2
-      if ($h.ok -and $h.version -eq '0.5.2') { $ready = $true; Write-Host ("health OK: " + ($h | ConvertTo-Json -Compress)); break }
+      if ($h.ok -and $h.version -eq '0.5.3') { $ready = $true; Write-Host ("health OK: " + ($h | ConvertTo-Json -Compress)); break }
     } catch { }
   }
   if (-not $ready) { throw "服务未就绪，见 $logPath" }
@@ -68,7 +68,7 @@ try {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
   $totalJs = ($jsFiles | Measure-Object -Property Length -Sum).Sum
   Write-Host ("node --check: " + $jsFiles.Count + " files, fail=" + $jsFail)
-  # v0.5.2 includes optional model/settings modules and offline storage; keep a
+  # v0.5.3 includes optional model/settings modules and offline storage; keep a
   # 400KB ceiling for the full unminified shell, including lazy-loaded modules.
   Write-Host ("JS total: " + $totalJs + " bytes (" + [math]::Round($totalJs / 1024, 1) + " KB), budget 400KB")
   if ($jsFail -gt 0) { $failures += "node --check 失败 $jsFail 个文件" }

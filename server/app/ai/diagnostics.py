@@ -17,6 +17,7 @@ STAGE_LABELS = {
     "reduction": "章节大意合并",
     "memory": "章节记忆",
     "probe": "连接检测",
+    "single_page": "无字整页",
     "diagnose": "诊断",
 }
 
