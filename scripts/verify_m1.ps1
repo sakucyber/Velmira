@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   M1（Velmira v0.5.2）一键独立验收：
   冷启动隔离服务 -> TXT M0 回归(41) -> M1 API(A/C/D/E/F) -> 品牌/体积/node --check ->

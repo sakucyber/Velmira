@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   M0 一键回归：起隔离服务 -> 跑 A-F 断言（tests/verify_m0.py）-> 静态检查 -> 单测 -> 停服务清理。
   只写 tests/ 与临时 data 目录，不改 server/ web/ docs/。

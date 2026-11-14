@@ -1,4 +1,4 @@
-# 构建 Velmira Android 通用 APK（不依赖 Gradle）
+﻿# 构建 Velmira Android 通用 APK（不依赖 Gradle）
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android.ps1
 param(
   [string]$Sdk = "",

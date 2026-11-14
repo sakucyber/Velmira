@@ -1,4 +1,4 @@
-# 构建 Velmira 自包含桌面分发包：MyGo 窗口 + PyInstaller 后端边车。
+﻿# 构建 Velmira 自包含桌面分发包：MyGo 窗口 + PyInstaller 后端边车。
 # 目标机器无需另装 Python；数据保存在 %LOCALAPPDATA%\Velmira\data。
 param(
   [string]$Python = "",

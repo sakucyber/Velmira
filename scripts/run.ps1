@@ -1,4 +1,4 @@
-# Velmira 开发服务器启动脚本
+﻿# Velmira 开发服务器启动脚本
 param(
   [int]$Port = 8765,
   [switch]$Reload,
