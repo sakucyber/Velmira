@@ -1,0 +1,9 @@
+/target/
+/dist/
+/data/
+/.tmp/
+/.toolchains/
+.env
+*.db
+*.db-shm
+*.db-wal

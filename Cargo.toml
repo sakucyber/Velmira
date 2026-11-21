@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/desktop",
+    "crates/vm-core",
+    "crates/vm-format",
+    "crates/vm-media",
+    "crates/vm-store",
+    "crates/vm-text",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

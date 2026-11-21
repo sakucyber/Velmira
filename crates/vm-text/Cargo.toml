@@ -1,0 +1,12 @@
+[package]
+name = "vm-text"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cosmic-text = { version = "0.14.2", default-features = false, features = ["std", "swash"] }
+log = "0.4"
+thiserror = "2"
+vm-core = { path = "../vm-core" }

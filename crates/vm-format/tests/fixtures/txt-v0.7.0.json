@@ -1,0 +1,361 @@
+[
+  {
+    "name": "headings, metadata and cleanup",
+    "file_name": "D:\\books\\忽略标题 - 忽略作者.txt",
+    "raw_hex": "e4b9a6e5908defbc9a20e781afe4b88be8afbbe4b9a6e4baba0d0ae4bd9ce880853a20e6b58be8af95e4bd9ce880850d0ae38090e7ae80e4bb8be3809120e8bf99e4b880e6aeb5e4b88de5ba94e8bf9be585a5e6ada3e696870d0ae7bba7e7bbade7ae80e4bb8b0de7acac31e7aba0e590afe7a88b0d0ae38090e58886e7b1bbe6a087e7adbee380910a0a2a2a2a0a2020e78ebbe2808de79283e7aa97e5a496e69c89e99ba8e3808220200ae7acace4b880e88a82e8afbee5b7b2e7bb8fe5bc80e5a78be380820a0a31e38081e697a5e8aeb00ae4b880e8a18ce78bace7ab8be7aba0e88a82e380820ae7acace4ba8ce7aba0efbc9ae5bd92e69da50ae38080e9a38ee5819ce4ba86e38082e380800ae38090e6ada3e69687e6a087e7adbee4bf9de79599e380910a5f5f5f0ae7aba0e69cabf09f9982e380820ae795aae5a496e7af8720e696b0e7af870ae795aae5a496e58685e5aeb9e380820a",
+    "expected": {
+      "title": "灯下读书人",
+      "author": "测试作者",
+      "encoding": "utf-8",
+      "encoding_degraded": false,
+      "total_chars": 138,
+      "paragraph_count": 7,
+      "chapters": [
+        {
+          "title": "第1章启程",
+          "paras": [
+            "玻璃窗外有雨。",
+            "第一节课已经开始。"
+          ],
+          "chars": 16
+        },
+        {
+          "title": "1、日记",
+          "paras": [
+            "一行独立章节。"
+          ],
+          "chars": 7
+        },
+        {
+          "title": "第二章：归来",
+          "paras": [
+            "风停了。",
+            "【正文标签保留】",
+            "___",
+            "章末🙂。"
+          ],
+          "chars": 19
+        },
+        {
+          "title": "番外篇 新篇",
+          "paras": [],
+          "chars": 0
+        },
+        {
+          "title": "番外内容。",
+          "paras": [],
+          "chars": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "UTF-8 BOM and Windows filename fallback",
+    "file_name": "D:\\books\\Reading Demo - Author.txt",
+    "raw_hex": "efbbbf4368617074657220313a204f6e650a48656c6c6f20616e642077656c636f6d652e0a434841505445522032202d2054776f0a427965210a",
+    "expected": {
+      "title": "Reading Demo",
+      "author": "Author",
+      "encoding": "utf-8-sig",
+      "encoding_degraded": false,
+      "total_chars": 55,
+      "paragraph_count": 2,
+      "chapters": [
+        {
+          "title": "Chapter 1: One",
+          "paras": [
+            "Hello and welcome."
+          ],
+          "chars": 18
+        },
+        {
+          "title": "CHAPTER 2 - Two",
+          "paras": [
+            "Bye!"
+          ],
+          "chars": 4
+        }
+      ]
+    }
+  },
+  {
+    "name": "UTF-16 little-endian, astral characters",
+    "file_name": "图书.txt",
+    "raw_hex": "fffe664e0d541aff20006f700b4efb8b664eba4e0d000a005c4f05803a0020004b6dd58b5c4f05800d000a001030807bcb4e11302000d98f004eb56b0d4e945edb8f6551636b87650d000a00e77eed7e807bcb4e0d002c7b3100e07a2f540b7a0d000a00103006527b7c07687e7b11300a000a002a002a002a000a0020002000bb730d208374977a16590967e8960230200020000a002c7b004e8282fe8bf25dcf7e005fcb5902300a000a0031000130e565b08b0a00004e4c88ec72cb7ae07a828202300a002c7b8c4ee07a1aff525f65670a000030ce985c50864e023000300a001030636b876507687e7bdd4f597511300a005f005f005f000a00e07a2b673dd842de02300a006a751659c77b2000b065c77b0a006a7516598551b95b02300a00",
+    "expected": {
+      "title": "灯下读书人",
+      "author": "测试作者",
+      "encoding": "utf-16-le",
+      "encoding_degraded": false,
+      "total_chars": 138,
+      "paragraph_count": 7,
+      "chapters": [
+        {
+          "title": "第1章启程",
+          "paras": [
+            "玻璃窗外有雨。",
+            "第一节课已经开始。"
+          ],
+          "chars": 16
+        },
+        {
+          "title": "1、日记",
+          "paras": [
+            "一行独立章节。"
+          ],
+          "chars": 7
+        },
+        {
+          "title": "第二章：归来",
+          "paras": [
+            "风停了。",
+            "【正文标签保留】",
+            "___",
+            "章末🙂。"
+          ],
+          "chars": 19
+        },
+        {
+          "title": "番外篇 新篇",
+          "paras": [],
+          "chars": 0
+        },
+        {
+          "title": "番外内容。",
+          "paras": [],
+          "chars": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "UTF-16 big-endian without author",
+    "file_name": "圖書.txt",
+    "raw_hex": "feff7b2c4e007ae0002068079898000a6b636587d840dc00000a7b2c4e8c7ae000205f526765000a591c82725df26df13002",
+    "expected": {
+      "title": "圖書",
+      "author": null,
+      "encoding": "utf-16-be",
+      "encoding_degraded": false,
+      "total_chars": 23,
+      "paragraph_count": 2,
+      "chapters": [
+        {
+          "title": "第一章 标题",
+          "paras": [
+            "正文𠀀"
+          ],
+          "chars": 3
+        },
+        {
+          "title": "第二章 归来",
+          "paras": [
+            "夜色已深。"
+          ],
+          "chars": 5
+        }
+      ]
+    }
+  },
+  {
+    "name": "GB18030 Chinese and astral characters",
+    "file_name": "图书.txt",
+    "raw_hex": "cae9c3fba3bab5c6cfc20ab5da31d5c2c6f4b3cc0ad4c4b6c195328236a1a30ab5da32d5c2bbd8bcd20ab6c1b9fdc1cba1a3",
+    "expected": {
+      "title": "灯下",
+      "author": null,
+      "encoding": "gb18030",
+      "encoding_degraded": false,
+      "total_chars": 27,
+      "paragraph_count": 2,
+      "chapters": [
+        {
+          "title": "第1章启程",
+          "paras": [
+            "阅读𠀀。"
+          ],
+          "chars": 4
+        },
+        {
+          "title": "第2章回家",
+          "paras": [
+            "读过了。"
+          ],
+          "chars": 4
+        }
+      ]
+    }
+  },
+  {
+    "name": "unrecognized bytes degrade to UTF-8",
+    "file_name": "bad.txt",
+    "raw_hex": "4669727374206c696e65ff2e0a5365636f6e64206c696e65812e",
+    "expected": {
+      "title": "bad",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": true,
+      "total_chars": 26,
+      "paragraph_count": 2,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "First line�.",
+            "Second line�."
+          ],
+          "chars": 25
+        }
+      ]
+    }
+  },
+  {
+    "name": "three weak headings never create chapters",
+    "file_name": "章节未识别.txt",
+    "raw_hex": "e38090e7b1bbe588abe380910a3d3d3d0a312ee5bc80e7af870ae6ada3e69687e4b880e380820a322ee4b8ade7af870ae6ada3e69687e4ba8ce380820a332ee5908ee7bbad0ae6ada3e69687e4b889e380820ae7acace4b880e7aba020e5be80e4ba8b0ae7acace59b9be7aba020e7bba7e7bbad",
+    "expected": {
+      "title": "章节未识别",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": false,
+      "total_chars": 52,
+      "paragraph_count": 8,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "1.开篇",
+            "正文一。",
+            "2.中篇",
+            "正文二。",
+            "3.后续",
+            "正文三。",
+            "第一章 往事",
+            "第四章 继续"
+          ],
+          "chars": 36
+        }
+      ]
+    }
+  },
+  {
+    "name": "two strong headings and empty trailing chapter",
+    "file_name": "空章.txt",
+    "raw_hex": "e7acace4b880e7aba020e69785e980940ae8b7afe8bf87e4b880e6a3b5e6a091e380820ae7acace4ba8ce7aba020e5bd92e69da50a5f5f5f0ae38090e8b78be38091",
+    "expected": {
+      "title": "空章",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": false,
+      "total_chars": 28,
+      "paragraph_count": 1,
+      "chapters": [
+        {
+          "title": "第一章 旅途",
+          "paras": [
+            "路过一棵树。"
+          ],
+          "chars": 6
+        },
+        {
+          "title": "第二章 归来",
+          "paras": [],
+          "chars": 0
+        }
+      ]
+    }
+  },
+  {
+    "name": "literal tag and separator retained after first paragraph",
+    "file_name": "导入示例.txt",
+    "raw_hex": "5f5f5f0ae38090e6a087e7adbee380910ae8bf99e9878ce5bc80e5a78be380820ae38090e6ada3e69687e4b8ade79a84e6a087e7adbee380910a2d2d2d0ae58685e5aeb9e38082",
+    "expected": {
+      "title": "导入示例",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": false,
+      "total_chars": 31,
+      "paragraph_count": 4,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "这里开始。",
+            "【正文中的标签】",
+            "---",
+            "内容。"
+          ],
+          "chars": 19
+        }
+      ]
+    }
+  },
+  {
+    "name": "Python Unicode whitespace parity",
+    "file_name": ".hidden",
+    "raw_hex": "1ce5bc80e5a4b41e0ac2a0e4b8ade69687e7bca9e8bf9be380800ae5b0bee99fb3",
+    "expected": {
+      "title": ".hidden",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": false,
+      "total_chars": 14,
+      "paragraph_count": 3,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "开头",
+            "中文缩进",
+            "尾音"
+          ],
+          "chars": 8
+        }
+      ]
+    }
+  },
+  {
+    "name": "all GB18030-2022 mapping changes vs Python 3.11",
+    "file_name": "legacy.txt",
+    "raw_hex": "6c65676163793a20a3a020a6d920a6da20a6db20a6dc20a6dd20a6de20a6df20a6ec20a6ed20a6f320a8bc20fe5920fe6120fe6620fe6720fe6d20fe7e20fe9020fea0208135f4370a",
+    "expected": {
+      "title": "legacy",
+      "author": null,
+      "encoding": "gb18030",
+      "encoding_degraded": false,
+      "total_chars": 50,
+      "paragraph_count": 1,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "legacy:                     ḿ"
+          ],
+          "chars": 49
+        }
+      ]
+    }
+  },
+  {
+    "name": "standalone 0x80 uses Python replacement",
+    "file_name": "legacy.txt",
+    "raw_hex": "6e6f74653a20800a",
+    "expected": {
+      "title": "legacy",
+      "author": null,
+      "encoding": "utf-8",
+      "encoding_degraded": true,
+      "total_chars": 8,
+      "paragraph_count": 1,
+      "chapters": [
+        {
+          "title": "第1部分",
+          "paras": [
+            "note: �"
+          ],
+          "chars": 7
+        }
+      ]
+    }
+  }
+]

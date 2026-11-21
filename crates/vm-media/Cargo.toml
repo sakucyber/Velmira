@@ -1,0 +1,11 @@
+[package]
+name = "vm-media"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[dependencies]
+image = { version = "0.25.8", default-features = false, features = ["gif", "png", "webp"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+thiserror = "2"
