@@ -2,8 +2,11 @@
 
 mod comic;
 mod covers;
+mod generate;
+mod illustrations;
 mod reader;
 mod theme;
+mod updates;
 mod workers;
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichText};
@@ -100,6 +103,9 @@ struct App {
     renaming: Option<(String, String)>,
     reader: Reader,
     comic: comic::Comic,
+    generator: generate::Generator,
+    updates: updates::Updates,
+    illustrations: illustrations::Illustrations,
     covers: covers::ShelfCovers,
     bookmarks: Vec<Bookmark>,
     more_bookmarks: bool,
@@ -294,6 +300,7 @@ impl App {
         let comic = comic::Comic::spawn(ctx.clone())?;
         let covers = covers::ShelfCovers::spawn(ctx.clone())?;
         let bench = Bench::new(start, options.bench);
+        let updates = updates::Updates::new(start, !bench.enabled());
         let idle_sample = bench
             .enabled()
             .then(|| Instant::now() + Duration::from_secs(300));
@@ -311,6 +318,9 @@ impl App {
             reader: Reader::new(layout),
             storage_ready: false,
             comic,
+            generator: Default::default(),
+            updates,
+            illustrations: Default::default(),
             covers,
             bookmarks: Vec::new(),
             more_bookmarks: false,
@@ -410,7 +420,7 @@ impl App {
             }
         }
         while let Ok(event) = self.store.events().try_recv() {
-            self.store_event(event);
+            self.store_event(ctx, event);
         }
         self.covers.poll();
         if let Some(result) = self.reader.poll(ctx) {
@@ -461,7 +471,7 @@ impl App {
         }
     }
 
-    fn store_event(&mut self, event: Event) {
+    fn store_event(&mut self, ctx: &egui::Context, event: Event) {
         match event {
             Event::Ready => {
                 self.storage_ready = true;
@@ -527,6 +537,7 @@ impl App {
                 }
                 self.opening = None;
                 self.comic.close();
+                self.illustrations.close();
                 self.bookmarks.clear();
                 self.more_bookmarks = false;
                 self.editing = None;
@@ -550,11 +561,25 @@ impl App {
                 }
                 self.opening = None;
                 self.reader.close();
+                self.illustrations.close();
                 self.editing = None;
                 self.bench.mark("comic_opened", None);
                 self.comic.open(book, page);
             }
             Event::ComicPageRead { book_id, page } => self.comic.loaded(&book_id, page),
+            Event::Illustrations {
+                book_id,
+                chapter,
+                illustrations,
+            } => self.illustrations.listed(&book_id, chapter, illustrations),
+            Event::IllustrationRead {
+                book_id,
+                chapter,
+                ordinal,
+                image,
+            } => self
+                .illustrations
+                .loaded(ctx, &book_id, chapter, ordinal, image),
             Event::ChapterRead {
                 book_id,
                 chapter_index,
@@ -562,6 +587,7 @@ impl App {
             } => {
                 if self.reader.chapter_read(&book_id, chapter_index, chapter) {
                     self.editing = None;
+                    self.illustrations.close();
                     self.send(Command::ListAnnotations {
                         book_id,
                         chapter: chapter_index,
@@ -594,9 +620,9 @@ impl App {
                     self.tr("此旧书库已迁移", "This library has already been migrated")
                         .to_owned()
                 } else if self.localized {
-                    format!("已迁移 {} 本书、{} 个进度、{} 个书签、{} 条批注。跳过 {} 本书和 {} 条定位。", report.books, report.progress, report.bookmarks, report.annotations, report.skipped_books, report.skipped_positions)
+                    format!("已迁移 {} 本书、{} 个进度、{} 个书签、{} 条批注，恢复 {} 张封面。跳过 {} 本书和 {} 条定位，其中 {} 本漫画可补齐原文件后重试。", report.books, report.progress, report.bookmarks, report.annotations, report.covers, report.skipped_books, report.skipped_positions, report.pending_comics)
                 } else {
-                    format!("Migrated {} books, {} progress entries, {} bookmarks and {} annotations. Skipped {} books and {} positions.", report.books, report.progress, report.bookmarks, report.annotations, report.skipped_books, report.skipped_positions)
+                    format!("Migrated {} books, {} progress entries, {} bookmarks and {} annotations. Recovered {} covers. Skipped {} books and {} positions. Retry {} comics after restoring their archives.", report.books, report.progress, report.bookmarks, report.annotations, report.covers, report.skipped_books, report.skipped_positions, report.pending_comics)
                 };
                 self.say(message, false);
             }
@@ -643,6 +669,9 @@ impl App {
                     "read_chapter" => self.reader.reset_load(),
                     "read_comic_page" => self.comic.reset_load(),
                     "read_cover" => self.covers.read_failed(),
+                    "list_illustrations" | "read_illustration" => {
+                        self.illustrations.fail(message.clone());
+                    }
                     "insert_book" => self.importing = false,
                     "list_books" => self.list_pending = false,
                     "save_progress" => {
@@ -1261,6 +1290,8 @@ impl eframe::App for App {
         }
         let mut back = false;
         let mut toggle_theme = false;
+        let mut generate_comic = false;
+        let mut show_illustrations = false;
         let p = theme::palette(self.night);
         let toolbar_frame = egui::Frame::new()
             .fill(p.surface)
@@ -1304,6 +1335,12 @@ impl eframe::App for App {
                     if ui.add_enabled(enabled, button).clicked() {
                         self.start_import(ImportRequest::Pick);
                     }
+                    if self.reader.is_open() && ui.button("小说转漫画").clicked() {
+                        generate_comic = true;
+                    }
+                    if self.reader.is_epub() && ui.button("插图").clicked() {
+                        show_illustrations = true;
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let label = if self.night {
                             self.tr("日间模式", "Day mode")
@@ -1312,6 +1349,9 @@ impl eframe::App for App {
                         };
                         if ui.button(label).clicked() {
                             toggle_theme = true;
+                        }
+                        if ui.button("更新").clicked() {
+                            self.updates.open = true;
                         }
                     });
                 });
@@ -1325,10 +1365,26 @@ impl eframe::App for App {
             self.night = !self.night;
             theme::apply(ctx, self.night);
         }
+        if generate_comic {
+            if let Some(source) = self.reader.comic_source() {
+                self.generator.prepare(source);
+            }
+        }
+        if show_illustrations {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                let request = self
+                    .illustrations
+                    .open(book_id, self.reader.chapter_index());
+                if !self.send(request) {
+                    self.illustrations.fail("书库暂忙，请关闭后重试。".into());
+                }
+            }
+        }
         let p = theme::palette(self.night);
         if back {
             self.reader.close();
             self.comic.close();
+            self.illustrations.close();
             self.editing = None;
             self.opening = None;
         }
@@ -1374,6 +1430,17 @@ impl eframe::App for App {
             egui::CentralPanel::default()
                 .frame(shelf_frame)
                 .show(ctx, |ui| self.shelf(ui));
+        }
+        if !self.importing && self.storage_ready {
+            if let Some(request) = self.generator.show(ctx) {
+                self.start_import(request);
+            }
+        }
+        self.updates.show(ctx);
+        if let Some(request) = self.illustrations.show(ctx) {
+            if !self.send(request) {
+                self.illustrations.fail("书库暂忙，请重试。".into());
+            }
         }
     }
 }

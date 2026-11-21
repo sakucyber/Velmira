@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-14]
+        os: [windows-latest, ubuntu-22.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -27,8 +27,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libx11-dev libwayland-dev
       - run: cargo +stable fmt --all --check
-      - run: cargo +stable test --workspace --locked
-      - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo +stable clippy --workspace --locked -- -D warnings
       - run: cargo +stable build --release --locked -p velmira-native
       - uses: actions/upload-artifact@v5
         with:

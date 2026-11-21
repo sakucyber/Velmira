@@ -1,13 +1,22 @@
-//! Read-only import of the previous desktop library's normalized text and reading records.
+//! Read-only import of the previous desktop library's text, comics and reading records.
 
-use std::{fs, path::Path, time::Duration};
+use std::{
+    fs::{self, File},
+    io::{self, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use rusqlite::{
     params, types::ValueRef, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
+use sha2::{Digest, Sha256};
 use vm_core::Loc;
+use vm_format::EpubReader;
 
-use crate::{database, Error, Result};
+use crate::{comics, covers, database, Error, Result};
+
+const MAX_EPUB_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MigrationReport {
@@ -17,10 +26,16 @@ pub struct MigrationReport {
     pub progress: u32,
     pub skipped_books: u32,
     pub skipped_positions: u32,
+    pub covers: u32,
+    pub pending_comics: u32,
     pub already_migrated: bool,
 }
 
-pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationReport> {
+pub(super) fn migrate(
+    db: &mut Connection,
+    blobs: &Path,
+    data_dir: &Path,
+) -> Result<MigrationReport> {
     let source = if data_dir.is_dir() {
         data_dir.join("app.db")
     } else {
@@ -30,7 +45,10 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
     let source_key = source
         .to_str()
         .ok_or_else(|| Error::Invalid("legacy database path is not valid UTF-8".into()))?;
-    let marker = format!("migrated_from:v1-text:{source_key}");
+    let library = source
+        .parent()
+        .ok_or_else(|| Error::Invalid("legacy database has no parent directory".into()))?;
+    let marker = format!("migrated_from:v2-media:{source_key}");
     let mut old = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     old.busy_timeout(Duration::from_secs(5))?;
     old.execute_batch("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;")?;
@@ -46,11 +64,18 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
             ..MigrationReport::default()
         });
     }
-    // Querying the fixed v0.7 table names also rejects unrelated databases.
-    let mut books = snapshot.prepare(
-        "SELECT id, title, author, format, sha256, encoding, chapter_count, created_at
-         FROM books ORDER BY id",
+    // Earlier schema fixtures and installations can have no source-file column.
+    let has_file_path = snapshot.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('books') WHERE name = 'file_path')",
+        [],
+        |row| row.get::<_, bool>(0),
     )?;
+    let path_column = if has_file_path { "file_path" } else { "NULL" };
+    // Querying the fixed v0.7 table names also rejects unrelated databases.
+    let mut books = snapshot.prepare(&format!(
+        "SELECT id, title, author, format, sha256, encoding, chapter_count, created_at, {path_column}
+         FROM books ORDER BY id",
+    ))?;
     let mut rows = books.query([])?;
     let mut report = MigrationReport::default();
     let has_state = has_table(&snapshot, "library_state")?;
@@ -60,7 +85,7 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
 
     while let Some(row) = rows.next()? {
         let format = database::text_column(row, 3)?;
-        if !matches!(format, "txt" | "epub") {
+        if !matches!(format, "txt" | "epub" | "cbz") {
             report.skipped_books += 1;
             continue;
         }
@@ -68,11 +93,30 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
         let title: String = row.get(1)?;
         let author: Option<String> = row.get(2)?;
         let fingerprint = database::text_column(row, 4)?;
-        let encoding: Option<String> = row.get(5)?;
         let count: u32 = row.get(6)?;
         let created_at: i64 = row.get(7)?;
+        let stored_path: Option<String> = row.get(8)?;
         if count == 0 {
             report.skipped_books += 1;
+            continue;
+        }
+        let mapped_id = tx
+            .prepare_cached("SELECT book_id FROM legacy_book WHERE source = ?1 AND legacy_id = ?2")?
+            .query_row(params![source_key, old_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        if let Some(mapped_id) = mapped_id {
+            // v1 already migrated the normalized EPUB text. Recover its cover in place
+            // without changing identifiers, edits or positions made in the native library.
+            if format == "epub" {
+                report.covers += u32::from(copy_epub_cover(
+                    &tx,
+                    library,
+                    &old_id,
+                    stored_path.as_deref(),
+                    fingerprint,
+                    &mapped_id,
+                )?);
+            }
             continue;
         }
         let status = if has_state
@@ -89,20 +133,55 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
         } else {
             "active"
         };
-        let mut hasher = blake3::Hasher::new_derive_key("Velmira legacy database book identity");
-        hasher.update(format.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(fingerprint.as_bytes());
-        let book_id = hasher.finalize().to_hex().to_string();
-        let inserted = tx.execute(
-            "INSERT INTO book(id, title, author, format, encoding, chapter_count, added_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO NOTHING",
-            params![book_id, title, author, format, encoding, count, created_at, status],
-        )? != 0;
-        if inserted {
-            copy_chapters(&snapshot, &tx, &old_id, &book_id, count)?;
-            report.books += 1;
-        }
+        let book_id = if format == "cbz" {
+            let Some((path, input)) = legacy_file(library, &old_id, "cbz", stored_path.as_deref())
+            else {
+                report.skipped_books += 1;
+                report.pending_comics += 1;
+                continue;
+            };
+            let mut comic = match comics::prepare(&tx, blobs, input, &path, Some(fingerprint)) {
+                Ok(comic) if comic.count == count as usize => comic,
+                Ok(_) | Err(Error::Invalid(_) | Error::Format(_)) => {
+                    report.skipped_books += 1;
+                    report.pending_comics += 1;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            comic.title = title;
+            comic.author = author;
+            report.books += u32::from(comic.insert(&tx, Some(created_at), status)?);
+            comic.id
+        } else {
+            let encoding: Option<String> = row.get(5)?;
+            let mut hasher =
+                blake3::Hasher::new_derive_key("Velmira legacy database book identity");
+            hasher.update(format.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(fingerprint.as_bytes());
+            let book_id = hasher.finalize().to_hex().to_string();
+            let inserted = tx.execute(
+                "INSERT INTO book(id, title, author, format, encoding, chapter_count, added_at, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO NOTHING",
+                params![book_id, title, author, format, encoding, count, created_at, status],
+            )? != 0;
+            if inserted {
+                copy_chapters(&snapshot, &tx, &old_id, &book_id, count)?;
+                report.books += 1;
+            }
+            if format == "epub" {
+                report.covers += u32::from(copy_epub_cover(
+                    &tx,
+                    library,
+                    &old_id,
+                    stored_path.as_deref(),
+                    fingerprint,
+                    &book_id,
+                )?);
+            }
+            book_id
+        };
         tx.execute(
             "INSERT INTO legacy_book(source, legacy_id, book_id) VALUES (?1, ?2, ?3)",
             params![source_key, old_id, book_id],
@@ -117,9 +196,92 @@ pub(super) fn migrate(db: &mut Connection, data_dir: &Path) -> Result<MigrationR
             copy_annotations(&snapshot, &tx, &old_id, &book_id, &mut report)?;
         }
     }
-    tx.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", [&marker])?;
+    // Books already linked in legacy_book are skipped on retry. Keep missing
+    // comic archives retryable without duplicating newly migrated books or edits.
+    if report.pending_comics == 0 {
+        tx.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", [&marker])?;
+    }
     tx.commit()?;
     Ok(report)
+}
+
+fn legacy_file(
+    root: &Path,
+    id: &str,
+    extension: &str,
+    stored: Option<&str>,
+) -> Option<(PathBuf, File)> {
+    let mut candidates = Vec::with_capacity(2);
+    // Older versions recorded absolute paths. Use the distribution's fixed
+    // relative layout so a copied database cannot redirect reads outside its library.
+    if safe_file_stem(id) {
+        candidates.push(root.join("books").join(format!("{id}.{extension}")));
+    }
+    if extension == "cbz" {
+        if let Some(stem) = stored
+            .and_then(|name| name.rsplit(['/', '\\']).next())
+            .and_then(|name| name.strip_suffix(".cbz"))
+            .filter(|stem| stem.starts_with("edition_") && safe_file_stem(stem))
+        {
+            candidates.push(root.join("exports").join(format!("{stem}.cbz")));
+        }
+    }
+    candidates.into_iter().find_map(|candidate| {
+        let candidate = fs::canonicalize(candidate).ok()?;
+        if !candidate.starts_with(root)
+            || !candidate
+                .extension()
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+            || !fs::metadata(&candidate).ok()?.is_file()
+        {
+            return None;
+        }
+        let input = File::open(&candidate).ok()?;
+        Some((candidate, input))
+    })
+}
+
+fn safe_file_stem(stem: &str) -> bool {
+    !stem.is_empty()
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+}
+
+fn copy_epub_cover(
+    db: &Connection,
+    root: &Path,
+    old_id: &str,
+    stored: Option<&str>,
+    fingerprint: &str,
+    book_id: &str,
+) -> Result<bool> {
+    if covers::exists(db, book_id)? {
+        return Ok(false);
+    }
+    let Some((_, mut input)) = legacy_file(root, old_id, "epub", stored) else {
+        return Ok(false);
+    };
+    let cover = (|| {
+        // Hash the source stream with a fixed read budget before using its metadata.
+        let mut hash = Sha256::new();
+        let read = io::copy(&mut (&mut input).take(MAX_EPUB_SOURCE_BYTES + 1), &mut hash)?;
+        if read > MAX_EPUB_SOURCE_BYTES
+            || !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(fingerprint)
+        {
+            return Ok::<_, Error>(None);
+        }
+        input.seek(SeekFrom::Start(0))?;
+        let mut reader = EpubReader::new(input)?;
+        let candidates = reader.cover_candidates()?;
+        Ok(covers::epub_thumbnail(&mut reader, &candidates))
+    })()
+    .unwrap_or_else(|error| {
+        eprintln!("Cannot read legacy EPUB cover: {error}");
+        None
+    });
+    covers::insert(db, book_id, cover.as_ref())?;
+    Ok(cover.is_some())
 }
 
 fn has_table(db: &Connection, name: &str) -> Result<bool> {

@@ -1,0 +1,101 @@
+name: Build native desktop packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.package }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            package: windows-amd64-portable
+          - runner: windows-2022
+            target: i686-pc-windows-msvc
+            package: windows-386
+          - runner: windows-2022
+            target: aarch64-pc-windows-msvc
+            package: windows-arm64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            package: linux-amd64
+          - runner: ubuntu-22.04
+            target: i686-unknown-linux-gnu
+            package: linux-386
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: linux-arm64
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: rustup update stable
+      - run: rustup target add --toolchain stable ${{ matrix.target }}
+      - name: Install Linux desktop build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libegl1-mesa-dev libxkbcommon-dev libx11-dev libwayland-dev
+      - name: Install Linux i686 compiler and desktop libraries
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libgl1-mesa-dev:i386 libegl1-mesa-dev:i386 libxkbcommon-dev:i386 libx11-dev:i386 libwayland-dev:i386
+          printf '%s\n' 'PKG_CONFIG_LIBDIR_i686_unknown_linux_gnu=/usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig' >> "$GITHUB_ENV"
+      - name: Compile Windows executable
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo +stable build --release --locked -p velmira-native --target ${{ matrix.target }}
+      - name: Compile Linux executable and run CLI smoke check
+        if: runner.os == 'Linux'
+        run: |
+          cargo +stable build --release --locked -p velmira-native --target ${{ matrix.target }}
+          target/${{ matrix.target }}/release/velmira-native --help
+      - name: Assemble portable archive
+        run: python scripts/package-native.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v5
+        with:
+          name: native-${{ matrix.package }}
+          path: dist/Velmira-Native-*
+          compression-level: 0
+          if-no-files-found: error
+
+  macos:
+    name: macos-universal2
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: rustup update stable
+      - run: rustup target add --toolchain stable aarch64-apple-darwin x86_64-apple-darwin
+      - name: Compile both macOS architectures
+        run: |
+          cargo +stable build --release --locked -p velmira-native --target aarch64-apple-darwin
+          cargo +stable build --release --locked -p velmira-native --target x86_64-apple-darwin
+          target/aarch64-apple-darwin/release/velmira-native --help
+      - name: Assemble universal macOS application archive
+        run: python scripts/package-native.py --target universal2-apple-darwin
+      - uses: actions/upload-artifact@v5
+        with:
+          name: native-macos-universal2
+          path: dist/Velmira-Native-*
+          compression-level: 0
+          if-no-files-found: error

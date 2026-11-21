@@ -85,6 +85,23 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub fn comic_source(&self) -> Option<String> {
+        let book = self.book.as_ref()?;
+        let mut segments = vm_core::segments::segment_chapter(book.chapter, &book.paragraphs);
+        vm_core::segments::rank_segments(&mut segments, 1);
+        let paragraphs = segments
+            .iter()
+            .find(|segment| segment.selected)
+            .and_then(|segment| book.paragraphs.get(segment.start_para..=segment.end_para))
+            .unwrap_or(&book.paragraphs);
+        let excerpt: String = paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.chars().chain(['\n']))
+            .take(12_001)
+            .collect();
+        Some(excerpt)
+    }
+
     pub fn new(worker: LayoutWorker) -> Self {
         Self {
             worker,
@@ -112,6 +129,12 @@ impl Reader {
 
     pub fn is_open(&self) -> bool {
         self.book.is_some()
+    }
+
+    pub fn is_epub(&self) -> bool {
+        self.book
+            .as_ref()
+            .is_some_and(|book| book.summary.format == vm_core::BookFormat::Epub)
     }
     pub fn book_id(&self) -> Option<&str> {
         self.book.as_ref().map(|book| book.summary.id.as_str())

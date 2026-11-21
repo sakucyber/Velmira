@@ -70,7 +70,7 @@ impl<R: Read + Seek> EpubReader<R> {
         let opf = self.members.read(&opf_path, MAX_XML_BYTES)?;
         let package = parse_package(&opf_path, &opf)?;
         let nav_titles = self.members.navigation(&package)?;
-        let mut cover_candidates = self.members.covers(&package)?;
+        let cover_candidates = self.cover_candidates_in(&package)?;
         let declared_media: HashMap<&str, &str> = package
             .items
             .values()
@@ -146,8 +146,6 @@ impl<R: Read + Seek> EpubReader<R> {
         if chapters.is_empty() {
             return Err(FormatError::Empty);
         }
-        let mut seen = HashSet::new();
-        cover_candidates.retain(|image| seen.insert(image.path.clone()));
         Ok(ParsedEpub {
             text: ImportedText {
                 title: title.to_owned(),
@@ -158,6 +156,21 @@ impl<R: Read + Seek> EpubReader<R> {
             illustrations,
             cover_candidates,
         })
+    }
+
+    /// Reads the package metadata needed to locate a cover without parsing the book text.
+    pub fn cover_candidates(&mut self) -> Result<Vec<EpubImage>, FormatError> {
+        let opf_path = self.members.opf_path()?;
+        let opf = self.members.read(&opf_path, MAX_XML_BYTES)?;
+        let package = parse_package(&opf_path, &opf)?;
+        self.cover_candidates_in(&package)
+    }
+
+    fn cover_candidates_in(&mut self, package: &Package) -> Result<Vec<EpubImage>, FormatError> {
+        let mut candidates = self.members.covers(package)?;
+        let mut seen = HashSet::new();
+        candidates.retain(|image| seen.insert(image.path.clone()));
+        Ok(candidates)
     }
 
     /// Reads one image directly from the archive. The caller owns decoded-image limits.

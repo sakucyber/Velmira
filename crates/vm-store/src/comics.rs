@@ -5,9 +5,11 @@ use std::{
 };
 
 use rusqlite::{params, Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use vm_core::BookSummary;
 use vm_format::CbzReader;
+use vm_media::CoverVariants;
 
 use crate::{covers, database, Error, Result};
 
@@ -61,7 +63,33 @@ pub(super) fn import(
     blobs: &Path,
     path: &Path,
 ) -> Result<(BookSummary, bool)> {
-    let input = File::open(path)?;
+    let prepared = prepare(db, blobs, File::open(path)?, path, None)?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let inserted = prepared.insert(&tx, None, "active")?;
+    if !inserted {
+        database::restore_reimport(&tx, &prepared.id)?;
+    }
+    let book = database::summary(&tx, &prepared.id)?;
+    tx.commit()?;
+    Ok((book, !inserted))
+}
+
+pub(super) struct PreparedComic {
+    pub id: String,
+    pub title: String,
+    pub author: Option<String>,
+    hash: String,
+    cover: Option<CoverVariants>,
+    pub count: usize,
+}
+
+pub(super) fn prepare(
+    db: &Connection,
+    blobs: &Path,
+    input: File,
+    path: &Path,
+    legacy_sha256: Option<&str>,
+) -> Result<PreparedComic> {
     let info = input.metadata()?;
     if !info.is_file() || info.len() > MAX_ARCHIVE_BYTES {
         return Err(Error::Invalid(
@@ -70,7 +98,7 @@ pub(super) fn import(
     }
     fs::create_dir_all(blobs)?;
     let mut copy = NamedTempFile::new_in(blobs)?;
-    let hash = hash_copy(input, &mut copy)?;
+    let hash = hash_copy(input, &mut copy, legacy_sha256)?;
     let mut id_hash = blake3::Hasher::new_derive_key("Velmira v1 CBZ book identity");
     id_hash.update(hash.as_bytes());
     let id = id_hash.finalize().to_hex().to_string();
@@ -98,53 +126,87 @@ pub(super) fn import(
             return Err(error.error.into());
         }
         let existing = File::open(&destination)?;
-        if !existing.metadata()?.is_file() || hash_copy(existing, &mut io::sink())? != hash {
+        if !existing.metadata()?.is_file() || hash_copy(existing, &mut io::sink(), None)? != hash {
             return Err(Error::Invalid(
                 "existing comic blob has an invalid content hash".into(),
             ));
         }
     }
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let inserted = tx.execute(
-        "INSERT INTO book(id, title, author, format, chapter_count)
-         VALUES (?1, ?2, ?3, 'cbz', ?4) ON CONFLICT(id) DO NOTHING",
-        params![id, title, author, count],
-    )? != 0;
-    if inserted {
-        tx.execute(
-            "INSERT INTO comic_archive(book_id, blob_hash) VALUES (?1, ?2)",
-            params![id, hash],
-        )?;
-        // Each page occupies a chapter locator so progress uses the same
-        // foreign key and chapter/paragraph coordinate system as text.
-        let body = zstd::bulk::compress(&[], 3)?;
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO chapter(book_id, idx, title, byte_len, body)
-             VALUES (?1, ?2, ?3, 0, ?4)",
-        )?;
-        for index in 0..count {
-            stmt.execute(params![id, index, (index + 1).to_string(), body])?;
-        }
-    } else {
-        database::restore_reimport(&tx, &id)?;
-    }
-    covers::insert(&tx, &id, cover.as_ref())?;
-    let book = database::summary(&tx, &id)?;
-    tx.commit()?;
-    Ok((book, !inserted))
+    Ok(PreparedComic {
+        id,
+        title,
+        author,
+        count,
+        hash,
+        cover,
+    })
 }
 
-fn hash_copy(input: impl Read, output: &mut impl Write) -> Result<String> {
+impl PreparedComic {
+    pub(super) fn insert(
+        &self,
+        db: &Connection,
+        added_at: Option<i64>,
+        status: &str,
+    ) -> Result<bool> {
+        let inserted = db.execute(
+            "INSERT INTO book(id, title, author, format, chapter_count, added_at, status)
+             VALUES (?1, ?2, ?3, 'cbz', ?4, COALESCE(?5, unixepoch()), ?6)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                self.id,
+                self.title,
+                self.author,
+                self.count,
+                added_at,
+                status
+            ],
+        )? != 0;
+        if inserted {
+            db.execute(
+                "INSERT INTO comic_archive(book_id, blob_hash) VALUES (?1, ?2)",
+                params![self.id, self.hash],
+            )?;
+            // Each page occupies a chapter locator so progress uses the same
+            // foreign key and chapter/paragraph coordinate system as text.
+            let body = zstd::bulk::compress(&[], 3)?;
+            let mut stmt = db.prepare_cached(
+                "INSERT INTO chapter(book_id, idx, title, byte_len, body)
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+            )?;
+            for index in 0..self.count {
+                stmt.execute(params![self.id, index, (index + 1).to_string(), body])?;
+            }
+        }
+        covers::insert(db, &self.id, self.cover.as_ref())?;
+        Ok(inserted)
+    }
+}
+
+fn hash_copy(
+    input: impl Read,
+    output: &mut impl Write,
+    expected_sha256: Option<&str>,
+) -> Result<String> {
     let mut input = input.take(MAX_ARCHIVE_BYTES + 1);
     let mut buffer = [0; 64 * 1024];
     let mut hasher = blake3::Hasher::new();
+    let mut sha256 = expected_sha256.map(|_| Sha256::new());
     while input.limit() != 0 {
         let read = input.read(&mut buffer)?;
         if read == 0 {
+            if let Some((sha256, expected)) = sha256.zip(expected_sha256) {
+                if !format!("{:x}", sha256.finalize()).eq_ignore_ascii_case(expected) {
+                    return Err(Error::Invalid("legacy comic source SHA-256 differs".into()));
+                }
+            }
             return Ok(hasher.finalize().to_hex().to_string());
         }
         output.write_all(&buffer[..read])?;
         hasher.update(&buffer[..read]);
+        if let Some(sha256) = &mut sha256 {
+            sha256.update(&buffer[..read]);
+        }
     }
     Err(Error::Invalid("CBZ is larger than 512 MiB".into()))
 }

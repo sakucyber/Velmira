@@ -1,5 +1,7 @@
 //! Shared data types for the native reader.
 
+pub mod segments;
+
 use serde::{Deserialize, Serialize};
 
 pub type BookId = String;

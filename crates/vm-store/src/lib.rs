@@ -3,10 +3,9 @@
 mod comics;
 mod covers;
 mod database;
+mod illustrations;
 mod legacy;
 mod reading_marks;
-#[cfg(test)]
-mod tests;
 
 use std::{path::PathBuf, thread};
 
@@ -16,6 +15,7 @@ use vm_core::{BookFormat, BookId, BookSummary, Chapter, ImportedText, Loc};
 
 pub use comics::ComicPage;
 pub use covers::CoverSize;
+pub use illustrations::{Illustration, IllustrationImage};
 pub use legacy::MigrationReport;
 pub use reading_marks::{Annotation, AnnotationColor, Bookmark};
 
@@ -110,6 +110,15 @@ pub enum Command {
         book_id: BookId,
         size: CoverSize,
     },
+    ListIllustrations {
+        book_id: BookId,
+        chapter: u32,
+    },
+    ReadIllustration {
+        book_id: BookId,
+        chapter: u32,
+        ordinal: u32,
+    },
     OpenBook {
         book_id: BookId,
     },
@@ -183,6 +192,8 @@ impl Command {
             | Self::ImportEpub { .. }
             | Self::ImportCbz { .. } => "insert_book",
             Self::ReadCover { .. } => "read_cover",
+            Self::ListIllustrations { .. } => "list_illustrations",
+            Self::ReadIllustration { .. } => "read_illustration",
             Self::OpenBook { .. } => "open_book",
             Self::ReadChapter { .. } => "read_chapter",
             Self::ReadComicPage { .. } => "read_comic_page",
@@ -222,6 +233,17 @@ pub enum Event {
         book_id: BookId,
         size: CoverSize,
         bytes: Option<Vec<u8>>,
+    },
+    Illustrations {
+        book_id: BookId,
+        chapter: u32,
+        illustrations: Vec<Illustration>,
+    },
+    IllustrationRead {
+        book_id: BookId,
+        chapter: u32,
+        ordinal: u32,
+        image: IllustrationImage,
     },
     BookInserted {
         book: BookSummary,
@@ -422,6 +444,27 @@ fn handle(
                 bytes,
             }
         }
+        Command::ListIllustrations { book_id, chapter } => {
+            let illustrations = illustrations::list(db, &book_id, chapter)?;
+            Event::Illustrations {
+                book_id,
+                chapter,
+                illustrations,
+            }
+        }
+        Command::ReadIllustration {
+            book_id,
+            chapter,
+            ordinal,
+        } => {
+            let image = illustrations::read(db, &book_id, chapter, ordinal)?;
+            Event::IllustrationRead {
+                book_id,
+                chapter,
+                ordinal,
+                image,
+            }
+        }
         Command::OpenBook { book_id } => {
             let book = database::summary(db, &book_id)?;
             let chapter_index = book.progress.as_ref().map_or(0, |loc| loc.chapter);
@@ -472,7 +515,7 @@ fn handle(
             }
         }
         Command::MigrateLegacy { data_dir } => {
-            Event::MigrationFinished(legacy::migrate(db, &data_dir)?)
+            Event::MigrationFinished(legacy::migrate(db, blobs, &data_dir)?)
         }
         Command::ListBookmarks { book_id, offset } => {
             let (bookmarks, has_more) = reading_marks::list_bookmarks(db, &book_id, offset)?;

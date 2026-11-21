@@ -11,11 +11,14 @@ directories = "6"
 eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = { version = "0.15.4", default-features = false, features = ["xdg-portal", "async-std"] }
 serde_json = "1"
+tempfile = "3"
+vm-ai = { path = "../../crates/vm-ai" }
 vm-core = { path = "../../crates/vm-core" }
 vm-format = { path = "../../crates/vm-format" }
 vm-media = { path = "../../crates/vm-media" }
 vm-store = { path = "../../crates/vm-store" }
 vm-text = { path = "../../crates/vm-text" }
+vm-update = { path = "../../crates/vm-update" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Console"] }

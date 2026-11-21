@@ -2,11 +2,14 @@
 resolver = "2"
 members = [
     "apps/desktop",
+    "crates/vm-ai",
     "crates/vm-core",
     "crates/vm-format",
     "crates/vm-media",
     "crates/vm-store",
+    "crates/vm-sync",
     "crates/vm-text",
+    "crates/vm-update",
 ]
 
 [workspace.package]

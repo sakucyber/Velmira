@@ -5,7 +5,7 @@ use vm_core::{BookFormat, BookSummary, Chapter, ImportedText, Loc, TxtEncoding};
 
 use crate::{covers, Error, Result, SearchHit, ShelfFilter, ShelfSort, ShelfStatus};
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const SHELF_PAGE: u32 = 60;
 const MAX_SHELF_QUERY_BYTES: usize = 1024;
 const MAX_TITLE_BYTES: usize = 4096;
@@ -52,6 +52,9 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
     }
     if version < 4 {
         schema.execute_batch(include_str!("../migrations/0004_cover.sql"))?;
+    }
+    if version < 5 {
+        schema.execute_batch(include_str!("../migrations/0005_epub_illustrations.sql"))?;
         schema.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     schema.commit()?;
@@ -261,11 +264,14 @@ pub(super) fn insert_text(
     format: BookFormat,
     author: Option<String>,
 ) -> Result<(BookSummary, bool)> {
-    insert_covered_text(db, book, format, author, None)
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = insert_covered_text(&tx, book, format, author, None)?;
+    tx.commit()?;
+    Ok(result)
 }
 
 pub(super) fn insert_covered_text(
-    db: &mut Connection,
+    db: &Connection,
     book: ImportedText,
     format: BookFormat,
     author: Option<String>,
@@ -279,8 +285,7 @@ pub(super) fn insert_covered_text(
     let count = u32::try_from(book.chapters.len())
         .map_err(|_| Error::Invalid("too many chapters".into()))?;
     let id = text_id(&book, format);
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let inserted = tx.execute(
+    let inserted = db.execute(
         "INSERT INTO book(id, title, format, encoding, chapter_count, author)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO NOTHING",
         params![
@@ -294,15 +299,13 @@ pub(super) fn insert_covered_text(
     )? != 0;
     if inserted {
         for (idx, chapter) in book.chapters.into_iter().enumerate() {
-            insert_chapter(&tx, &id, idx as u32, &chapter.title, &chapter.paragraphs)?;
+            insert_chapter(db, &id, idx as u32, &chapter.title, &chapter.paragraphs)?;
         }
     } else {
-        restore_reimport(&tx, &id)?;
+        restore_reimport(db, &id)?;
     }
-    covers::insert(&tx, &id, cover)?;
-    let summary = summary(&tx, &id)?;
-    tx.commit()?;
-    Ok((summary, !inserted))
+    covers::insert(db, &id, cover)?;
+    Ok((summary(db, &id)?, !inserted))
 }
 
 pub(super) fn restore_reimport(db: &Connection, book_id: &str) -> Result<()> {

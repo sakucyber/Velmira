@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::{
+    io::{Read, Seek},
+    path::Path,
+};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use vm_core::{BookFormat, BookSummary};
 use vm_format::EpubReader;
 use vm_media::{derive_cover, CoverVariants};
 
-use crate::{database, Result};
+use crate::{database, illustrations, Result};
 
 const MAX_SHELF_BYTES: usize = 1024 * 1024;
 const MAX_DETAIL_BYTES: usize = 4 * 1024 * 1024;
@@ -25,24 +28,34 @@ pub(super) fn import_epub(db: &mut Connection, path: &Path) -> Result<(BookSumma
     let cover = if exists(db, &book_id)? {
         None
     } else {
-        parsed
-            .cover_candidates
-            .iter()
-            .find_map(|image| match reader.read_image(image) {
-                Ok(bytes) => thumbnail(&bytes),
-                Err(error) => {
-                    eprintln!("Cannot read an EPUB cover candidate: {error}");
-                    None
-                }
-            })
+        epub_thumbnail(&mut reader, &parsed.cover_candidates)
     };
-    database::insert_covered_text(
-        db,
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = database::insert_covered_text(
+        &tx,
         parsed.text,
         BookFormat::Epub,
         parsed.author,
         cover.as_ref(),
-    )
+    )?;
+    illustrations::import(&tx, &book_id, &mut reader, &parsed.illustrations)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+pub(super) fn epub_thumbnail<R: Read + Seek>(
+    reader: &mut EpubReader<R>,
+    candidates: &[vm_format::EpubImage],
+) -> Option<CoverVariants> {
+    candidates
+        .iter()
+        .find_map(|image| match reader.read_image(image) {
+            Ok(bytes) => thumbnail(&bytes),
+            Err(error) => {
+                eprintln!("Cannot read an EPUB cover candidate: {error}");
+                None
+            }
+        })
 }
 
 pub(super) fn exists(db: &Connection, book_id: &str) -> Result<bool> {
