@@ -1,21 +1,31 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
-use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
+use eframe::egui::{self, Color32, ColorImage, Rect, TextureHandle, TextureOptions, Vec2};
 use std::thread;
 use vm_core::{BookSummary, Loc};
 use vm_store::ComicPage;
 
 type DecodeResult = (u64, Result<vm_media::RgbaImage, String>);
+const PAGE_TRANSITION_SECONDS: f64 = 0.16;
+
+struct PageTransition {
+    previous: TextureHandle,
+    previous_scroll: f32,
+    direction: f32,
+    started: f64,
+}
 
 pub struct Comic {
     send: Sender<(u64, ComicPage)>,
     receive: Receiver<DecodeResult>,
     summary: Option<BookSummary>,
     page: u32,
-    pending: bool,
+    pending: Option<u32>,
     pending_page: Option<ComicPage>,
-    decoding: Option<u64>,
+    decoding: Option<(u64, u32)>,
     sequence: u64,
     texture: Option<TextureHandle>,
+    transition: Option<PageTransition>,
+    scroll: f32,
     fit_width: bool,
 }
 
@@ -40,11 +50,13 @@ impl Comic {
             receive,
             summary: None,
             page: 0,
-            pending: false,
+            pending: None,
             pending_page: None,
             decoding: None,
             sequence: 0,
             texture: None,
+            transition: None,
+            scroll: 0.0,
             fit_width: false,
         })
     }
@@ -64,17 +76,19 @@ impl Comic {
         self.summary = None;
         self.pending_page = None;
         self.decoding = None;
-        self.pending = false;
+        self.pending = None;
         self.texture = None;
+        self.transition = None;
+        self.scroll = 0.0;
     }
 
     pub fn reset_load(&mut self) {
-        self.pending = false;
+        self.pending = None;
     }
 
     pub fn loaded(&mut self, book_id: &str, page: ComicPage) {
-        if self.pending && self.book_id() == Some(book_id) {
-            self.pending = false;
+        if self.pending == Some(page.index) && self.book_id() == Some(book_id) {
+            self.pending = None;
             self.pending_page = Some(page);
         }
     }
@@ -82,20 +96,32 @@ impl Comic {
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<Result<(String, Loc), String>> {
         let mut ready = None;
         while let Ok((id, decoded)) = self.receive.try_recv() {
-            if self.decoding != Some(id) {
+            let Some((active, page)) = self.decoding else {
+                continue;
+            };
+            if id != active {
                 continue;
             }
             self.decoding = None;
             if let Some(book) = self.summary.as_ref() {
                 ready = Some(decoded.map(|image| {
-                    self.texture = Some(ctx.load_texture(
+                    let texture = ctx.load_texture(
                         "comic-page",
                         ColorImage::from_rgba_unmultiplied(
                             [image.width as usize, image.height as usize],
                             &image.pixels,
                         ),
                         TextureOptions::LINEAR,
-                    ));
+                    );
+                    self.transition = self.texture.replace(texture).and_then(|previous| {
+                        (page != self.page).then(|| PageTransition {
+                            previous,
+                            previous_scroll: self.scroll,
+                            direction: if page > self.page { 1.0 } else { -1.0 },
+                            started: ctx.input(|input| input.time),
+                        })
+                    });
+                    self.page = page;
                     (
                         book.id.clone(),
                         Loc {
@@ -111,9 +137,7 @@ impl Comic {
             self.sequence = self.sequence.wrapping_add(1);
             match self.send.try_send((self.sequence, page)) {
                 Ok(()) => {
-                    self.page = index;
-                    self.decoding = Some(self.sequence);
-                    self.texture = None;
+                    self.decoding = Some((self.sequence, index));
                 }
                 Err(crossbeam_channel::TrySendError::Full((_, page))) => {
                     self.pending_page = Some(page);
@@ -129,9 +153,10 @@ impl Comic {
 
     pub fn show(&mut self, ui: &mut egui::Ui, chinese: bool) -> Option<(String, u32)> {
         let book = self.summary.as_ref()?;
+        let total_pages = book.chapter_count;
         let tr = |zh: &'static str, en: &'static str| if chinese { zh } else { en };
         ui.add(egui::Label::new(egui::RichText::new(&book.title).strong().size(20.0)).truncate());
-        let busy = self.pending || self.decoding.is_some() || self.pending_page.is_some();
+        let busy = self.pending.is_some() || self.decoding.is_some() || self.pending_page.is_some();
         let (mut previous, mut next) = (false, false);
         ui.horizontal_wrapped(|ui| {
             previous = ui
@@ -140,10 +165,10 @@ impl Comic {
                     egui::Button::new(tr("上一页", "Previous")),
                 )
                 .clicked();
-            ui.label(format!("{} / {}", self.page + 1, book.chapter_count));
+            ui.label(format!("{} / {total_pages}", self.page + 1));
             next = ui
                 .add_enabled(
-                    !busy && self.page + 1 < book.chapter_count,
+                    !busy && self.page + 1 < total_pages,
                     egui::Button::new(tr("下一页", "Next")),
                 )
                 .clicked();
@@ -163,23 +188,14 @@ impl Comic {
                 )
             });
         }
-        if let Some(image) = &self.texture {
-            let size = image.size_vec2();
-            let available = ui.available_size();
-            let scale = (available.x / size.x)
-                .min(if self.fit_width {
-                    f32::INFINITY
-                } else {
-                    available.y / size.y
-                })
-                .max(0.01);
-            egui::ScrollArea::vertical()
-                .id_salt(("comic", self.page))
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add(egui::Image::new((image.id(), size * scale)).corner_radius(6));
-                    });
-                });
+        if self.texture.is_some() {
+            let (left, right) = self.show_page(
+                ui,
+                !busy && self.page > 0,
+                !busy && self.page + 1 < total_pages,
+            );
+            previous |= left;
+            next |= right;
         } else if busy {
             ui.centered_and_justified(|ui| {
                 ui.label(tr("正在加载漫画页…", "Loading comic page…"));
@@ -187,12 +203,106 @@ impl Comic {
         }
         let target = if previous && self.page > 0 {
             self.page - 1
-        } else if next && self.page + 1 < book.chapter_count {
+        } else if next && self.page + 1 < total_pages {
             self.page + 1
         } else {
             return None;
         };
-        self.pending = true;
-        Some((book.id.clone(), target))
+        self.pending = Some(target);
+        Some((self.summary.as_ref()?.id.clone(), target))
     }
+
+    fn show_page(&mut self, ui: &mut egui::Ui, previous: bool, next: bool) -> (bool, bool) {
+        let Some(image) = &self.texture else {
+            return (false, false);
+        };
+        let now = ui.input(|input| input.time);
+        if self
+            .transition
+            .as_ref()
+            .is_some_and(|transition| now - transition.started >= PAGE_TRANSITION_SECONDS)
+        {
+            self.transition = None;
+        }
+        let available = ui.available_size();
+        let size = fitted_size(image, available, self.fit_width);
+        let output = egui::ScrollArea::vertical()
+            .id_salt(("comic", self.book_id(), self.page))
+            .show_viewport(ui, |ui, viewport| {
+                let clicked = ui
+                    .vertical_centered(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                        if let Some(transition) = &self.transition {
+                            let fraction = ((now - transition.started) / PAGE_TRANSITION_SECONDS)
+                                .clamp(0.0, 1.0) as f32;
+                            let motion = 1.0 - (1.0 - fraction).powi(3);
+                            let distance =
+                                (available.x * 0.06).clamp(20.0, 52.0) * transition.direction;
+                            let old_size =
+                                fitted_size(&transition.previous, available, self.fit_width);
+                            let old_rect = Rect::from_min_size(
+                                egui::pos2(
+                                    rect.center().x - old_size.x * 0.5 - motion * distance,
+                                    rect.top() + viewport.top() - transition.previous_scroll,
+                                ),
+                                old_size,
+                            );
+                            paint_page(ui, &transition.previous, old_rect, 1.0 - fraction);
+                            let new_rect =
+                                rect.translate(egui::vec2((1.0 - motion) * distance, 0.0));
+                            paint_page(ui, image, new_rect, fraction);
+                            ui.ctx().request_repaint();
+                        } else {
+                            paint_page(ui, image, rect, 1.0);
+                        }
+                        let edge = rect.width() * 0.25;
+                        let left = Rect::from_min_max(
+                            rect.min,
+                            egui::pos2(rect.left() + edge, rect.bottom()),
+                        );
+                        let right = Rect::from_min_max(
+                            egui::pos2(rect.right() - edge, rect.top()),
+                            rect.max,
+                        );
+                        let click = |enabled, rect: Rect, id| {
+                            enabled
+                                && ui
+                                    .interact(
+                                        rect.intersect(ui.clip_rect()),
+                                        ui.id().with(id),
+                                        egui::Sense::click(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                        };
+                        (
+                            click(previous, left, "comic-prev"),
+                            click(next, right, "comic-next"),
+                        )
+                    })
+                    .inner;
+                (clicked, viewport.top())
+            });
+        let (clicked, scroll) = output.inner;
+        self.scroll = scroll;
+        clicked
+    }
+}
+
+fn fitted_size(image: &TextureHandle, available: Vec2, fit_width: bool) -> Vec2 {
+    let size = image.size_vec2();
+    let width_scale = available.x / size.x;
+    let scale = if fit_width {
+        width_scale
+    } else {
+        width_scale.min(available.y / size.y)
+    };
+    size * scale.max(0.01)
+}
+
+fn paint_page(ui: &egui::Ui, texture: &TextureHandle, rect: Rect, opacity: f32) {
+    egui::Image::new((texture.id(), rect.size()))
+        .corner_radius(6)
+        .tint(Color32::WHITE.gamma_multiply(opacity))
+        .paint_at(ui, rect);
 }

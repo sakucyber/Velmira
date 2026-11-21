@@ -133,6 +133,7 @@ pub fn apply(ctx: &egui::Context, night: bool) {
     });
     let mut style = (*ctx.style()).clone();
     style.visuals = v;
+    style.animation_time = 0.16;
     style.scroll_animation = egui::style::ScrollAnimation {
         points_per_second: 900.0,
         duration: egui::Rangef::new(0.08, 0.25),

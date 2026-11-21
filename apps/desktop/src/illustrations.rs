@@ -13,6 +13,10 @@ pub struct Illustrations {
 }
 
 impl Illustrations {
+    pub fn is_open(&self) -> bool {
+        self.chapter.is_some()
+    }
+
     pub fn open(&mut self, book_id: String, chapter: u32) -> Command {
         *self = Self {
             chapter: Some((book_id.clone(), chapter)),

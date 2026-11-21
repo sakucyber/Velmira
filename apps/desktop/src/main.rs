@@ -95,6 +95,9 @@ struct App {
     importer: ImportWorker,
     localized: bool,
     night: bool,
+    reader_sidebar_open: bool,
+    view: View,
+    view_entered: f64,
     book_list: Vec<BookSummary>,
     has_more: bool,
     list_pending: bool,
@@ -139,6 +142,13 @@ enum CardAction {
     Open(String),
     Rename(String, String),
     Status(String, ShelfStatus),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Shelf,
+    Novel,
+    Comic,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -309,6 +319,9 @@ impl App {
             importer,
             localized: true,
             night: false,
+            reader_sidebar_open: true,
+            view: View::Shelf,
+            view_entered: f64::NEG_INFINITY,
             book_list: Vec::new(),
             has_more: false,
             list_pending: false,
@@ -934,161 +947,211 @@ impl App {
         }
     }
 
-    fn reader_sidebar(&mut self, ctx: &egui::Context) {
+    fn reader_sidebar(&mut self, ctx: &egui::Context) -> bool {
+        let id = egui::Id::new("reader_contents");
+        let expansion = ctx.animate_bool_with_time_and_easing(
+            id.with("expansion"),
+            self.reader_sidebar_open,
+            0.18,
+            egui::emath::easing::quadratic_in_out,
+        );
+        if expansion <= 0.0 {
+            return false;
+        }
+        let animating = expansion < 1.0;
+        let mut collapse = false;
         let mut jump = None;
         let mut submit = false;
         let mut bookmark = false;
         let mut remove_bookmark = None;
         let mut load_bookmarks = false;
         let mut edit = None;
-        let sidebar_frame = egui::Frame::new()
-            .fill(theme::palette(self.night).surface)
-            .inner_margin(egui::Margin::symmetric(14, 12));
-        egui::SidePanel::left("reader_contents")
+        let sidebar_frame = egui::Frame::new().fill(theme::palette(self.night).surface);
+        let max_width = (ctx.available_rect().width() * 0.5).clamp(220.0, 420.0);
+        let stable_panel = egui::panel::PanelState::load(ctx, id);
+        let expanded_width = stable_panel
+            .map_or(240.0, |state| state.rect.width())
+            .clamp(220.0, max_width);
+        let mut panel = egui::SidePanel::left(id)
             .resizable(true)
             .default_width(240.0)
-            .frame(sidebar_frame)
-            .show(ctx, |ui| {
+            .width_range(220.0..=max_width)
+            .frame(sidebar_frame);
+        if animating {
+            panel = panel
+                .resizable(false)
+                .exact_width(expansion * expanded_width);
+        }
+        panel.show(ctx, |panel_ui| {
+            let bounds = panel_ui.max_rect();
+            panel_ui.set_min_width(bounds.width());
+            let mut content = bounds.shrink2(egui::vec2(14.0, 12.0));
+            if animating {
+                // Slide the full-width contents behind the moving panel edge.
+                content.min.x -= expanded_width - bounds.width();
+            }
+            let mut builder = egui::UiBuilder::new().id_salt("contents").max_rect(content);
+            if animating {
+                builder = builder.disabled();
+            }
+            let ui = &mut panel_ui.new_child(builder);
+            ui.horizontal(|ui| {
                 ui.heading(RichText::new(self.tr("目录", "Contents")).size(18.0));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let hint = if self.localized {
-                        "本书搜索"
-                    } else {
-                        "Search this book"
-                    };
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .hint_text(hint)
-                            .desired_width(140.0)
-                            .char_limit(120),
-                    );
-                    let enter =
-                        field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    submit = enter || ui.button(self.tr("搜索", "Find")).clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let button = ui.button(self.tr("收起侧栏", "Hide sidebar"));
+                    if button.clicked() {
+                        collapse = true;
+                        if button.has_focus() {
+                            ui.input_mut(|input| {
+                                input.consume_key(input.modifiers, egui::Key::Space);
+                            });
+                        }
+                        button.surrender_focus();
+                    }
                 });
-                if !self.search_hits.is_empty() {
-                    egui::ScrollArea::vertical()
-                        .id_salt("hits")
-                        .max_height(165.0)
-                        .show_rows(ui, 32.0, self.search_hits.len(), |ui, rows| {
-                            for index in rows {
-                                let hit = &self.search_hits[index];
-                                if ui
-                                    .add_sized(
-                                        [ui.available_width(), 32.0],
-                                        egui::Button::new(
-                                            egui::RichText::new(&hit.excerpt).size(13.0),
-                                        )
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&hit.excerpt)
-                                    .clicked()
-                                {
-                                    jump = Some(hit.loc);
-                                }
-                            }
-                        });
-                    ui.separator();
-                }
-                ui.collapsing(self.tr("书签", "Bookmarks"), |ui| {
-                    bookmark = ui
-                        .button(self.tr("标记当前位置", "Bookmark this position"))
-                        .clicked();
-                    egui::ScrollArea::vertical()
-                        .id_salt("bookmarks")
-                        .max_height(150.0)
-                        .show_rows(ui, 32.0, self.bookmarks.len(), |ui, rows| {
-                            for index in rows {
-                                let mark = &self.bookmarks[index];
-                                ui.horizontal(|ui| {
-                                    ui.set_min_height(32.0);
-                                    let label =
-                                        mark.label.as_deref().map(str::to_owned).unwrap_or_else(
-                                            || {
-                                                format!(
-                                                    "{} · {}",
-                                                    mark.loc.chapter + 1,
-                                                    mark.loc.para + 1
-                                                )
-                                            },
-                                        );
-                                    if ui
-                                        .add_sized(
-                                            [(ui.available_width() - 40.0).max(24.0), 32.0],
-                                            egui::Button::new(&label).truncate(),
-                                        )
-                                        .on_hover_text(label)
-                                        .clicked()
-                                    {
-                                        jump = Some(mark.loc);
-                                    }
-                                    if ui.small_button("×").clicked() {
-                                        remove_bookmark = Some(mark.loc);
-                                    }
-                                });
-                            }
-                        });
-                    load_bookmarks =
-                        self.more_bookmarks && ui.button(self.tr("更多", "More")).clicked();
-                });
-                ui.collapsing(self.tr("本章批注", "Chapter notes"), |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("annotations")
-                        .max_height(150.0)
-                        .show_rows(ui, 32.0, self.reader.annotations.len(), |ui, rows| {
-                            for index in rows {
-                                let annotation = &self.reader.annotations[index];
-                                ui.horizontal(|ui| {
-                                    ui.set_min_height(32.0);
-                                    let excerpt: String =
-                                        annotation.text.chars().take(14).collect();
-                                    if ui
-                                        .add_sized(
-                                            [(ui.available_width() - 54.0).max(24.0), 32.0],
-                                            egui::Button::new(excerpt).truncate(),
-                                        )
-                                        .on_hover_text(
-                                            annotation.note.as_deref().unwrap_or(&annotation.text),
-                                        )
-                                        .clicked()
-                                    {
-                                        jump = Some(annotation.loc);
-                                    }
-                                    if ui.small_button(self.tr("编辑", "Edit")).clicked() {
-                                        edit = Some(annotation.clone());
-                                    }
-                                });
-                            }
-                        });
-                });
-                egui::ScrollArea::vertical().id_salt("toc").show_rows(
-                    ui,
-                    32.0,
-                    self.reader.toc().len(),
-                    |ui, rows| {
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let hint = if self.localized {
+                    "本书搜索"
+                } else {
+                    "Search this book"
+                };
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text(hint)
+                        .desired_width((ui.available_width() - 62.0).clamp(90.0, 180.0))
+                        .char_limit(120),
+                );
+                let enter =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                submit = enter || ui.button(self.tr("搜索", "Find")).clicked();
+            });
+            if !self.search_hits.is_empty() {
+                egui::ScrollArea::vertical()
+                    .id_salt("hits")
+                    .max_height(165.0)
+                    .show_rows(ui, 32.0, self.search_hits.len(), |ui, rows| {
                         for index in rows {
+                            let hit = &self.search_hits[index];
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 32.0],
-                                    egui::Button::selectable(
-                                        self.reader.chapter_index() == index as u32,
-                                        &self.reader.toc()[index],
-                                    )
-                                    .truncate(),
+                                    egui::Button::new(egui::RichText::new(&hit.excerpt).size(13.0))
+                                        .truncate(),
                                 )
-                                .on_hover_text(&self.reader.toc()[index])
+                                .on_hover_text(&hit.excerpt)
                                 .clicked()
                             {
-                                jump = Some(Loc {
-                                    chapter: index as u32,
-                                    ..Loc::default()
-                                });
+                                jump = Some(hit.loc);
                             }
                         }
-                    },
-                );
+                    });
+                ui.separator();
+            }
+            ui.collapsing(self.tr("书签", "Bookmarks"), |ui| {
+                bookmark = ui
+                    .button(self.tr("标记当前位置", "Bookmark this position"))
+                    .clicked();
+                egui::ScrollArea::vertical()
+                    .id_salt("bookmarks")
+                    .max_height(150.0)
+                    .show_rows(ui, 32.0, self.bookmarks.len(), |ui, rows| {
+                        for index in rows {
+                            let mark = &self.bookmarks[index];
+                            ui.horizontal(|ui| {
+                                ui.set_min_height(32.0);
+                                let label =
+                                    mark.label.as_deref().map(str::to_owned).unwrap_or_else(|| {
+                                        format!("{} · {}", mark.loc.chapter + 1, mark.loc.para + 1)
+                                    });
+                                if ui
+                                    .add_sized(
+                                        [(ui.available_width() - 40.0).max(24.0), 32.0],
+                                        egui::Button::new(&label).truncate(),
+                                    )
+                                    .on_hover_text(label)
+                                    .clicked()
+                                {
+                                    jump = Some(mark.loc);
+                                }
+                                if ui.small_button("×").clicked() {
+                                    remove_bookmark = Some(mark.loc);
+                                }
+                            });
+                        }
+                    });
+                load_bookmarks =
+                    self.more_bookmarks && ui.button(self.tr("更多", "More")).clicked();
             });
+            ui.collapsing(self.tr("本章批注", "Chapter notes"), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("annotations")
+                    .max_height(150.0)
+                    .show_rows(ui, 32.0, self.reader.annotations.len(), |ui, rows| {
+                        for index in rows {
+                            let annotation = &self.reader.annotations[index];
+                            ui.horizontal(|ui| {
+                                ui.set_min_height(32.0);
+                                let excerpt: String = annotation.text.chars().take(14).collect();
+                                if ui
+                                    .add_sized(
+                                        [(ui.available_width() - 54.0).max(24.0), 32.0],
+                                        egui::Button::new(excerpt).truncate(),
+                                    )
+                                    .on_hover_text(
+                                        annotation.note.as_deref().unwrap_or(&annotation.text),
+                                    )
+                                    .clicked()
+                                {
+                                    jump = Some(annotation.loc);
+                                }
+                                if ui.small_button(self.tr("编辑", "Edit")).clicked() {
+                                    edit = Some(annotation.clone());
+                                }
+                            });
+                        }
+                    });
+            });
+            egui::ScrollArea::vertical().id_salt("toc").show_rows(
+                ui,
+                32.0,
+                self.reader.toc().len(),
+                |ui, rows| {
+                    for index in rows {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 32.0],
+                                egui::Button::selectable(
+                                    self.reader.chapter_index() == index as u32,
+                                    &self.reader.toc()[index],
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&self.reader.toc()[index])
+                            .clicked()
+                        {
+                            jump = Some(Loc {
+                                chapter: index as u32,
+                                ..Loc::default()
+                            });
+                        }
+                    }
+                },
+            );
+        });
+        if animating {
+            // The animation must not replace our last user-resized panel width.
+            if let Some(state) = stable_panel {
+                ctx.data_mut(|data| data.insert_persisted(id, state));
+            } else {
+                ctx.data_mut(|data| data.remove::<egui::panel::PanelState>(id));
+            }
+        }
+        if collapse {
+            self.reader_sidebar_open = false;
+            ctx.request_repaint();
+        }
         if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
             if let Some(loc) = remove_bookmark {
                 self.send(Command::DeleteBookmark {
@@ -1139,6 +1202,7 @@ impl App {
         if let Some(loc) = jump {
             self.jump(loc);
         }
+        animating || collapse
     }
 
     fn annotation_editor(&mut self, ctx: &egui::Context) {
@@ -1292,6 +1356,7 @@ impl eframe::App for App {
         let mut toggle_theme = false;
         let mut generate_comic = false;
         let mut show_illustrations = false;
+        let mut toggle_sidebar = false;
         let p = theme::palette(self.night);
         let toolbar_frame = egui::Frame::new()
             .fill(p.surface)
@@ -1341,6 +1406,19 @@ impl eframe::App for App {
                     if self.reader.is_epub() && ui.button("插图").clicked() {
                         show_illustrations = true;
                     }
+                    if self.reader.is_open() {
+                        let label = if self.reader_sidebar_open {
+                            self.tr("收起目录", "Hide contents")
+                        } else {
+                            self.tr("展开目录", "Show contents")
+                        };
+                        toggle_sidebar = ui
+                            .button(label)
+                            .on_hover_text(
+                                self.tr("显示或隐藏阅读侧栏", "Show or hide the reader sidebar"),
+                            )
+                            .clicked();
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let label = if self.night {
                             self.tr("日间模式", "Day mode")
@@ -1365,6 +1443,9 @@ impl eframe::App for App {
             self.night = !self.night;
             theme::apply(ctx, self.night);
         }
+        if toggle_sidebar {
+            self.reader_sidebar_open = !self.reader_sidebar_open;
+        }
         if generate_comic {
             if let Some(source) = self.reader.comic_source() {
                 self.generator.prepare(source);
@@ -1388,10 +1469,29 @@ impl eframe::App for App {
             self.editing = None;
             self.opening = None;
         }
-        if self.comic.book_id().is_some() {
+        let view = if self.comic.book_id().is_some() {
+            View::Comic
+        } else if self.reader.is_open() {
+            View::Novel
+        } else {
+            View::Shelf
+        };
+        let time = ctx.input(|input| input.time);
+        if self.view != view || toggle_theme {
+            self.view = view;
+            self.view_entered = time;
+        }
+        let fade = ((time - self.view_entered) / 0.16).clamp(0.0, 1.0) as f32;
+        let opacity = 1.0 - 0.45 * (1.0 - fade).powi(3);
+        if fade < 1.0 {
+            ctx.request_repaint();
+        }
+        if view == View::Comic {
             let mut flip = None;
-            egui::CentralPanel::default()
-                .show(ctx, |ui| flip = self.comic.show(ui, self.localized));
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
+                flip = self.comic.show(ui, self.localized);
+            });
             if let Some((book_id, page_index)) = flip {
                 if !self.send(Command::ReadComicPage {
                     book_id,
@@ -1400,11 +1500,16 @@ impl eframe::App for App {
                     self.comic.reset_load();
                 }
             }
-        } else if self.reader.is_open() {
-            self.reader_sidebar(ctx);
+        } else if view == View::Novel {
+            let resizing = self.reader_sidebar(ctx);
+            let dialog_open = self.editing.is_some()
+                || self.generator.open
+                || self.updates.open
+                || self.illustrations.is_open();
             let mut chapter_step = None;
             egui::CentralPanel::default().show(ctx, |ui| {
-                chapter_step = self.reader.show(ui, self.localized);
+                ui.multiply_opacity(opacity);
+                chapter_step = self.reader.show(ui, self.localized, resizing, dialog_open);
             });
             if let Some((chapter, last_page)) = chapter_step {
                 if let Some((book_id, chapter)) = self.reader.prepare_adjacent(chapter, last_page) {
@@ -1429,7 +1534,10 @@ impl eframe::App for App {
                 .inner_margin(egui::Margin::symmetric(20, 12));
             egui::CentralPanel::default()
                 .frame(shelf_frame)
-                .show(ctx, |ui| self.shelf(ui));
+                .show(ctx, |ui| {
+                    ui.multiply_opacity(opacity);
+                    self.shelf(ui);
+                });
         }
         if !self.importing && self.storage_ready {
             if let Some(request) = self.generator.show(ctx) {
