@@ -1,7 +1,10 @@
 """Assemble a checked portable archive from an existing native release build."""
 
 import argparse
+import gzip
 import hashlib
+import io
+import lzma
 import os
 from pathlib import Path
 import plistlib
@@ -11,6 +14,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import time
 import tomllib
 import zipfile
 
@@ -30,6 +34,13 @@ LINUX_TARGETS = {
 MAC_UNIVERSAL = "universal2-apple-darwin"
 TARGETS = (*WINDOWS_TARGETS, *LINUX_TARGETS, MAC_UNIVERSAL)
 LICENSE_NAME = re.compile(r"^(licen[sc]e|copying|copyright|notice|ofl|unlicense)", re.I)
+LINUX_DISTRO_ARCHES = {
+    "x86_64-unknown-linux-gnu": ("amd64", "x86_64"),
+    "i686-unknown-linux-gnu": ("i386", "i686"),
+}
+APP_NAME = "velmira-native"
+APP_URL = "https://github.com/sakucyber/Velmira"
+APP_DESCRIPTION = "Local-first desktop reader for TXT, EPUB and CBZ"
 
 
 def require(condition: bool, message: str) -> None:
@@ -173,9 +184,147 @@ def write_archive(directory: Path, archive: Path, executable: Path, target: str)
     require(archived_digest == digest(executable), f"Archived executable differs: {member_name}")
 
 
-def package(target: str, build_dir: Path, output_dir: Path) -> None:
+def installed_files(directory: Path, executable: Path) -> dict[str, tuple[bytes, int]]:
+    files = {f"usr/bin/{APP_NAME}": (executable.read_bytes(), 0o755)}
+    entry = (
+        "[Desktop Entry]\nType=Application\nName=Velmira Native\n"
+        f"Comment={APP_DESCRIPTION}\nExec={APP_NAME}\n"
+        "Terminal=false\nCategories=Office;Literature;\nStartupNotify=true\n"
+    )
+    files[f"usr/share/applications/{APP_NAME}.desktop"] = (entry.encode(), 0o644)
+    for source in sorted((directory / "licenses").rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(directory / "licenses").as_posix()
+            files[f"usr/share/licenses/{APP_NAME}/{relative}"] = (source.read_bytes(), 0o644)
+    for name in ("LICENSE", "THIRD-PARTY.md"):
+        files[f"usr/share/licenses/{APP_NAME}/{name}"] = ((directory / name).read_bytes(), 0o644)
+    return files
+
+
+def parent_dirs(files: dict[str, tuple[bytes, int]]) -> list[str]:
+    return sorted({
+        name[:index]
+        for name in files
+        for index, character in enumerate(name)
+        if character == "/"
+    })
+
+
+def tar_bytes(files: dict[str, tuple[bytes, int]], epoch: int) -> bytes:
+    storage = io.BytesIO()
+    # GNU extensions preserve long license filenames without PAX entries that older dpkg rejects.
+    with tarfile.open(fileobj=storage, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        for name in parent_dirs(files):
+            item = tarfile.TarInfo(name)
+            item.type, item.mode = tarfile.DIRTYPE, 0o755
+            item.uname, item.gname, item.mtime = "root", "root", epoch
+            archive.addfile(item)
+        for name, (content, mode) in sorted(files.items()):
+            item = tarfile.TarInfo(name)
+            item.size, item.mode = len(content), mode
+            item.uname, item.gname, item.mtime = "root", "root", epoch
+            archive.addfile(item, io.BytesIO(content))
+    return storage.getvalue()
+
+
+def encode_debian(
+    output: Path, files: dict[str, tuple[bytes, int]], version: str, arch: str, epoch: int
+) -> None:
+    files[f"usr/share/doc/{APP_NAME}/copyright"] = files[f"usr/share/licenses/{APP_NAME}/LICENSE"]
+    installed_size = sum((len(content) + 1023) // 1024 for content, _ in files.values())
+    control = (
+        f"Package: {APP_NAME}\nVersion: {version}-1\nArchitecture: {arch}\n"
+        "Maintainer: Velmira contributors <160121170+sakucyber@users.noreply.github.com>\n"
+        "Section: text\nPriority: optional\n"
+        "Depends: libc6 (>= 2.35), libgcc-s1, libgl1, libegl1, libwayland-client0, "
+        "libwayland-cursor0, libwayland-egl1, libxkbcommon0, libxkbcommon-x11-0, "
+        "libx11-6, libxcursor1, libxi6, libxrandr2\n"
+        "Recommends: xdg-desktop-portal, xdg-utils\n"
+        f"Homepage: {APP_URL}\nInstalled-Size: {installed_size}\nDescription: {APP_DESCRIPTION}\n"
+        " Reads ebooks and comics in a native desktop window and stores the library locally.\n"
+    )
+    hashes = "".join(
+        f"{hashlib.md5(content, usedforsecurity=False).hexdigest()}  {name}\n"
+        for name, (content, _) in sorted(files.items())
+    ).encode()
+    metadata = {"control": (control.encode(), 0o644), "md5sums": (hashes, 0o644)}
+    with output.open("wb") as archive:
+        archive.write(b"!<arch>\n")
+        for name, content in (
+            ("debian-binary", b"2.0\n"),
+            ("control.tar.xz", lzma.compress(tar_bytes(metadata, epoch))),
+            ("data.tar.xz", lzma.compress(tar_bytes(files, epoch))),
+        ):
+            header = f"{name + '/':<16}{epoch:<12}{0:<6}{0:<6}{'100644':<8}{len(content):<10}`\n"
+            require(len(header) == 60, "Invalid Debian archive header")
+            archive.write(header.encode("ascii"))
+            archive.write(content)
+            if len(content) % 2:
+                archive.write(b"\n")
+
+
+def mtree_escape(path: str) -> str:
+    return "".join(
+        chr(byte) if byte < 128 and (chr(byte).isalnum() or byte in b"./_+-")
+        else f"\\{byte:03o}"
+        for byte in path.encode()
+    )
+
+
+def encode_arch(
+    output: Path, files: dict[str, tuple[bytes, int]], version: str, arch: str, epoch: int
+) -> None:
+    dependencies = (
+        "glibc>=2.35", "gcc-libs", "libglvnd", "wayland", "libxkbcommon", "libxkbcommon-x11", "libx11",
+        "libxcursor", "libxi", "libxrandr",
+    )
+    installed_size = sum(len(content) for content, _ in files.values())
+    metadata = (
+        f"pkgname = {APP_NAME}\npkgbase = {APP_NAME}\npkgver = {version}-1\n"
+        f"pkgdesc = {APP_DESCRIPTION}\nurl = {APP_URL}\nbuilddate = {epoch}\n"
+        f"packager = Velmira contributors\nsize = {installed_size}\narch = {arch}\nlicense = MIT\n"
+        + "".join(f"depend = {package}\n" for package in dependencies)
+        + "optdepend = xdg-desktop-portal: file selection dialog\n"
+        + "optdepend = xdg-utils: opening web links\n"
+    )
+    files[".PKGINFO"] = (metadata.encode(), 0o644)
+    mtree = ["#mtree", "/set type=file uid=0 gid=0 mode=644"]
+    mtree.extend(f"{mtree_escape(name)} type=dir mode=755 time={epoch}.0" for name in [
+        ".", *(f"./{name}" for name in parent_dirs(files)),
+    ])
+    mtree.extend(
+        f"./{mtree_escape(name)} mode={mode:o} size={len(content)} time={epoch}.0 "
+        f"sha256digest={hashlib.sha256(content).hexdigest()}"
+        for name, (content, mode) in sorted(files.items())
+    )
+    files[".MTREE"] = (gzip.compress(("\n".join(mtree) + "\n").encode(), mtime=epoch), 0o644)
+    temporary_tar = output.with_suffix("")
+    temporary_tar.write_bytes(tar_bytes(files, epoch))
+    run("zstd", "-q", "-f", "-10", temporary_tar, "-o", output)
+    run("zstd", "-q", "--test", output)
+
+
+def linux_distribution_packages(
+    archive: Path, directory: Path, executable: Path, target: str, version: str
+) -> tuple[Path, Path]:
+    deb_arch, pacman_arch = LINUX_DISTRO_ARCHES[target]
+    epoch = int(os.environ.get("SOURCE_DATE_EPOCH", int(time.time())))
+    require(0 <= epoch < 2**32, "SOURCE_DATE_EPOCH is outside the supported range")
+    core, _, prerelease = version.split("+", 1)[0].partition("-")
+    deb_version = f"{core}~{prerelease}" if prerelease else core
+    arch_version = f"{core}{prerelease.replace('-', '.')}" if prerelease else core
+    files = installed_files(directory, executable)
+    deb = archive.with_name(archive.name.removesuffix(".tar.gz") + ".deb")
+    arch = archive.with_name(archive.name.removesuffix(".tar.gz") + ".pkg.tar.zst")
+    encode_debian(deb, files.copy(), deb_version, deb_arch, epoch)
+    encode_arch(arch, files, arch_version, pacman_arch, epoch)
+    return deb, arch
+
+
+def package(target: str, build_dir: Path, output_dir: Path, distributions: bool) -> None:
     package_config = tomllib.loads((ROOT / "apps" / "desktop" / "Cargo.toml").read_text(encoding="utf-8"))
     version = package_config["package"]["version"]
+    require(not distributions or target in LINUX_DISTRO_ARCHES, "Debian and Arch packages require Linux x64 or i686")
     name = f"Velmira-Native-{version}"
     if target == MAC_UNIVERSAL:
         suffix = "macos-universal2.zip"
@@ -218,16 +367,20 @@ def package(target: str, build_dir: Path, output_dir: Path) -> None:
         (directory / "START-HERE.txt").write_text(
             f"Velmira Native {version}\n\n{instructions}\n\n"
             "打开后点击「导入书籍」，或把 TXT、EPUB、CBZ 拖入窗口。\n"
-            "https://github.com/sakucyber/Velmira\n",
+            f"{APP_URL}\n",
             encoding="utf-8-sig",
         )
         archive = staging / f"{name}-{suffix}"
         write_archive(directory, archive, executable, target)
-        checksum = staging / f"{archive.name}.sha256"
-        checksum.write_text(f"{digest(archive)}  {archive.name}\n", encoding="ascii")
-        for path in (archive, checksum):
-            result = path.replace(output_dir / path.name)
-            print(result)
+        packages = [archive]
+        if distributions:
+            packages.extend(linux_distribution_packages(archive, directory, executable, target, version))
+        for package_path in packages:
+            checksum = staging / f"{package_path.name}.sha256"
+            checksum.write_text(f"{digest(package_path)}  {package_path.name}\n", encoding="ascii")
+            for path in (package_path, checksum):
+                result = path.replace(output_dir / path.name)
+                print(result)
 
 
 def main() -> None:
@@ -235,8 +388,9 @@ def main() -> None:
     parser.add_argument("--target", required=True, choices=TARGETS)
     parser.add_argument("--build-dir", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")))
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
+    parser.add_argument("--linux-distributions", action="store_true", help="Also create Linux x64/i686 Debian and Arch packages")
     args = parser.parse_args()
-    package(args.target, args.build_dir.resolve(), args.output_dir.resolve())
+    package(args.target, args.build_dir.resolve(), args.output_dir.resolve(), args.linux_distributions)
 
 
 if __name__ == "__main__":

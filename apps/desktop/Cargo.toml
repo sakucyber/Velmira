@@ -10,6 +10,8 @@ crossbeam-channel = "0.5"
 directories = "6"
 eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = { version = "0.15.4", default-features = false, features = ["xdg-portal", "async-std"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 vm-ai = { path = "../../crates/vm-ai" }
@@ -17,8 +19,10 @@ vm-core = { path = "../../crates/vm-core" }
 vm-format = { path = "../../crates/vm-format" }
 vm-media = { path = "../../crates/vm-media" }
 vm-store = { path = "../../crates/vm-store" }
+vm-sync = { path = "../../crates/vm-sync" }
 vm-text = { path = "../../crates/vm-text" }
 vm-update = { path = "../../crates/vm-update" }
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Console", "Win32_Security_Cryptography"] }

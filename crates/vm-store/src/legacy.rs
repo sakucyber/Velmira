@@ -1,4 +1,6 @@
-//! Read-only import of the previous desktop library's text, comics and reading records.
+//! Read-only import of previous desktop and Android libraries.
+
+mod android;
 
 use std::{
     fs::{self, File},
@@ -37,7 +39,7 @@ pub(super) fn migrate(
     data_dir: &Path,
 ) -> Result<MigrationReport> {
     let source = if data_dir.is_dir() {
-        data_dir.join("app.db")
+        library_database(data_dir)?
     } else {
         data_dir.to_owned()
     };
@@ -48,12 +50,18 @@ pub(super) fn migrate(
     let library = source
         .parent()
         .ok_or_else(|| Error::Invalid("legacy database has no parent directory".into()))?;
-    let marker = format!("migrated_from:v2-media:{source_key}");
     let mut old = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     old.busy_timeout(Duration::from_secs(5))?;
     old.execute_batch("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF;")?;
     let snapshot = old.transaction()?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let android = snapshot.query_row(
+        "SELECT COUNT(*) = 2 FROM pragma_table_info('books') WHERE name IN ('sha', 'json')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? && has_table(&snapshot, "records")?;
+    let revision = if android { "android-v1" } else { "v2-media" };
+    let marker = format!("migrated_from:{revision}:{source_key}");
     if tx
         .query_row("SELECT 1 FROM meta WHERE key = ?1", [&marker], |_| Ok(()))
         .optional()?
@@ -63,6 +71,12 @@ pub(super) fn migrate(
             already_migrated: true,
             ..MigrationReport::default()
         });
+    }
+    if android {
+        let report = android::migrate(&snapshot, &tx, source_key)?;
+        tx.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", [&marker])?;
+        tx.commit()?;
+        return Ok(report);
     }
     // Earlier schema fixtures and installations can have no source-file column.
     let has_file_path = snapshot.query_row(
@@ -155,12 +169,7 @@ pub(super) fn migrate(
             comic.id
         } else {
             let encoding: Option<String> = row.get(5)?;
-            let mut hasher =
-                blake3::Hasher::new_derive_key("Velmira legacy database book identity");
-            hasher.update(format.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(fingerprint.as_bytes());
-            let book_id = hasher.finalize().to_hex().to_string();
+            let book_id = text_identity(format, fingerprint);
             let inserted = tx.execute(
                 "INSERT INTO book(id, title, author, format, encoding, chapter_count, added_at, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(id) DO NOTHING",
@@ -203,6 +212,34 @@ pub(super) fn migrate(
     }
     tx.commit()?;
     Ok(report)
+}
+
+fn library_database(root: &Path) -> Result<PathBuf> {
+    let mut candidates = [
+        root.join("app.db"),
+        root.join("velmira-local-reader.db"),
+        root.join("databases").join("velmira-local-reader.db"),
+        root.join("db").join("velmira-local-reader.db"),
+    ]
+    .into_iter()
+    .filter(|path| path.is_file());
+    let source = candidates.next().ok_or_else(|| {
+        Error::Invalid("legacy database not found in the selected directory".into())
+    })?;
+    if candidates.next().is_some() {
+        return Err(Error::Invalid(
+            "multiple legacy databases found; select the database file".into(),
+        ));
+    }
+    Ok(source)
+}
+
+fn text_identity(format: &str, fingerprint: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("Velmira legacy database book identity");
+    hasher.update(format.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(fingerprint.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 fn legacy_file(
@@ -356,7 +393,23 @@ fn copy_progress(
     let Some((chapter, para, off, updated_at)) = item else {
         return Ok(());
     };
-    let Some(loc) = parse_loc(chapter, para, off) else {
+    insert_progress(
+        new,
+        book_id,
+        parse_loc(chapter, para, off),
+        updated_at,
+        report,
+    )
+}
+
+fn insert_progress(
+    new: &Connection,
+    book_id: &str,
+    loc: Option<Loc>,
+    updated_at: i64,
+    report: &mut MigrationReport,
+) -> Result<()> {
+    let Some(loc) = loc else {
         report.skipped_positions += 1;
         return Ok(());
     };
@@ -410,27 +463,40 @@ fn copy_bookmarks(
     )?;
     let mut rows = stmt.query([old_id])?;
     while let Some(row) = rows.next()? {
-        let Some(loc) = parse_loc(row.get(0)?, row.get(1)?, row.get(2)?) else {
-            report.skipped_positions += 1;
-            continue;
-        };
-        if database::paragraph_len(new, book_id, &loc)?.is_none_or(|len| loc.off > len) {
-            report.skipped_positions += 1;
-            continue;
-        }
-        report.bookmarks += new.execute(
-            "INSERT INTO bookmark(book_id, chapter, para, off, label, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(book_id, chapter, para) DO NOTHING",
-            params![
-                book_id,
-                loc.chapter,
-                loc.para,
-                loc.off,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, i64>(4)?
-            ],
-        )? as u32;
+        let label: Option<String> = row.get(3)?;
+        insert_bookmark(
+            new,
+            book_id,
+            parse_loc(row.get(0)?, row.get(1)?, row.get(2)?),
+            label.as_deref(),
+            row.get(4)?,
+            report,
+        )?;
     }
+    Ok(())
+}
+
+fn insert_bookmark(
+    new: &Connection,
+    book_id: &str,
+    loc: Option<Loc>,
+    label: Option<&str>,
+    created_at: i64,
+    report: &mut MigrationReport,
+) -> Result<()> {
+    let Some(loc) = loc else {
+        report.skipped_positions += 1;
+        return Ok(());
+    };
+    if database::paragraph_len(new, book_id, &loc)?.is_none_or(|len| loc.off > len) {
+        report.skipped_positions += 1;
+        return Ok(());
+    }
+    report.bookmarks += new.execute(
+        "INSERT INTO bookmark(book_id, chapter, para, off, label, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(book_id, chapter, para) DO NOTHING",
+        params![book_id, loc.chapter, loc.para, loc.off, label, created_at],
+    )? as u32;
     Ok(())
 }
 

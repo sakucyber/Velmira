@@ -801,8 +801,10 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "fiat-crypto",
+ "rand_core 0.6.4",
  "rustc_version",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -1575,6 +1577,24 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "html5ever"
@@ -2907,6 +2927,9 @@ name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+dependencies = [
+ "getrandom 0.2.17",
+]
 
 [[package]]
 name = "rand_core"
@@ -3520,6 +3543,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "spake2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5482afe85a0b6ce956c945401598dbc527593c77ba51d0a87a586938b1b893a"
+dependencies = [
+ "curve25519-dalek",
+ "hkdf",
+ "rand_core 0.6.4",
+ "sha2",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4065,6 +4100,8 @@ dependencies = [
  "directories",
  "eframe",
  "rfd",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "vm-ai",
@@ -4072,9 +4109,11 @@ dependencies = [
  "vm-format",
  "vm-media",
  "vm-store",
+ "vm-sync",
  "vm-text",
  "vm-update",
  "windows-sys 0.59.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -4133,6 +4172,7 @@ dependencies = [
  "blake3",
  "crossbeam-channel",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -4149,10 +4189,15 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "curve25519-dalek",
+ "getrandom 0.3.4",
  "serde",
  "snow",
+ "spake2",
+ "subtle",
  "thiserror 2.0.21",
  "vm-core",
+ "zeroize",
 ]
 
 [[package]]
@@ -4174,6 +4219,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

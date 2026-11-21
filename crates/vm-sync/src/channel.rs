@@ -3,6 +3,7 @@ use std::io::{self, Read, Write};
 use snow::{Builder, HandshakeState, Keypair, TransportState};
 use thiserror::Error;
 
+use crate::noise;
 use crate::{read_frame, write_frame, DeviceId, Frame, ProtocolError};
 
 const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
@@ -37,7 +38,7 @@ pub enum Role {
 /// Generate a key pair for a device. The caller must persist its private key
 /// securely and exchange its public key through an authenticated pairing flow.
 pub fn generate_keypair() -> Result<Keypair, ChannelError> {
-    Ok(Builder::new(PARAMS.parse()?).generate_keypair()?)
+    Ok(noise::builder(PARAMS)?.generate_keypair()?)
 }
 
 /// A mutually authenticated, ordered Noise stream. Drop the session after
@@ -61,27 +62,8 @@ impl<T: Read + Write> Channel<T> {
         private_key: &[u8; 32],
         peer_key: &[u8; 32],
     ) -> Result<Self, ChannelError> {
-        let builder = Builder::new(PARAMS.parse()?)
-            .prologue(PROLOGUE)?
-            .local_private_key(private_key)?;
-        let handshake = match role {
-            Role::Initiator => {
-                let mut state = builder.build_initiator()?;
-                send_handshake(&mut stream, &mut state)?;
-                receive_handshake(&mut stream, &mut state)?;
-                check_key(&state, peer_key)?;
-                send_handshake(&mut stream, &mut state)?;
-                state
-            }
-            Role::Responder => {
-                let mut state = builder.build_responder()?;
-                receive_handshake(&mut stream, &mut state)?;
-                send_handshake(&mut stream, &mut state)?;
-                receive_handshake(&mut stream, &mut state)?;
-                check_key(&state, peer_key)?;
-                state
-            }
-        };
+        let builder = noise::builder(PARAMS)?.prologue(PROLOGUE)?;
+        let handshake = handshake(&mut stream, role, builder, private_key, Some(peer_key))?;
         Ok(Self {
             stream,
             state: handshake.into_transport_mode()?,
@@ -150,6 +132,39 @@ impl<T: Write> Write for Channel<T> {
     fn flush(&mut self) -> io::Result<()> {
         self.stream.flush()
     }
+}
+
+pub(crate) fn handshake(
+    stream: &mut (impl Read + Write),
+    role: Role,
+    builder: Builder<'_>,
+    private_key: &[u8; 32],
+    expected_key: Option<&[u8; 32]>,
+) -> Result<HandshakeState, ChannelError> {
+    let builder = builder.local_private_key(private_key)?;
+    let state = match role {
+        Role::Initiator => {
+            let mut state = builder.build_initiator()?;
+            send_handshake(stream, &mut state)?;
+            receive_handshake(stream, &mut state)?;
+            if let Some(expected_key) = expected_key {
+                check_key(&state, expected_key)?;
+            }
+            send_handshake(stream, &mut state)?;
+            state
+        }
+        Role::Responder => {
+            let mut state = builder.build_responder()?;
+            receive_handshake(stream, &mut state)?;
+            send_handshake(stream, &mut state)?;
+            receive_handshake(stream, &mut state)?;
+            if let Some(expected_key) = expected_key {
+                check_key(&state, expected_key)?;
+            }
+            state
+        }
+    };
+    Ok(state)
 }
 
 fn send_handshake(writer: &mut impl Write, state: &mut HandshakeState) -> Result<(), ChannelError> {

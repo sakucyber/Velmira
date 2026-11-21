@@ -2,6 +2,8 @@
 //! frontier. Apply operations received from an authenticated and trusted session.
 
 mod channel;
+mod noise;
+mod pairing;
 mod protocol;
 mod replica;
 mod session;
@@ -13,6 +15,7 @@ use thiserror::Error;
 use vm_core::{BookId, Loc};
 
 pub use channel::{generate_keypair, Channel, ChannelError, Role};
+pub use pairing::{pair, PairedPeer, PairingCode, PairingError};
 pub use protocol::{
     next_batch, read_frame, write_frame, Frame, ProtocolError, MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };

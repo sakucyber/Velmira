@@ -10,6 +10,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod download;
 mod target;
 pub use target::{Arch, PackageFormat, Platform, Target};
 
@@ -37,6 +38,12 @@ pub enum Error {
     InvalidChecksum,
     #[error("download does not match its SHA-256 checksum")]
     ChecksumMismatch,
+    #[error("asset URL does not refer to this repository's release")]
+    InvalidAssetUrl,
+    #[error("release asset size is outside the allowed range")]
+    InvalidAssetSize,
+    #[error("download contains {actual} bytes; expected {expected}")]
+    SizeMismatch { expected: u64, actual: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +71,7 @@ pub struct Release {
     pub url: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Asset {
     pub name: String,
     pub url: String,
@@ -307,11 +314,20 @@ fn checksum_from_notes(notes: &str, name: &str) -> Option<String> {
 
 /// Verify a file against a 64-character, hexadecimal SHA-256 checksum.
 pub fn verify_file(path: &Path, sha256: &str) -> Result<(), Error> {
+    validate_sha256(sha256)?;
+    let mut digest = Sha256::new();
+    io::copy(&mut File::open(path)?, &mut digest)?;
+    check_digest(digest, sha256)
+}
+
+fn validate_sha256(sha256: &str) -> Result<(), Error> {
     if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(Error::InvalidChecksum);
     }
-    let mut digest = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut digest)?;
+    Ok(())
+}
+
+fn check_digest(digest: Sha256, sha256: &str) -> Result<(), Error> {
     if !format!("{:x}", digest.finalize()).eq_ignore_ascii_case(sha256) {
         return Err(Error::ChecksumMismatch);
     }

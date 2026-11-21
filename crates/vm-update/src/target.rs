@@ -74,7 +74,7 @@ impl Target {
         use PackageFormat::*;
         match self.platform {
             Platform::Windows => &[Zip, Msi],
-            Platform::Linux => &[AppImage, TarGz],
+            Platform::Linux => &[AppImage, TarGz, Deb, ArchLinux, Rpm],
             Platform::MacOs => &[Dmg, Zip],
             Platform::Android => &[Apk],
         }

@@ -64,7 +64,52 @@ jobs:
           cargo +stable build --release --locked -p velmira-native --target ${{ matrix.target }}
           target/${{ matrix.target }}/release/velmira-native --help
       - name: Assemble portable archive
+        if: matrix.package != 'linux-amd64' && matrix.package != 'linux-386'
         run: python scripts/package-native.py --target ${{ matrix.target }}
+      - name: Assemble Debian, Arch and portable archives
+        if: matrix.package == 'linux-amd64' || matrix.package == 'linux-386'
+        run: |
+          sudo apt-get install -y zstd desktop-file-utils
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" python scripts/package-native.py --target ${{ matrix.target }} --linux-distributions
+          deb="$(find "$PWD/dist" -maxdepth 1 -name '*.deb')"
+          arch="$(find "$PWD/dist" -maxdepth 1 -name '*.pkg.tar.zst')"
+          case '${{ matrix.target }}' in
+            x86_64-*) deb_arch=amd64; arch_arch=x86_64 ;;
+            i686-*) deb_arch=i386; arch_arch=i686 ;;
+            *) exit 1 ;;
+          esac
+          test "$(dpkg-deb --field "$deb" Architecture)" = "$deb_arch"
+          dpkg-deb --extract "$deb" "$RUNNER_TEMP/deb-package"
+          desktop-file-validate "$RUNNER_TEMP/deb-package/usr/share/applications/velmira-native.desktop"
+          tar --zstd -xOf "$arch" .PKGINFO | grep -Fx "arch = $arch_arch"
+          tar --zstd -xf "$arch" -C "$RUNNER_TEMP" .MTREE
+          gzip -t "$RUNNER_TEMP/.MTREE"
+          (cd dist && sha256sum --check -- *.sha256)
+      - name: Install and smoke-test the Debian package
+        if: matrix.package == 'linux-amd64' || matrix.package == 'linux-386'
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --mount "type=bind,source=$PWD/dist,target=/packages,readonly" \
+            debian:bookworm-slim sh -euxc '
+              if [ "$1" = linux-386 ]; then dpkg --add-architecture i386; fi
+              apt-get -o Acquire::Retries=3 update
+              apt-get install -y --no-install-recommends /packages/*.deb
+              /usr/bin/velmira-native --help
+              apt-get purge -y velmira-native
+              test ! -e /usr/bin/velmira-native
+            ' smoke '${{ matrix.package }}'
+      - name: Install and smoke-test the Arch x86_64 package
+        if: matrix.package == 'linux-amd64'
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --mount "type=bind,source=$PWD/dist,target=/packages,readonly" \
+            archlinux:latest sh -euxc '
+              pacman -Syu --noconfirm archlinux-keyring
+              pacman -U --noconfirm /packages/*.pkg.tar.zst
+              /usr/bin/velmira-native --help
+              pacman -R --noconfirm velmira-native
+              test ! -e /usr/bin/velmira-native
+            '
       - uses: actions/upload-artifact@v5
         with:
           name: native-${{ matrix.package }}

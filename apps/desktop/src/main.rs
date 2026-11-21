@@ -4,6 +4,7 @@ mod comic;
 mod covers;
 mod generate;
 mod illustrations;
+mod pairing_cli;
 mod reader;
 mod theme;
 mod updates;
@@ -26,6 +27,7 @@ struct Options {
     import: Option<PathBuf>,
     legacy: Option<PathBuf>,
     bench: Option<PathBuf>,
+    pairing: Option<pairing_cli::Command>,
 }
 
 fn path_value(value: Option<OsString>, flag: &str) -> Result<PathBuf, String> {
@@ -40,6 +42,7 @@ fn options() -> Result<Option<Options>, String> {
     let mut import = None;
     let mut legacy = None;
     let mut bench = None;
+    let mut pairing = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -47,14 +50,46 @@ fn options() -> Result<Option<Options>, String> {
             Some("--import") => import = Some(path_value(args.next(), "--import")?),
             Some("--migrate-legacy") => legacy = Some(path_value(args.next(), "--migrate-legacy")?),
             Some("--bench-startup") => bench = Some(path_value(args.next(), "--bench-startup")?),
+            Some(
+                flag
+                @ ("--pair-listen" | "--pair-connect" | "--paired-devices" | "--unpair-device"),
+            ) => {
+                if pairing.is_some() {
+                    return Err("Choose one pairing command.".into());
+                }
+                pairing = Some(match flag {
+                    "--pair-listen" => {
+                        pairing_cli::Command::Listen(socket_address(args.next(), flag)?)
+                    }
+                    "--pair-connect" => {
+                        pairing_cli::Command::Connect(socket_address(args.next(), flag)?)
+                    }
+                    "--paired-devices" => pairing_cli::Command::List,
+                    _ => pairing_cli::Command::Revoke(
+                        args.next()
+                            .and_then(|value| value.into_string().ok())
+                            .filter(|value| !value.is_empty())
+                            .ok_or("--unpair-device needs a device ID.")?,
+                    ),
+                });
+            }
             Some("--help" | "-h") => {
+                pairing_cli::attach_console();
                 println!("velmira-native [--data-dir PATH] [--import BOOK] [--migrate-legacy OLD_DATA_DIR] [--bench-startup LOG.jsonl]");
+                println!("velmira-native [--data-dir PATH] [--pair-listen IP:PORT | --pair-connect IP:PORT | --paired-devices | --unpair-device ID]");
                 return Ok(None);
             }
             _ => return Err(format!("Unknown option: {}", arg.to_string_lossy())),
         }
     }
+    if pairing.is_some() && (import.is_some() || legacy.is_some() || bench.is_some()) {
+        return Err("Pairing cannot run together with import, migration, or benchmarking.".into());
+    }
     let data_dir = data_dir
+        .or_else(|| {
+            let executable = std::env::current_exe().ok()?;
+            portable_data_dir(&executable)
+        })
         .or_else(|| {
             directories::ProjectDirs::from("dev", "Velmira", "Velmira Native")
                 .map(|dirs| dirs.data_local_dir().to_path_buf())
@@ -65,14 +100,37 @@ fn options() -> Result<Option<Options>, String> {
         import,
         legacy,
         bench,
+        pairing,
     }))
+}
+
+fn portable_data_dir(executable: &std::path::Path) -> Option<PathBuf> {
+    let dir = executable.parent()?;
+    let data = dir.join("data");
+    (dir.join("portable.txt").is_file() || data.is_dir()).then_some(data)
+}
+
+fn socket_address(value: Option<OsString>, flag: &str) -> Result<std::net::SocketAddr, String> {
+    value
+        .and_then(|value| value.into_string().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| format!("{flag} needs a numeric IP:PORT. Use [IP]:PORT for IPv6."))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
-    let Some(options) = options()? else {
-        return Ok(());
+    let options = match options() {
+        Ok(Some(options)) => options,
+        Ok(None) => return Ok(()),
+        Err(error) => {
+            pairing_cli::attach_console();
+            return Err(error.into());
+        }
     };
+    if let Some(command) = options.pairing {
+        pairing_cli::attach_console();
+        return pairing_cli::run(command, &options.data_dir);
+    }
     let window = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         multisampling: 0,
@@ -331,7 +389,7 @@ impl App {
             reader: Reader::new(layout),
             storage_ready: false,
             comic,
-            generator: Default::default(),
+            generator: generate::Generator::new(&options.data_dir),
             updates,
             illustrations: Default::default(),
             covers,
