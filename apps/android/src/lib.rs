@@ -8,6 +8,8 @@ mod covers;
 mod model_settings;
 #[path = "../../desktop/src/opening.rs"]
 mod opening;
+#[path = "../../desktop/src/pairing_cli.rs"]
+mod pairing_cli;
 #[path = "../../desktop/src/preferences.rs"]
 mod preferences;
 #[path = "../../desktop/src/reader.rs"]
@@ -20,6 +22,7 @@ mod workers;
 mod mobile;
 mod mobile_ui;
 mod models;
+mod peer_sync;
 mod saf;
 
 #[no_mangle]

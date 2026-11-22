@@ -7,8 +7,11 @@ use std::{
 use android_activity::AndroidApp;
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily, RichText};
-use vm_core::{BookSummary, Loc};
-use vm_store::{AnnotationColor, Bookmark, Command, CoverSize, Event, SearchHit, Store};
+use vm_core::{BookFormat, BookSummary, Loc};
+use vm_store::{
+    Annotation, AnnotationColor, Bookmark, Command, CoverSize, Event, ReadingStatus, SearchHit,
+    ShelfFilter, ShelfSort, ShelfStatus, Store,
+};
 
 use crate::{
     comic::Comic,
@@ -16,6 +19,7 @@ use crate::{
     mobile_ui::{self, BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT},
     models::Models,
     opening::{self, Opening},
+    peer_sync::PeerSync,
     preferences::{Preferences, SavedPreferences},
     reader::Reader,
     saf::{self, ImportOutcome},
@@ -32,6 +36,16 @@ enum Drawer {
     Models,
     Assistant,
     Annotation,
+    Marks,
+    ShelfFilters,
+    ManageBook,
+    ModelLibrary,
+    Prompt,
+    Memory,
+    Translation,
+    WebSearch,
+    Network,
+    Manga,
 }
 
 #[derive(Clone, Copy)]
@@ -39,6 +53,15 @@ enum Field {
     Contents,
     Search,
     Note,
+    ShelfSearch,
+    Rename,
+}
+
+struct MarkEditor {
+    original: Option<Annotation>,
+    ranges: Vec<(Loc, u32)>,
+    note: String,
+    color: AnnotationColor,
 }
 
 type ParsedBook = (PathBuf, Result<ImportBook, String>);
@@ -54,10 +77,14 @@ pub(crate) struct Library {
     ready: bool,
     books: Vec<BookSummary>,
     more: bool,
+    listing: bool,
+    shelf_filter: ShelfFilter,
+    managed_book: Option<BookSummary>,
     opening: Option<Opening>,
     picking: bool,
     parsing: Option<Receiver<ParsedBook>>,
     importing: Option<PathBuf>,
+    generated_comic: Option<tempfile::TempPath>,
     notice: Option<String>,
     drawer: Option<Drawer>,
     drawn_drawer: Option<Drawer>,
@@ -68,13 +95,14 @@ pub(crate) struct Library {
     insets: Option<[u16; 4]>,
     text_field: Option<Field>,
     models: Models,
+    peers: PeerSync,
     bookmarks: Vec<Bookmark>,
     more_bookmarks: bool,
     filter: String,
     focus_chapter: bool,
     search: String,
     hits: Vec<SearchHit>,
-    mark: Option<(Loc, u32, String, AnnotationColor)>,
+    mark: Option<MarkEditor>,
     comic_progress: Option<(String, Loc)>,
 }
 
@@ -113,10 +141,14 @@ impl Library {
             ready: false,
             books: Vec::new(),
             more: false,
+            listing: false,
+            shelf_filter: ShelfFilter::default(),
+            managed_book: None,
             opening: None,
             picking: false,
             parsing: None,
             importing: None,
+            generated_comic: None,
             notice: None,
             drawer: None,
             drawn_drawer: None,
@@ -127,6 +159,7 @@ impl Library {
             insets: None,
             text_field: None,
             models: Models::new(data_dir),
+            peers: PeerSync::new(data_dir),
             bookmarks: Vec::new(),
             more_bookmarks: false,
             filter: String::new(),
@@ -145,6 +178,15 @@ impl Library {
                 self.notice = Some(error.to_string());
                 false
             }
+        }
+    }
+
+    fn list_shelf(&mut self, offset: u32) {
+        if offset == 0 || !self.listing {
+            self.listing = self.send(Command::ListShelf {
+                offset,
+                filter: self.shelf_filter.clone(),
+            });
         }
     }
 
@@ -263,13 +305,15 @@ impl Library {
         match event {
             Event::Ready => {
                 self.ready = true;
-                self.send(Command::ListBooks { offset: 0 });
+                self.list_shelf(0);
             }
-            Event::Books {
+            Event::Shelf {
                 offset,
+                filter,
                 books,
                 has_more,
-            } => {
+            } if filter == self.shelf_filter => {
+                self.listing = false;
                 if offset == 0 {
                     self.books = books;
                 } else if offset as usize == self.books.len() {
@@ -277,6 +321,7 @@ impl Library {
                 }
                 self.more = has_more;
             }
+            Event::BookUpdated { .. } => self.list_shelf(0),
             Event::CoverRead {
                 book_id,
                 size: CoverSize::Shelf,
@@ -284,9 +329,12 @@ impl Library {
             } => self.covers.loaded(book_id, bytes),
             Event::BookInserted { book, .. } => {
                 if let Some(path) = self.importing.take() {
-                    saf::remove_import(&path);
+                    if self.generated_comic.is_none() {
+                        saf::remove_import(&path);
+                    }
                 }
-                self.send(Command::ListBooks { offset: 0 });
+                self.generated_comic = None;
+                self.list_shelf(0);
                 self.open(book.id, None);
             }
             Event::BookOpened {
@@ -369,6 +417,12 @@ impl Library {
                     chapter: annotation.loc.chapter,
                 });
             }
+            Event::AnnotationsAdded { book_id, chapter }
+            | Event::AnnotationDeleted {
+                book_id, chapter, ..
+            } => {
+                self.send(Command::ListAnnotations { book_id, chapter });
+            }
             Event::Bookmarks {
                 book_id,
                 offset,
@@ -402,12 +456,16 @@ impl Library {
                     "open_book" => self.close_reader(),
                     "insert_book" => {
                         if let Some(path) = self.importing.take() {
-                            saf::remove_import(&path);
+                            if self.generated_comic.is_none() {
+                                saf::remove_import(&path);
+                            }
                         }
+                        self.generated_comic = None;
                     }
                     "read_chapter" => self.reader.reset_load(),
                     "read_comic_page" => self.comic.reset_load(),
                     "read_cover" => self.covers.read_failed(),
+                    "list_books" => self.listing = false,
                     "list_illustrations" => self.reader.inline_illustrations_failed(),
                     "read_illustration" => self.reader.inline_image_failed(),
                     _ => {}
@@ -421,6 +479,7 @@ impl Library {
     fn close_reader(&mut self) {
         self.opening = None;
         self.reader.close();
+        self.models.book_context(None);
         self.comic.close();
         self.drawer = None;
         self.drawer_parent = None;
@@ -463,12 +522,39 @@ impl Library {
             ui.spinner();
             ui.label(RichText::new("正在导入书籍…").color(p.success));
         }
+        ui.horizontal_wrapped(|ui| {
+            let search = if self.shelf_filter.query.is_empty() {
+                "搜索书名"
+            } else {
+                self.shelf_filter.query.as_str()
+            };
+            if ui
+                .add_sized([130.0, 44.0], egui::Button::new(search).truncate())
+                .clicked()
+            {
+                self.edit_field(Field::ShelfSearch);
+            }
+            if ui
+                .add_sized([100.0, 44.0], egui::Button::new("筛选与排序").frame(false))
+                .clicked()
+            {
+                self.set_drawer(Drawer::ShelfFilters);
+            }
+            if !self.shelf_filter.query.is_empty() && ui.button("清空搜索").clicked() {
+                self.shelf_filter.query.clear();
+                self.list_shelf(0);
+            }
+        });
         if self.books.is_empty() {
             ui.label(
-                RichText::new(if self.ready {
-                    "导入 TXT、EPUB 或 CBZ，在本机离线阅读。"
+                RichText::new(if self.listing || !self.ready {
+                    "正在打开书库…"
+                } else if self.shelf_filter.status == ShelfStatus::Removed {
+                    "没有移出的书籍"
+                } else if self.shelf_filter != ShelfFilter::default() {
+                    "没有匹配的书籍"
                 } else {
-                    "正在打开本机书库…"
+                    "导入 TXT、EPUB 或 CBZ，在本机离线阅读。"
                 })
                 .color(p.muted),
             );
@@ -480,16 +566,17 @@ impl Library {
             .clamp(88.0, 160.0);
         let cover = egui::vec2(card, card * 1.37);
         let mut open = None;
+        let mut manage = None;
         egui::ScrollArea::vertical().show_rows(
             ui,
-            cover.y + 66.0,
+            cover.y + 73.0,
             self.books.len().div_ceil(columns),
             |ui, rows| {
                 for row in rows {
                     ui.horizontal_top(|ui| {
                         for book in self.books.iter().skip(row * columns).take(columns) {
                             ui.allocate_ui_with_layout(
-                                egui::vec2(card, cover.y + 62.0),
+                                egui::vec2(card, cover.y + 73.0),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     let cover = self.covers.show_at(ui, &self.store, book, cover);
@@ -499,17 +586,35 @@ impl Library {
                                             egui::Button::new(&book.title).truncate().frame(false),
                                         )
                                         .clicked();
-                                    if cover.clicked() || title_clicked {
+                                    if cover.secondary_clicked()
+                                        || (self.shelf_filter.status == ShelfStatus::Removed
+                                            && (cover.clicked() || title_clicked))
+                                    {
+                                        manage = Some(book.clone());
+                                    } else if cover.clicked() || title_clicked {
                                         open = Some((
                                             book.id.clone(),
                                             cover.rect.intersect(ui.clip_rect()),
                                         ));
                                     }
-                                    ui.label(
-                                        RichText::new(book.format.as_str().to_ascii_uppercase())
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(
+                                                book.format.as_str().to_ascii_uppercase(),
+                                            )
                                             .size(11.0)
                                             .color(p.muted),
-                                    );
+                                        );
+                                        if ui
+                                            .add_sized(
+                                                [43.0, 38.0],
+                                                egui::Button::new("管理").frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            manage = Some(book.clone());
+                                        }
+                                    });
                                 },
                             );
                         }
@@ -517,12 +622,98 @@ impl Library {
                 }
             },
         );
-        if let Some((id, rect)) = open {
+        if let Some(book) = manage {
+            self.managed_book = Some(book);
+            self.set_drawer(Drawer::ManageBook);
+        } else if let Some((id, rect)) = open {
             self.open(id, Some(rect));
         }
     }
 
+    fn shelf_filters(&mut self, ui: &mut egui::Ui) {
+        let old = self.shelf_filter.clone();
+        ui.label(RichText::new("书架").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.shelf_filter.status, ShelfStatus::Active, "在架");
+            ui.selectable_value(
+                &mut self.shelf_filter.status,
+                ShelfStatus::Removed,
+                "已移出",
+            );
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("格式").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                (None, "全部"),
+                (Some(BookFormat::Txt), "TXT"),
+                (Some(BookFormat::Epub), "EPUB"),
+                (Some(BookFormat::Cbz), "CBZ"),
+            ] {
+                ui.selectable_value(&mut self.shelf_filter.format, value, label);
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("阅读进度").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                (ReadingStatus::All, "全部"),
+                (ReadingStatus::Unread, "未读"),
+                (ReadingStatus::Reading, "在读"),
+                (ReadingStatus::LastChapter, "已到末章"),
+            ] {
+                ui.selectable_value(&mut self.shelf_filter.reading, value, label);
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("排序").strong());
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                (ShelfSort::Newest, "最近导入"),
+                (ShelfSort::LastRead, "最近阅读"),
+                (ShelfSort::Title, "书名"),
+            ] {
+                ui.selectable_value(&mut self.shelf_filter.sort, value, label);
+            }
+        });
+        if old != self.shelf_filter {
+            self.books.clear();
+            self.more = false;
+            self.list_shelf(0);
+        }
+    }
+
+    fn manage_book(&mut self, ui: &mut egui::Ui) {
+        let Some(book) = self.managed_book.as_ref() else {
+            return;
+        };
+        let p = theme::palette(self.night);
+        ui.label(RichText::new(&book.title).strong().size(17.0));
+        let rename = mobile_ui::list_row(ui, "rename", "修改书名", p.ink, p.surface2).clicked();
+        let removed = self.shelf_filter.status == ShelfStatus::Removed;
+        let action = if removed {
+            "恢复到书架"
+        } else {
+            "移出书架"
+        };
+        if mobile_ui::list_row(ui, "move", action, p.accent, p.accent_weak).clicked()
+            && self.send(Command::SetBookStatus {
+                book_id: book.id.clone(),
+                status: if removed {
+                    ShelfStatus::Active
+                } else {
+                    ShelfStatus::Removed
+                },
+            })
+        {
+            self.dismiss_drawer();
+        } else if rename {
+            self.edit_field(Field::Rename);
+        }
+    }
+
     fn set_drawer(&mut self, tab: Drawer) {
+        self.models.book_context(self.reader.book_id());
         if tab == Drawer::Contents && self.drawer != Some(tab) {
             self.focus_chapter = true;
         }
@@ -553,9 +744,18 @@ impl Library {
         let (title, value, mode, limit) = match field {
             Field::Contents => ("筛选目录", self.filter.as_str(), 0, 100),
             Field::Search => ("搜索正文", self.search.as_str(), 0, 120),
+            Field::ShelfSearch => ("搜索书名", self.shelf_filter.query.as_str(), 0, 120),
+            Field::Rename => (
+                "修改书名",
+                self.managed_book
+                    .as_ref()
+                    .map_or("", |book| book.title.as_str()),
+                0,
+                240,
+            ),
             Field::Note => (
                 "添加笔记",
-                self.mark.as_ref().map_or("", |mark| mark.2.as_str()),
+                self.mark.as_ref().map_or("", |mark| mark.note.as_str()),
                 3,
                 3000,
             ),
@@ -584,9 +784,26 @@ impl Library {
                             self.search = value;
                             self.search_book();
                         }
+                        Field::ShelfSearch => {
+                            self.shelf_filter.query = value.trim().to_owned();
+                            self.list_shelf(0);
+                        }
+                        Field::Rename => {
+                            let title = value.trim();
+                            if let Some(book) =
+                                self.managed_book.as_ref().filter(|_| !title.is_empty())
+                            {
+                                if self.send(Command::RenameBook {
+                                    book_id: book.id.clone(),
+                                    title: title.to_owned(),
+                                }) {
+                                    self.dismiss_drawer();
+                                }
+                            }
+                        }
                         Field::Note => {
                             if let Some(mark) = &mut self.mark {
-                                mark.2 = value;
+                                mark.note = value;
                             }
                         }
                     }
@@ -684,6 +901,16 @@ impl Library {
                         Drawer::Models => "模型池",
                         Drawer::Assistant => "阅读 AI",
                         Drawer::Annotation => "批注",
+                        Drawer::Marks => "本章批注与高亮",
+                        Drawer::ShelfFilters => "筛选与排序",
+                        Drawer::ManageBook => "书籍管理",
+                        Drawer::ModelLibrary => "模型库",
+                        Drawer::Prompt => "提示词",
+                        Drawer::Memory => "长期记忆",
+                        Drawer::Translation => "翻译服务",
+                        Drawer::WebSearch => "联网搜索",
+                        Drawer::Network => "局域网同步",
+                        Drawer::Manga => "漫画与画风",
                         _ => "设置",
                     };
                     ui.label(RichText::new(title).size(21.0).strong().color(p.ink));
@@ -706,6 +933,8 @@ impl Library {
             ui.separator();
             if tab == Drawer::Contents {
                 self.contents(ui);
+            } else if tab == Drawer::Marks {
+                self.marks(ui);
             } else {
                 egui::ScrollArea::vertical()
                     .id_salt(("drawer-body", tab))
@@ -794,6 +1023,12 @@ impl Library {
         match tab {
             Drawer::Contents => self.contents(ui),
             Drawer::Bookmarks => {
+                if mobile_ui::list_row(ui, "marks", "本章批注与高亮   ›", p.ink, p.surface2)
+                    .clicked()
+                {
+                    self.drawer_parent = self.drawer;
+                    self.drawer = Some(Drawer::Marks);
+                }
                 if mobile_ui::list_row(
                     ui,
                     "new-bookmark",
@@ -892,7 +1127,14 @@ impl Library {
                 }
             }
             Drawer::Settings => self.reader_settings(ui),
-            Drawer::Models => self.models.configure(ui, &self.android),
+            Drawer::Models => self.models.configure(ui, &self.android, false),
+            Drawer::ModelLibrary => self.models.configure(ui, &self.android, true),
+            Drawer::Translation => self.models.translation_settings(ui),
+            Drawer::Prompt => self.models.prompt_settings(ui, &self.android, false),
+            Drawer::Memory => self.models.prompt_settings(ui, &self.android, true),
+            Drawer::WebSearch => self.models.web_search(ui, &self.android),
+            Drawer::Manga => self.models.manga(ui, &self.android),
+            Drawer::Network => self.peers.show(ui, &self.android),
             Drawer::Assistant => {
                 if self.models.assistant(ui) {
                     self.drawer_parent = self.drawer;
@@ -900,6 +1142,9 @@ impl Library {
                 }
             }
             Drawer::Annotation => self.annotation(ui),
+            Drawer::Marks => self.marks(ui),
+            Drawer::ShelfFilters => self.shelf_filters(ui),
+            Drawer::ManageBook => self.manage_book(ui),
         }
     }
 
@@ -981,54 +1226,267 @@ impl Library {
         }
         ui.add_space(12.0);
         ui.separator();
-        if mobile_ui::list_row(ui, "model-pool", "模型池   ›", p.ink, p.surface2).clicked() {
-            self.drawer_parent = self.drawer;
-            self.drawer = Some(Drawer::Models);
+        for (label, entries) in [
+            (
+                "AI 引擎",
+                &[
+                    ("模型库", Drawer::ModelLibrary),
+                    ("模型池", Drawer::Models),
+                    ("提示词", Drawer::Prompt),
+                    ("长期记忆", Drawer::Memory),
+                ][..],
+            ),
+            (
+                "扩展功能",
+                &[
+                    ("漫画与画风", Drawer::Manga),
+                    ("翻译服务", Drawer::Translation),
+                    ("联网搜索", Drawer::WebSearch),
+                ][..],
+            ),
+            ("系统与网络", &[("局域网同步", Drawer::Network)][..]),
+        ] {
+            ui.label(RichText::new(label).strong().color(p.ink));
+            for &(name, tab) in entries {
+                if mobile_ui::list_row(ui, name, name, p.ink, p.surface2).clicked() {
+                    if tab == Drawer::Network {
+                        self.peers.refresh(ui.ctx());
+                    }
+                    if tab == Drawer::Manga {
+                        self.models.prepare_manga(
+                            self.reader
+                                .selected_text()
+                                .or_else(|| self.reader.current_paragraph()),
+                        );
+                    }
+                    self.drawer_parent = self.drawer;
+                    self.drawer = Some(tab);
+                }
+            }
+            ui.add_space(8.0);
+        }
+    }
+
+    fn selection_toolbar(&mut self, root: &mut egui::Ui, bounds: egui::Rect) {
+        let Some(anchor) = self.reader.selection_anchor() else {
+            return;
+        };
+        let p = theme::palette(self.night);
+        let Some(rect) = mobile_ui::selection_menu_rect(bounds, anchor) else {
+            return;
+        };
+        let width = rect.width();
+        let area = egui::Area::new(egui::Id::new("android-selection-menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .default_size(rect.size())
+            .constrain_to(bounds)
+            .fade_in(false);
+        let result = area
+            .show(root.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .stroke(egui::Stroke::new(1.0_f32, p.line))
+                    .corner_radius(12)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 4],
+                        blur: 12,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(36),
+                    })
+                    .inner_margin(3)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.horizontal(|ui| {
+                            let mut chosen = None;
+                            for (index, label) in
+                                ["高亮", "批注", "翻译", "复制"].into_iter().enumerate()
+                            {
+                                if ui
+                                    .add_sized(
+                                        [(width - 8.0) / 4.0, 42.0],
+                                        egui::Button::new(
+                                            RichText::new(label).size(14.0).color(p.ink),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    chosen = Some(index);
+                                }
+                            }
+                            chosen
+                        })
+                        .inner
+                    })
+                    .inner
+            })
+            .inner;
+        match result {
+            Some(0) => {
+                let ranges = self.reader.selection_ranges();
+                if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                    if !ranges.is_empty()
+                        && self.send(Command::AddAnnotations {
+                            book_id,
+                            ranges,
+                            note: None,
+                            color: AnnotationColor::Yellow,
+                        })
+                    {
+                        self.reader.clear_selection();
+                    }
+                }
+            }
+            Some(1) => {
+                let ranges = self.reader.selection_ranges();
+                if !ranges.is_empty() {
+                    self.mark = Some(MarkEditor {
+                        original: None,
+                        ranges,
+                        note: String::new(),
+                        color: AnnotationColor::Yellow,
+                    });
+                    self.set_drawer(Drawer::Annotation);
+                }
+            }
+            Some(2) => {
+                if let Some(text) = self.reader.selected_text() {
+                    self.set_drawer(Drawer::Assistant);
+                    self.models.prepare_translation(text);
+                }
+            }
+            Some(3) => {
+                if let Some(text) = self.reader.selected_text() {
+                    match saf::copy_text(&self.android, &text) {
+                        Ok(()) => {
+                            self.reader.clear_selection();
+                        }
+                        Err(error) => self.notice = Some(error),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn edit_annotation(&mut self, mark: Annotation, parent: Option<Drawer>) {
+        self.mark = Some(MarkEditor {
+            ranges: Vec::new(),
+            note: mark.note.clone().unwrap_or_default(),
+            color: mark.color,
+            original: Some(mark),
+        });
+        self.set_drawer(Drawer::Annotation);
+        self.drawer_parent = parent;
+    }
+
+    fn marks(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(self.night);
+        if self.reader.annotations.is_empty() {
+            ui.label(RichText::new("这一章还没有批注或高亮").color(p.muted));
+        }
+        let mut edit = None;
+        egui::ScrollArea::vertical()
+            .id_salt("chapter-marks")
+            .max_height(ui.available_height().max(0.0))
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false])
+            .show_rows(ui, 48.0, self.reader.annotations.len(), |ui, rows| {
+                for index in rows {
+                    let mark = &self.reader.annotations[index];
+                    let caption = mark
+                        .note
+                        .as_deref()
+                        .filter(|note| !note.is_empty())
+                        .unwrap_or(&mark.text);
+                    if mobile_ui::list_row(ui, &mark.id, caption, p.ink, p.surface2).clicked() {
+                        edit = Some(mark.clone());
+                    }
+                }
+            });
+        if let Some(mark) = edit {
+            self.edit_annotation(mark, Some(Drawer::Marks));
         }
     }
 
     fn annotation(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(self.night);
-        let Some((loc, end_off, note, color)) = &mut self.mark else {
+        let Some(mark) = &mut self.mark else {
             return;
         };
+        if let Some(original) = &mark.original {
+            ui.label(RichText::new(&original.text).color(p.muted));
+        }
         ui.horizontal_wrapped(|ui| {
             for (value, label) in [
-                (AnnotationColor::Yellow, "黄"),
-                (AnnotationColor::Green, "绿"),
-                (AnnotationColor::Blue, "蓝"),
-                (AnnotationColor::Pink, "粉"),
+                (AnnotationColor::Yellow, "黄色"),
+                (AnnotationColor::Green, "绿色"),
+                (AnnotationColor::Blue, "蓝色"),
+                (AnnotationColor::Pink, "粉色"),
             ] {
-                ui.selectable_value(color, value, label);
+                ui.selectable_value(&mut mark.color, value, label);
             }
         });
         let edit = mobile_ui::list_row(
             ui,
             "note-text",
-            if note.is_empty() {
+            if mark.note.is_empty() {
                 "添加笔记"
             } else {
-                note
+                &mark.note
             },
             p.ink,
             p.surface2,
         )
         .clicked();
-        let save = ui
-            .add_sized([90.0, 48.0], egui::Button::new("保存"))
-            .clicked();
-        if save {
-            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
-                let command = Command::AddAnnotation {
-                    book_id,
-                    loc: *loc,
-                    end_off: *end_off,
-                    note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
-                    color: *color,
-                };
-                if self.send(command) {
-                    self.dismiss_drawer();
+        let mut save = false;
+        let mut delete = false;
+        ui.horizontal_wrapped(|ui| {
+            save = ui
+                .add_sized([90.0, 48.0], egui::Button::new("保存"))
+                .clicked();
+            if mark.original.is_some() {
+                delete = ui
+                    .add_sized(
+                        [90.0, 48.0],
+                        egui::Button::new(RichText::new("删除").color(p.danger)).frame(false),
+                    )
+                    .clicked();
+            }
+        });
+        let command = if save || delete {
+            self.reader.book_id().map(|book_id| {
+                let book_id = book_id.to_owned();
+                let note = (!mark.note.trim().is_empty()).then(|| mark.note.trim().to_owned());
+                match &mark.original {
+                    Some(annotation) if delete => Command::DeleteAnnotation {
+                        book_id,
+                        id: annotation.id.clone(),
+                        expected_revision: annotation.revision,
+                    },
+                    Some(annotation) => Command::UpdateAnnotation {
+                        book_id,
+                        id: annotation.id.clone(),
+                        expected_revision: annotation.revision,
+                        note,
+                        color: mark.color,
+                    },
+                    None => Command::AddAnnotations {
+                        book_id,
+                        ranges: mark.ranges.clone(),
+                        note,
+                        color: mark.color,
+                    },
                 }
+            })
+        } else {
+            None
+        };
+        if let Some(command) = command {
+            if self.send(command) {
+                self.reader.clear_selection();
+                self.dismiss_drawer();
             }
         } else if edit {
             self.edit_field(Field::Note);
@@ -1142,9 +1600,7 @@ impl Library {
                             )
                             .clicked()
                         {
-                            self.send(Command::ListBooks {
-                                offset: self.books.len() as u32,
-                            });
+                            self.list_shelf(self.books.len() as u32);
                         }
                     });
             }
@@ -1167,12 +1623,17 @@ impl Library {
         };
         let blocked = !root.is_enabled() || self.drawer.is_some() || self.drawn_drawer.is_some();
         let tap_bounds = mobile_ui::tap_rect(bounds, opacity > 0.0);
+        let selection_menu = self
+            .reader
+            .selection_anchor()
+            .and_then(|anchor| mobile_ui::selection_menu_rect(bounds, anchor));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(paper))
             .show_inside(root, |ui| {
                 if self.reader.is_open() {
                     if let Some((chapter, last_page)) =
-                        self.reader.show(ui, true, false, blocked, tap_bounds)
+                        self.reader
+                            .show(ui, true, false, blocked, tap_bounds, selection_menu)
                     {
                         if let Some((book_id, chapter)) =
                             self.reader.prepare_adjacent(chapter, last_page)
@@ -1185,9 +1646,8 @@ impl Library {
                     if self.reader.take_tools_request() {
                         self.controls = !self.controls;
                     }
-                    if let Some((loc, end)) = self.reader.take_mark() {
-                        self.mark = Some((loc, end, String::new(), AnnotationColor::Yellow));
-                        self.set_drawer(Drawer::Annotation);
+                    if let Some(mark) = self.reader.take_tapped_annotation() {
+                        self.edit_annotation(mark, None);
                     }
                 } else {
                     if let Some((book_id, page_index)) =
@@ -1208,6 +1668,9 @@ impl Library {
         if opacity > 0.0 {
             self.reader_controls(root, bounds, opacity);
         }
+        if !blocked {
+            self.selection_toolbar(root, bounds);
+        }
         if let Some(text) = &self.notice {
             root.painter().text(
                 bounds.center_top() + egui::vec2(0.0, 10.0),
@@ -1225,6 +1688,28 @@ impl eframe::App for Library {
         self.poll_import(ctx);
         self.poll_field(ctx);
         self.models.poll(ctx, &self.android);
+        if self.importing.is_none() {
+            if let Some(comic) = self.models.take_comic() {
+                let path = comic.to_path_buf();
+                if self.send(Command::ImportCbz { path: path.clone() }) {
+                    self.importing = Some(path);
+                    self.generated_comic = Some(comic);
+                }
+            }
+        }
+        if self.peers.poll(ctx, &self.android) {
+            self.list_shelf(0);
+            if let Some(id) = self.reader.book_id().map(str::to_owned) {
+                self.send(Command::ListBookmarks {
+                    book_id: id.clone(),
+                    offset: 0,
+                });
+                self.send(Command::ListAnnotations {
+                    book_id: id,
+                    chapter: self.reader.chapter_index(),
+                });
+            }
+        }
         while let Ok(event) = self.store.events().try_recv() {
             self.event(ctx, event);
         }
@@ -1276,10 +1761,12 @@ impl eframe::App for Library {
         if self.handles_back && saf::take_reader_back(&self.android).unwrap_or_default() {
             if self.drawer.is_some() {
                 self.dismiss_drawer();
-            } else if self.controls {
-                self.controls = false;
-            } else {
-                self.close_reader();
+            } else if !self.reader.clear_selection() {
+                if self.controls {
+                    self.controls = false;
+                } else {
+                    self.close_reader();
+                }
             }
         }
         let screen = ctx.screen_rect();

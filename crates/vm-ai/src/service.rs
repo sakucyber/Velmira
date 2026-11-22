@@ -87,14 +87,25 @@ impl ComicService {
         language: Language,
         excerpt: &str,
     ) -> Result<(String, String), RouteError<ReadingError>> {
+        self.read_excerpt_with_prompt(action, language, excerpt, "")
+    }
+
+    pub fn read_excerpt_with_prompt(
+        &self,
+        action: Action,
+        language: Language,
+        excerpt: &str,
+        prompt: &str,
+    ) -> Result<(String, String), RouteError<ReadingError>> {
         self.router.run_filtered(
             |candidate| self.connections[&candidate.connection].text_model == candidate.model,
             |candidate, remaining| {
                 self.connections[&candidate.connection]
-                    .read_excerpt(
+                    .read_excerpt_with_prompt(
                         action,
                         language,
                         excerpt,
+                        prompt,
                         remaining.min(Duration::from_secs(45)),
                     )
                     .map(|text| (candidate.model.clone(), text))
@@ -117,12 +128,21 @@ impl ComicService {
         board: &Storyboard,
         layout: crate::manga::Layout,
     ) -> Result<ComicPage, Error> {
+        self.render_styled(board, layout, "")
+    }
+
+    pub fn render_styled(
+        &self,
+        board: &Storyboard,
+        layout: crate::manga::Layout,
+        style: &str,
+    ) -> Result<ComicPage, Error> {
         self.router
             .run_filtered(
                 |candidate| self.connections[&candidate.connection].image_model == candidate.model,
                 |candidate, remaining| {
                     self.connections[&candidate.connection]
-                        .render_layout(board.clone(), &candidate.model, remaining, layout)
+                        .render_styled(board.clone(), &candidate.model, remaining, layout, style)
                         .map_err(classify)
                 },
             )

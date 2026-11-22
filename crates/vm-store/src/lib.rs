@@ -181,6 +181,12 @@ pub enum Command {
         note: Option<String>,
         color: AnnotationColor,
     },
+    AddAnnotations {
+        book_id: BookId,
+        ranges: Vec<(Loc, u32)>,
+        note: Option<String>,
+        color: AnnotationColor,
+    },
     UpdateAnnotation {
         book_id: BookId,
         id: String,
@@ -218,7 +224,7 @@ impl Command {
             Self::AddBookmark { .. } => "add_bookmark",
             Self::DeleteBookmark { .. } => "delete_bookmark",
             Self::ListAnnotations { .. } => "list_annotations",
-            Self::AddAnnotation { .. } => "add_annotation",
+            Self::AddAnnotation { .. } | Self::AddAnnotations { .. } => "add_annotation",
             Self::UpdateAnnotation { .. } => "update_annotation",
             Self::DeleteAnnotation { .. } => "delete_annotation",
         }
@@ -314,6 +320,10 @@ pub enum Event {
     AnnotationSaved {
         book_id: BookId,
         annotation: Annotation,
+    },
+    AnnotationsAdded {
+        book_id: BookId,
+        chapter: u32,
     },
     AnnotationDeleted {
         book_id: BookId,
@@ -573,6 +583,16 @@ fn handle(
                 book_id,
                 annotation,
             }
+        }
+        Command::AddAnnotations {
+            book_id,
+            ranges,
+            note,
+            color,
+        } => {
+            let chapter =
+                reading_marks::add_annotations(db, &book_id, &ranges, note.as_deref(), color)?;
+            Event::AnnotationsAdded { book_id, chapter }
         }
         Command::UpdateAnnotation {
             book_id,

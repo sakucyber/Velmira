@@ -803,7 +803,8 @@ impl App {
                 book_id,
                 annotation,
             } => self.refresh_annotations(book_id, annotation.loc.chapter),
-            Event::AnnotationDeleted {
+            Event::AnnotationsAdded { book_id, chapter }
+            | Event::AnnotationDeleted {
                 book_id, chapter, ..
             } => self.refresh_annotations(book_id, chapter),
             Event::Error { operation, message } => {

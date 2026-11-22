@@ -19,6 +19,24 @@ pub fn tap_rect(bounds: Rect, controls: bool) -> Rect {
     Rect::from_x_y_ranges(bounds.x_range(), top..=bottom)
 }
 
+pub fn selection_menu_rect(bounds: Rect, anchor: Rect) -> Option<Rect> {
+    let width = (bounds.width() - 16.0).min(280.0);
+    if width <= 0.0 || bounds.height() < 70.0 {
+        return None;
+    }
+    let left =
+        (anchor.center().x - width / 2.0).clamp(bounds.left() + 8.0, bounds.right() - width - 8.0);
+    let top = if anchor.bottom() + 60.0 <= bounds.bottom() {
+        anchor.bottom() + 7.0
+    } else {
+        (anchor.top() - 54.0).max(bounds.top() + 4.0)
+    };
+    Some(Rect::from_min_size(
+        egui::pos2(left, top),
+        egui::vec2(width, 50.0),
+    ))
+}
+
 fn sheet_rect(safe: Rect, progress: f32) -> Rect {
     let height = (safe.height() * 0.78)
         .max(392.0)
@@ -102,6 +120,7 @@ pub fn list_row(
     fill: Color32,
 ) -> egui::Response {
     let mut button = egui::Button::new(RichText::new(title).size(15.0).color(ink))
+        .truncate()
         .min_size(egui::vec2(ui.available_width(), 48.0))
         .corner_radius(10);
     if fill == Color32::TRANSPARENT {

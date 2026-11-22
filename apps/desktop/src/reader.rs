@@ -66,6 +66,66 @@ struct InlineDecode {
 struct TouchGesture {
     active: Vec<(egui::TouchDeviceId, egui::TouchId)>,
     start: Option<egui::Pos2>,
+    tap: Option<egui::Pos2>,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Default)]
+struct SelectionGesture {
+    press: Option<(egui::Pos2, f64)>,
+    selecting: bool,
+}
+
+#[cfg(target_os = "android")]
+impl SelectionGesture {
+    const HOLD: f64 = 0.38;
+
+    fn update(
+        &mut self,
+        input: &egui::InputState,
+        area: egui::Rect,
+        enabled: bool,
+    ) -> Option<(egui::Pos2, egui::Pos2)> {
+        if !enabled || input.multi_touch().is_some() {
+            *self = Self::default();
+            return None;
+        }
+        if input.pointer.button_pressed(PointerButton::Primary) {
+            self.press = input
+                .pointer
+                .press_origin()
+                .filter(|pos| area.contains(*pos))
+                .map(|pos| (pos, input.time));
+            self.selecting = false;
+        }
+        let (origin, started) = self.press?;
+        let point = input
+            .pointer
+            .latest_pos()
+            .or_else(|| {
+                input.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            })
+            .unwrap_or(origin);
+        if !self.selecting {
+            if input.time - started >= Self::HOLD {
+                self.selecting = true;
+            } else if point.distance(origin) > 10.0 {
+                self.press = None;
+            }
+        }
+        let selection = self.selecting.then_some((origin, point));
+        if !input.pointer.primary_down() {
+            *self = Self::default();
+        }
+        selection
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,11 +235,18 @@ pub struct Reader {
     layout: Option<Arc<PageLayout>>,
     pub annotations: Vec<Annotation>,
     selection: Option<(Loc, Loc)>,
+    #[cfg(not(target_os = "android"))]
     mark: Option<(Loc, u32)>,
     search_highlight: Option<(Loc, String)>,
     inline: InlineImages,
     inline_decode: Option<InlineDecode>,
     touch: TouchGesture,
+    #[cfg(target_os = "android")]
+    selection_gesture: SelectionGesture,
+    #[cfg(target_os = "android")]
+    selection_anchor: Option<egui::Rect>,
+    #[cfg(target_os = "android")]
+    tapped_annotation: Option<Annotation>,
     tools_requested: bool,
 }
 
@@ -226,11 +293,18 @@ impl Reader {
             layout: None,
             annotations: Vec::new(),
             selection: None,
+            #[cfg(not(target_os = "android"))]
             mark: None,
             search_highlight: None,
             inline: InlineImages::default(),
             inline_decode: None,
             touch: TouchGesture::default(),
+            #[cfg(target_os = "android")]
+            selection_gesture: SelectionGesture::default(),
+            #[cfg(target_os = "android")]
+            selection_anchor: None,
+            #[cfg(target_os = "android")]
+            tapped_annotation: None,
             tools_requested: false,
         }
     }
@@ -276,8 +350,55 @@ impl Reader {
             .0
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn take_mark(&mut self) -> Option<(Loc, u32)> {
         self.mark.take()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn selection_anchor(&self) -> Option<egui::Rect> {
+        self.selection_anchor
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn selection_ranges(&self) -> Vec<(Loc, u32)> {
+        let Some((a, b)) = self.selection else {
+            return Vec::new();
+        };
+        let Some(book) = self.book.as_ref() else {
+            return Vec::new();
+        };
+        let (start, end) = (a.min(b), a.max(b));
+        (start.para..=end.para)
+            .filter_map(|para| {
+                let text = book.paragraphs.get(para as usize)?;
+                let begin = if para == start.para { start.off } else { 0 };
+                let finish = if para == end.para {
+                    end.off
+                } else {
+                    text.chars().count() as u32
+                };
+                (begin < finish).then_some((
+                    Loc {
+                        para,
+                        off: begin,
+                        ..start
+                    },
+                    finish,
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn clear_selection(&mut self) -> bool {
+        self.selection_anchor = None;
+        self.selection.take().is_some()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn take_tapped_annotation(&mut self) -> Option<Annotation> {
+        self.tapped_annotation.take()
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -550,7 +671,16 @@ impl Reader {
         self.layout = None;
         self.annotations.clear();
         self.selection = None;
-        self.mark = None;
+        #[cfg(not(target_os = "android"))]
+        {
+            self.mark = None;
+        }
+        #[cfg(target_os = "android")]
+        {
+            self.selection_anchor = None;
+            self.tapped_annotation = None;
+            self.selection_gesture = SelectionGesture::default();
+        }
         self.tools_requested = false;
         self.search_highlight = None;
         self.inline = InlineImages::default();
@@ -800,11 +930,13 @@ impl Reader {
         resizing: bool,
         dialog_open: bool,
         #[cfg(target_os = "android")] tap_area: egui::Rect,
+        #[cfg(target_os = "android")] selection_menu: Option<egui::Rect>,
     ) -> Option<(u32, bool)> {
         let tr = |zh: &'static str, en: &'static str| if chinese { zh } else { en };
         let book = self.book.as_ref()?;
         let night = ui.visuals().dark_mode;
         let p = crate::theme::palette(night);
+        #[cfg(not(target_os = "android"))]
         let has_selection = self.selection.is_some_and(|(a, b)| a != b);
         let chapter_count = book.summary.chapter_count.max(1);
         let current_chapter = book.chapter;
@@ -831,7 +963,8 @@ impl Reader {
         let mut navigation = None;
         let mut copy_requested = false;
         let mobile = cfg!(target_os = "android");
-        if !mobile || has_selection {
+        #[cfg(not(target_os = "android"))]
+        {
             ui.horizontal_wrapped(|ui| {
                 if let Some((a, b)) = self.selection {
                     let (start, end) = (a.min(b), a.max(b));
@@ -964,25 +1097,55 @@ impl Reader {
         if progress.is_some_and(|progress| progress >= 1.0) {
             self.turn = None;
         }
+        #[cfg(target_os = "android")]
+        let selection_update = ui.input(|input| {
+            self.selection_gesture.update(
+                input,
+                tap_area,
+                !blocked
+                    && input.focused
+                    && self.turn.is_none()
+                    && !input
+                        .pointer
+                        .press_origin()
+                        .is_some_and(|pos| selection_menu.is_some_and(|rect| rect.contains(pos)))
+                    && !self.layout_dirty
+                    && self.running.is_none(),
+            )
+        });
+        #[cfg(target_os = "android")]
+        if self.selection_gesture.press.is_some() && selection_update.is_none() {
+            ui.ctx().request_repaint_after(Duration::from_millis(20));
+        }
+
+        let mut tap = None;
         if !blocked {
             if !ui.ctx().wants_keyboard_input() || self.navigation_has_focus(ui.ctx()) {
                 navigation = ui.input(|input| keyboard_navigation(input).or(navigation));
             }
             if let Some(action) = touch_page {
-                if action != Navigation::Tools {
-                    self.selection = None;
-                }
                 navigation = Some(action);
+                tap = self.touch.tap;
             } else if response.clicked_by(PointerButton::Primary) && !touch_input {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let action = tap_navigation(tap_area, pointer.x, mobile);
-                    if action != Navigation::Tools {
-                        self.selection = None;
-                    }
-                    navigation = Some(action);
+                    navigation = Some(tap_navigation(tap_area, pointer.x, mobile));
+                    tap = Some(pointer);
                     response.request_focus();
                 }
             }
+        }
+        #[cfg(target_os = "android")]
+        {
+            let over_menu =
+                tap.is_some_and(|point| selection_menu.is_some_and(|rect| rect.contains(point)));
+            if selection_update.is_some() || over_menu || (tap.is_some() && self.clear_selection())
+            {
+                navigation = None;
+                tap = None;
+            }
+        }
+        if navigation.is_some_and(|action| action != Navigation::Tools) && tap.is_none() {
+            self.selection = None;
         }
         if !blocked && (self.navigation_has_focus(ui.ctx()) || !ui.ctx().wants_keyboard_input()) {
             copy_requested |= ui.input(|input| {
@@ -1081,23 +1244,77 @@ impl Reader {
                         Color32::from_rgba_unmultiplied(247, 155, 34, 155),
                     );
                 }
-                let dragging = response.dragged_by(PointerButton::Primary)
-                    || response.drag_stopped_by(PointerButton::Primary);
-                if !blocked && self.turn.is_none() && dragging && !touch_input {
-                    if let Some(pointer) = response.interact_pointer_pos() {
-                        let to_loc = |p: egui::Pos2| {
-                            let p = (p - visible.min) * scale;
-                            layout.hit_test(self.page, p.x, p.y)
-                        };
-                        if response.drag_started_by(PointerButton::Primary) {
-                            let origin = ui
-                                .input(|input| input.pointer.press_origin())
-                                .unwrap_or(pointer);
-                            self.selection = to_loc(origin).map(|loc| (loc, loc));
+                #[cfg(target_os = "android")]
+                {
+                    self.selection_anchor = None;
+                    let to_loc = |point: egui::Pos2| {
+                        let point = (point - visible.min) * scale;
+                        layout.hit_test(self.page, point.x, point.y)
+                    };
+                    if let Some((origin, end)) = selection_update {
+                        if visible.contains(origin) {
+                            if let Some((a, b)) = to_loc(origin).zip(to_loc(end)) {
+                                self.selection = Some(if a == b {
+                                    let text = self
+                                        .book
+                                        .as_ref()
+                                        .and_then(|book| book.paragraphs.get(a.para as usize));
+                                    text.map_or((a, b), |text| initial_selection(text, a))
+                                } else {
+                                    (a, b)
+                                });
+                            }
                         }
-                        if let (Some((anchor, _)), Some(caret)) = (self.selection, to_loc(pointer))
-                        {
-                            self.selection = Some((anchor, caret));
+                    }
+                    let to_rect = |rect| illustration_rect(rect, visible.min, scale);
+                    if self.turn.is_none() {
+                        if let Some(point) = tap.filter(|point| visible.contains(*point)) {
+                            if let Some(annotation) = self.annotations.iter().rev().find(|mark| {
+                                let end = Loc {
+                                    off: mark.end_off,
+                                    ..mark.loc
+                                };
+                                layout
+                                    .range_rects(self.page, (mark.loc, end))
+                                    .into_iter()
+                                    .any(|rect| to_rect(rect).expand(2.0).contains(point))
+                            }) {
+                                self.tapped_annotation = Some(annotation.clone());
+                                navigation = None;
+                            }
+                        }
+                    }
+                    if !self.selection_gesture.selecting {
+                        if let Some((a, b)) = self.selection {
+                            self.selection_anchor = layout
+                                .range_rects(self.page, (a.min(b), a.max(b)))
+                                .into_iter()
+                                .map(to_rect)
+                                .reduce(egui::Rect::union);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    let dragging = response.dragged_by(PointerButton::Primary)
+                        || response.drag_stopped_by(PointerButton::Primary);
+                    if !blocked && self.turn.is_none() && dragging && !touch_input {
+                        if let Some(pointer) = response.interact_pointer_pos() {
+                            let to_loc = |p: egui::Pos2| {
+                                let p = (p - visible.min) * scale;
+                                layout.hit_test(self.page, p.x, p.y)
+                            };
+                            if response.drag_started_by(PointerButton::Primary) {
+                                let origin = ui
+                                    .input(|input| input.pointer.press_origin())
+                                    .unwrap_or(pointer);
+                                self.selection = to_loc(origin).map(|loc| (loc, loc));
+                            }
+                            if let (Some((anchor, _)), Some(caret)) =
+                                (self.selection, to_loc(pointer))
+                            {
+                                self.selection = Some((anchor, caret));
+                            }
                         }
                     }
                 }
@@ -1147,6 +1364,9 @@ impl Reader {
                 egui::FontId::proportional(16.0),
                 fg,
             );
+        }
+        if tap.is_some() && navigation.is_some_and(|action| action != Navigation::Tools) {
+            self.selection = None;
         }
         if self.page_count > 0 {
             let fraction = (current_chapter as f32
@@ -1313,6 +1533,7 @@ impl TouchGesture {
     ) -> (Option<Navigation>, bool) {
         let mut saw_touch = !self.active.is_empty();
         let mut page = None;
+        self.tap = None;
         if !enabled {
             self.start = None;
         }
@@ -1347,6 +1568,7 @@ impl TouchGesture {
                                     page =
                                         Some(Navigation::Page(if delta.x < 0.0 { 1 } else { -1 }));
                                 } else if delta.length() < 10.0 && canvas.contains(*pos) {
+                                    self.tap = Some(*pos);
                                     page = Some(tap_navigation(
                                         canvas,
                                         pos.x,
@@ -1362,6 +1584,35 @@ impl TouchGesture {
         }
         (page, saw_touch)
     }
+}
+
+#[cfg(target_os = "android")]
+fn initial_selection(text: &str, loc: Loc) -> (Loc, Loc) {
+    let chars: Vec<_> = text.chars().collect();
+    if chars.is_empty() {
+        return (loc, loc);
+    }
+    let at = (loc.off as usize).min(chars.len() - 1);
+    let mut start = at;
+    let mut end = at + 1;
+    if chars[at].is_ascii_alphanumeric() {
+        while start > 0 && chars[start - 1].is_ascii_alphanumeric() {
+            start -= 1;
+        }
+        while end < chars.len() && chars[end].is_ascii_alphanumeric() {
+            end += 1;
+        }
+    }
+    (
+        Loc {
+            off: start as u32,
+            ..loc
+        },
+        Loc {
+            off: end as u32,
+            ..loc
+        },
+    )
 }
 
 fn keyboard_navigation(input: &egui::InputState) -> Option<Navigation> {

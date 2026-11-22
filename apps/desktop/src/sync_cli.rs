@@ -16,7 +16,22 @@ const SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SYNC_PAGES: usize = 64;
 const PEER_LABEL: &str = "Velmira Native";
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn run(address: SocketAddr, id: &str, data_dir: &Path, role: Role) -> Result<()> {
+    let (sent, received, more) = synchronize(address, id, data_dir, role)?;
+    println!("Synchronized with {id}: sent {sent}, received {received}.");
+    if more {
+        println!("Some changes remain. Run synchronization again to continue.");
+    }
+    Ok(())
+}
+
+pub(super) fn synchronize(
+    address: SocketAddr,
+    id: &str,
+    data_dir: &Path,
+    role: Role,
+) -> Result<(usize, usize, bool)> {
     validate_address(address)?;
     if matches!(role, Role::Initiator) && address.port() == 0 {
         return Err("the peer port must be nonzero".into());
@@ -73,12 +88,5 @@ pub(super) fn run(address: SocketAddr, id: &str, data_dir: &Path, role: Role) ->
             break;
         }
     }
-    println!(
-        "Synchronized with {}: sent {sent}, received {received}.",
-        display_id(peer)
-    );
-    if more {
-        println!("Some changes remain. Run synchronization again to continue.");
-    }
-    Ok(())
+    Ok((sent, received, more))
 }

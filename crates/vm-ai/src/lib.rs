@@ -255,6 +255,17 @@ impl Provider {
         timeout: Duration,
         layout: manga::Layout,
     ) -> Result<ComicPage, Error> {
+        self.render_styled(board, model, timeout, layout, "")
+    }
+
+    pub fn render_styled(
+        &self,
+        board: Storyboard,
+        model: &str,
+        timeout: Duration,
+        layout: manga::Layout,
+        style: &str,
+    ) -> Result<ComicPage, Error> {
         if model.trim().is_empty() {
             return Err(Error::Model);
         }
@@ -266,11 +277,16 @@ impl Provider {
         {
             return Err(Error::Storyboard);
         }
+        let mut prompt = board.image_prompt(layout);
+        if !style.trim().is_empty() {
+            prompt.push_str("\nVisual style: ");
+            prompt.extend(style.trim().chars().take(400));
+        }
         let result: ImageResponse = self.post(
             "images/generations",
             json!({
                 "model": model,
-                "prompt": board.image_prompt(layout),
+                "prompt": prompt,
                 "response_format": "b64_json",
                 "n": 1
             }),

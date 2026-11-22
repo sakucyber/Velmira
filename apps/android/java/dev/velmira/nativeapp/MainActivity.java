@@ -3,6 +3,8 @@ package dev.velmira.nativeapp;
 import android.app.NativeActivity;
 import android.app.AlertDialog;
 import android.content.ContentResolver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.database.Cursor;
@@ -238,6 +240,18 @@ public final class MainActivity extends NativeActivity {
         String value = textResult;
         textResult = null;
         return value;
+    }
+
+    public void copyReaderText(String text) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                if (clipboard != null) {
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Velmira", text));
+                }
+            }
+        });
     }
 
     @Override

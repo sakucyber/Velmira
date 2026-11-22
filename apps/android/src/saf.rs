@@ -147,6 +147,19 @@ pub fn take_reader_back(app: &AndroidApp) -> Result<bool, String> {
     })
 }
 
+pub fn copy_text(app: &AndroidApp, text: &str) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        let text = env.new_string(text)?;
+        env.call_method(
+            activity,
+            jni_str!("copyReaderText"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[JValue::Object(text.as_ref())],
+        )?
+        .v()
+    })
+}
+
 fn with_activity<T>(
     app: &AndroidApp,
     call: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,

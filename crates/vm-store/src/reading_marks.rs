@@ -170,51 +170,92 @@ pub(super) fn add_annotation(
     note: Option<&str>,
     color: AnnotationColor,
 ) -> Result<Annotation> {
+    Ok(
+        insert_annotations(db, book_id, &[(loc, end_off)], note, color)?
+            .pop()
+            .expect("a single range was supplied"),
+    )
+}
+
+pub(super) fn add_annotations(
+    db: &mut Connection,
+    book_id: &str,
+    ranges: &[(Loc, u32)],
+    note: Option<&str>,
+    color: AnnotationColor,
+) -> Result<u32> {
+    let annotations = insert_annotations(db, book_id, ranges, note, color)?;
+    Ok(annotations[0].loc.chapter)
+}
+
+fn insert_annotations(
+    db: &mut Connection,
+    book_id: &str,
+    ranges: &[(Loc, u32)],
+    note: Option<&str>,
+    color: AnnotationColor,
+) -> Result<Vec<Annotation>> {
     let note = checked_text(note, MAX_NOTE_BYTES, "annotation note")?;
-    if loc.off >= end_off {
+    let Some((first, _)) = ranges.first() else {
         return Err(Error::Invalid(
             "annotation selection must not be empty".into(),
+        ));
+    };
+    if ranges
+        .iter()
+        .any(|(loc, end)| loc.chapter != first.chapter || loc.off >= *end)
+    {
+        return Err(Error::Invalid(
+            "annotation ranges must be nonempty and in the same chapter".into(),
         ));
     }
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let count = tx
         .prepare_cached("SELECT COUNT(*) FROM annotation WHERE book_id = ?1 AND chapter = ?2")?
-        .query_row(params![book_id, loc.chapter], |row| row.get::<_, u32>(0))?;
-    if count >= MAX_ANNOTATIONS_PER_CHAPTER {
+        .query_row(params![book_id, first.chapter], |row| row.get::<_, u32>(0))?;
+    if ranges.len() > MAX_ANNOTATIONS_PER_CHAPTER.saturating_sub(count) as usize {
         return Err(Error::Invalid(
             "chapter has reached its annotation limit".into(),
         ));
     }
-    let paragraph = database::chapter(&tx, book_id, loc.chapter)?
-        .paragraphs
-        .into_iter()
-        .nth(loc.para as usize)
-        .ok_or_else(|| Error::Invalid("annotation is outside a paragraph".into()))?;
-    let start = byte_at(&paragraph, loc.off)?;
-    let end = byte_at(&paragraph, end_off)?;
-    if end - start > MAX_SELECTION_BYTES {
-        return Err(Error::Invalid("annotation selection is too long".into()));
-    }
+    let chapter = database::chapter(&tx, book_id, first.chapter)?;
     let sql = format!(
         "INSERT INTO annotation(id, book_id, chapter, para, start_off, end_off, text, note, color, created_at, updated_at)
          VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch(), unixepoch())
          RETURNING {ANNOTATION_COLUMNS}"
     );
-    let annotation = tx.prepare_cached(&sql)?.query_row(
-        params![
-            book_id,
-            loc.chapter,
-            loc.para,
-            loc.off,
-            end_off,
-            &paragraph[start..end],
-            note,
-            color.as_str()
-        ],
-        annotation_row,
-    )?;
+    let mut bytes = 0;
+    let mut inserted = Vec::with_capacity(ranges.len());
+    {
+        let mut statement = tx.prepare_cached(&sql)?;
+        for &(loc, end_off) in ranges {
+            let paragraph = chapter
+                .paragraphs
+                .get(loc.para as usize)
+                .ok_or_else(|| Error::Invalid("annotation is outside a paragraph".into()))?;
+            let start = byte_at(paragraph, loc.off)?;
+            let end = byte_at(paragraph, end_off)?;
+            bytes += end - start;
+            if bytes > MAX_SELECTION_BYTES {
+                return Err(Error::Invalid("annotation selection is too long".into()));
+            }
+            inserted.push(statement.query_row(
+                params![
+                    book_id,
+                    loc.chapter,
+                    loc.para,
+                    loc.off,
+                    end_off,
+                    &paragraph[start..end],
+                    note,
+                    color.as_str()
+                ],
+                annotation_row,
+            )?);
+        }
+    }
     tx.commit()?;
-    Ok(annotation)
+    Ok(inserted)
 }
 
 pub(super) fn update_annotation(

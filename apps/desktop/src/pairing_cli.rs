@@ -1,5 +1,7 @@
 use std::fs;
-use std::io::{self, BufRead, Read, Write};
+use std::io;
+#[cfg(not(target_os = "android"))]
+use std::io::{BufRead, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -11,12 +13,14 @@ use zeroize::Zeroizing;
 #[path = "sync_cli.rs"]
 mod sync_cli;
 
+#[cfg(not(target_os = "android"))]
 const INVITATION_LIFETIME: Duration = Duration::from_secs(120);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[cfg(not(target_os = "android"))]
 pub enum Command {
     Listen(SocketAddr),
     Connect(SocketAddr),
@@ -35,9 +39,10 @@ pub fn attach_console() {
     unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "android")))]
 pub fn attach_console() {}
 
+#[cfg(not(target_os = "android"))]
 pub fn run(command: Command, data_dir: &Path) -> Result<()> {
     match command {
         Command::Listen(address) => {
@@ -65,25 +70,15 @@ pub fn run(command: Command, data_dir: &Path) -> Result<()> {
                 code,
                 remaining.min(HANDSHAKE_TIMEOUT),
             )?;
+            let peer_id = peer.device_id;
             store.enroll(&identity, peer)?;
+            println!("Paired device {}", display_id(peer_id));
         }
         Command::Connect(address) => {
-            validate_address(address)?;
-            if address.port() == 0 {
-                return Err("the peer port must be nonzero".into());
-            }
-            let code = read_code()?;
-            let mut store = TrustStore::open(data_dir)?;
-            let identity = store.identity()?;
-            let stream = TcpStream::connect_timeout(&address, CONNECTION_TIMEOUT)?;
-            let peer = pair(
-                stream,
-                Role::Initiator,
-                &identity.private,
-                code,
-                HANDSHAKE_TIMEOUT,
-            )?;
-            store.enroll(&identity, peer)?;
+            println!(
+                "Paired device {}",
+                connect(address, read_code()?, data_dir)?
+            );
         }
         Command::List => TrustStore::open(data_dir)?.list()?,
         Command::Revoke(text) => TrustStore::open(data_dir)?.revoke(parse_id(&text)?)?,
@@ -95,6 +90,43 @@ pub fn run(command: Command, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn connect(address: SocketAddr, code: PairingCode, data_dir: &Path) -> Result<String> {
+    validate_address(address)?;
+    if address.port() == 0 {
+        return Err("the peer port must be nonzero".into());
+    }
+    let mut store = TrustStore::open(data_dir)?;
+    let identity = store.identity()?;
+    let stream = TcpStream::connect_timeout(&address, CONNECTION_TIMEOUT)?;
+    let peer = pair(
+        stream,
+        Role::Initiator,
+        &identity.private,
+        code,
+        HANDSHAKE_TIMEOUT,
+    )?;
+    let id = display_id(peer.device_id);
+    store.enroll(&identity, peer)?;
+    Ok(id)
+}
+
+#[cfg(target_os = "android")]
+pub fn devices(data_dir: &Path) -> Result<Vec<String>> {
+    TrustStore::open(data_dir)?.devices()
+}
+
+#[cfg(target_os = "android")]
+pub fn revoke(data_dir: &Path, id: &str) -> Result<()> {
+    TrustStore::open(data_dir)?.revoke(parse_id(id)?)
+}
+
+#[cfg(target_os = "android")]
+pub fn synchronize(address: SocketAddr, id: &str, data_dir: &Path) -> Result<String> {
+    let (sent, received, more) = sync_cli::synchronize(address, id, data_dir, Role::Initiator)?;
+    let suffix = if more { "，仍有待同步项目" } else { "" };
+    Ok(format!("已发送 {sent} 项，收到 {received} 项{suffix}"))
+}
+
 fn validate_address(address: SocketAddr) -> Result<()> {
     let ip = address.ip();
     if ip.is_unspecified() || ip.is_multicast() || matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())
@@ -104,6 +136,7 @@ fn validate_address(address: SocketAddr) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn read_code() -> Result<PairingCode> {
     eprintln!("Enter the six-digit pairing code:");
     let mut input = Zeroizing::new(Vec::with_capacity(9));
@@ -148,10 +181,13 @@ impl TrustStore {
         let folder = data_dir.join("sync");
         let path = folder.join("devices.sqlite3");
         prepare_store(&folder, &path)?;
-        let db = Connection::open_with_flags(
-            path,
-            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        #[cfg(not(target_os = "android"))]
+        let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        // The file and directory have already been checked with symlink_metadata.
+        // Android's per-app UID is the only writer of the sandbox directory.
+        #[cfg(target_os = "android")]
+        let flags = OpenFlags::default();
+        let db = Connection::open_with_flags(path, flags)?;
         db.busy_timeout(Duration::from_secs(5))?;
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS local_identity (
@@ -222,20 +258,28 @@ impl TrustStore {
         if changed == 0 {
             return Err("the paired device ID belongs to a different key".into());
         }
-        println!("Paired device {}", display_id(peer.device_id));
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
     fn list(&self) -> Result<()> {
+        for id in self.devices()? {
+            println!("{id}");
+        }
+        Ok(())
+    }
+
+    fn devices(&self) -> Result<Vec<String>> {
         let mut query = self
             .0
             .prepare("SELECT device_id FROM trusted_peer ORDER BY device_id")?;
         let ids = query.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut devices = Vec::new();
         for id in ids {
             let id = id?.try_into().map_err(|_| "invalid stored device ID")?;
-            println!("{}", display_id(DeviceId(id)));
+            devices.push(display_id(DeviceId(id)));
         }
-        Ok(())
+        Ok(devices)
     }
 
     fn peer_key(&self, peer: DeviceId) -> io::Result<[u8; 32]> {
