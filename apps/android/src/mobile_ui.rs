@@ -101,21 +101,13 @@ pub fn list_row(
     ink: Color32,
     fill: Color32,
 ) -> egui::Response {
-    let size = egui::vec2(ui.available_width(), 48.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let response = ui.interact(rect, ui.id().with(id), Sense::click());
-    let fill = if response.is_pointer_button_down_on() {
-        ui.visuals().widgets.active.bg_fill
+    let mut button = egui::Button::new(RichText::new(title).size(15.0).color(ink))
+        .min_size(egui::vec2(ui.available_width(), 48.0))
+        .corner_radius(10);
+    if fill == Color32::TRANSPARENT {
+        button = button.frame(false);
     } else {
-        fill
-    };
-    ui.painter().rect_filled(rect, 10, fill);
-    let label = rect.shrink2(egui::vec2(14.0, 4.0));
-    ui.put(
-        label,
-        egui::Label::new(RichText::new(title).size(15.0).color(ink))
-            .truncate()
-            .halign(egui::Align::Min),
-    );
-    response
+        button = button.fill(fill).stroke(egui::Stroke::NONE);
+    }
+    ui.push_id(id, |ui| ui.add(button)).inner
 }
