@@ -1,0 +1,23 @@
+[package]
+name = "velmira-android"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.1", features = ["native-activity"] }
+crossbeam-channel = "0.5"
+eframe = { version = "0.32.3", default-features = false, features = ["android-native-activity", "default_fonts", "glow"] }
+jni = "0.22.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+vm-core = { path = "../../crates/vm-core" }
+vm-format = { path = "../../crates/vm-format" }
+vm-media = { path = "../../crates/vm-media" }
+vm-store = { path = "../../crates/vm-store" }
+vm-text = { path = "../../crates/vm-text" }

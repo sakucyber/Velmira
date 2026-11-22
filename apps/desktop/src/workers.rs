@@ -20,6 +20,7 @@ pub enum LayoutCommand {
         paragraphs: Arc<[String]>,
         illustrations: Arc<[IllustrationAnchor]>,
         page: PageBox,
+        gutter: Option<u32>,
         position: Flip,
         color: [u8; 4],
     },
@@ -78,6 +79,7 @@ impl LayoutWorker {
                                 paragraphs,
                                 illustrations,
                                 page,
+                                gutter,
                                 position,
                                 color,
                             } => {
@@ -85,12 +87,13 @@ impl LayoutWorker {
                                 layout = None;
                                 layout = Some(Arc::new(
                                     paginator
-                                        .paginate_with_illustrations(
+                                        .paginate_spread(
                                             chapter,
                                             &paragraphs,
                                             page,
                                             false,
                                             &illustrations,
+                                            gutter,
                                         )
                                         .map_err(|error| error.to_string())?,
                                 ));
@@ -131,6 +134,7 @@ impl LayoutWorker {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 pub enum ImportRequest {
     Pick,
     File(PathBuf),
@@ -142,7 +146,7 @@ pub enum ImportBook {
     Comic(PathBuf),
 }
 
-fn import_book(path: PathBuf) -> Result<ImportBook, String> {
+pub fn import_book(path: PathBuf) -> Result<ImportBook, String> {
     match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -158,13 +162,16 @@ fn import_book(path: PathBuf) -> Result<ImportBook, String> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 type ImportResult = Result<Option<ImportBook>, String>;
 
+#[cfg(not(target_os = "android"))]
 pub struct ImportWorker {
     pub send: Sender<ImportRequest>,
     pub receive: Receiver<ImportResult>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl ImportWorker {
     pub fn spawn(ctx: egui::Context) -> std::io::Result<Self> {
         let (send, requests) = bounded(1);

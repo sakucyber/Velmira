@@ -65,6 +65,10 @@ impl Comic {
         self.summary.as_ref().map(|book| book.id.as_str())
     }
 
+    pub fn ready(&self) -> bool {
+        self.texture.is_some()
+    }
+
     pub fn open(&mut self, book: BookSummary, page: ComicPage) {
         self.close();
         self.summary = Some(book);
@@ -176,7 +180,7 @@ impl Comic {
             ui.selectable_value(&mut self.fit_width, false, tr("适页", "Fit page"));
             ui.selectable_value(&mut self.fit_width, true, tr("适宽", "Fit width"));
         });
-        if !busy && !ui.ctx().wants_keyboard_input() {
+        if ui.is_enabled() && !busy && !ui.ctx().wants_keyboard_input() {
             (previous, next) = ui.input(|state| {
                 (
                     previous

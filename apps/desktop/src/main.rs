@@ -4,6 +4,7 @@ mod comic;
 mod covers;
 mod generate;
 mod illustrations;
+mod opening;
 mod pairing_cli;
 mod preferences;
 mod reader;
@@ -13,6 +14,7 @@ mod updates;
 mod workers;
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichText};
+use opening::Opening;
 use reader::Reader;
 use std::{
     ffi::OsString,
@@ -193,7 +195,7 @@ struct App {
     more_bookmarks: bool,
     editing: Option<MarkEdit>,
     storage_ready: bool,
-    opening: Option<String>,
+    opening: Option<Opening>,
     importing: bool,
     startup_import: Option<PathBuf>,
     startup_legacy: Option<PathBuf>,
@@ -220,7 +222,7 @@ struct MarkEdit {
 }
 
 enum CardAction {
-    Open(String),
+    Open(String, egui::Rect),
     Rename(String, String),
     Status(String, ShelfStatus),
 }
@@ -272,7 +274,10 @@ fn book_card(
                 );
             }
             if cover.clicked() && is_active {
-                actions.push(CardAction::Open(book.id.clone()));
+                actions.push(CardAction::Open(
+                    book.id.clone(),
+                    cover.rect.intersect(ui.clip_rect()),
+                ));
             }
             let title_color = if is_active { p.ink } else { p.muted };
             let title = ui
@@ -292,7 +297,10 @@ fn book_card(
                 .inner
                 .on_hover_text_at_pointer(&book.title);
             if title.clicked() && is_active {
-                actions.push(CardAction::Open(book.id.clone()));
+                actions.push(CardAction::Open(
+                    book.id.clone(),
+                    cover.rect.intersect(ui.clip_rect()),
+                ));
             }
             let (position_unit, total_unit) = match (chinese, book.format) {
                 (true, BookFormat::Cbz) => ("页", "页"),
@@ -484,13 +492,13 @@ impl App {
         }
     }
 
-    fn open(&mut self, book_id: String) {
+    fn open(&mut self, book_id: String, origin: Option<egui::Rect>) {
         if self.opening.is_none()
             && self.send(Command::OpenBook {
                 book_id: book_id.clone(),
             })
         {
-            self.opening = Some(book_id);
+            self.opening = Some(Opening::new(book_id, origin));
         }
     }
 
@@ -540,7 +548,14 @@ impl App {
                         Some(shown.raster_ms),
                     );
                 }
-                Err(error) => self.say(error, true),
+                Err(error) => {
+                    if self.opening.as_ref().is_some_and(|opening| opening.loaded)
+                        && !self.reader.ready()
+                    {
+                        self.close_reader();
+                    }
+                    self.say(error, true);
+                }
             }
         }
         if let Some((book_id, loc)) = self.reader.unsaved() {
@@ -556,7 +571,14 @@ impl App {
                     self.bench.mark("comic_page", None);
                     self.save_progress(book_id, loc);
                 }
-                Err(error) => self.say(error, true),
+                Err(error) => {
+                    if self.opening.as_ref().is_some_and(|opening| opening.loaded)
+                        && !self.comic.ready()
+                    {
+                        self.close_reader();
+                    }
+                    self.say(error, true);
+                }
             }
         }
     }
@@ -626,7 +648,7 @@ impl App {
                 self.bench.mark("book_imported", None);
                 self.list_pending = false;
                 self.list(0);
-                self.open(book.id);
+                self.open(book.id, None);
             }
             Event::BookOpened {
                 book,
@@ -634,10 +656,14 @@ impl App {
                 chapter_index,
                 chapter,
             } => {
-                if self.opening.as_ref() != Some(&book.id) {
+                let Some(opening) = self
+                    .opening
+                    .as_mut()
+                    .filter(|opening| opening.book_id == book.id)
+                else {
                     return;
-                }
-                self.opening = None;
+                };
+                opening.loaded = true;
                 self.comic.close();
                 self.illustrations.close();
                 self.bookmarks.clear();
@@ -660,10 +686,14 @@ impl App {
                 self.load_inline_illustrations();
             }
             Event::ComicOpened { book, page } => {
-                if self.opening.as_ref() != Some(&book.id) {
+                let Some(opening) = self
+                    .opening
+                    .as_mut()
+                    .filter(|opening| opening.book_id == book.id)
+                else {
                     return;
-                }
-                self.opening = None;
+                };
+                opening.loaded = true;
                 self.reader.close();
                 self.illustrations.close();
                 self.editing = None;
@@ -922,12 +952,15 @@ impl App {
                     .char_limit(120)
                     .hint_text(placeholder),
             );
-            if !ui.ctx().wants_keyboard_input()
+            if ui.is_enabled()
+                && !ui.ctx().wants_keyboard_input()
                 && ui.input(|input| input.key_pressed(egui::Key::Slash))
             {
                 field.request_focus();
             }
-            if (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            if (ui.is_enabled()
+                && field.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || ui.button(self.tr("搜索", "Find")).clicked()
             {
                 filter.query = self.shelf_query.trim().to_owned();
@@ -1060,7 +1093,7 @@ impl App {
         });
         for action in actions {
             match action {
-                CardAction::Open(id) => self.open(id),
+                CardAction::Open(id, rect) => self.open(id, Some(rect)),
                 CardAction::Rename(id, title) => self.renaming = Some((id, title)),
                 CardAction::Status(book_id, status) => {
                     self.send(Command::SetBookStatus { book_id, status });
@@ -1096,7 +1129,8 @@ impl App {
         }
     }
 
-    fn reader_sidebar(&mut self, ctx: &egui::Context) -> bool {
+    fn reader_sidebar(&mut self, root: &mut egui::Ui) -> bool {
+        let ctx = root.ctx().clone();
         let id = egui::Id::new("reader_contents");
         let expansion = ctx.animate_bool_with_time_and_easing(
             id.with("expansion"),
@@ -1118,13 +1152,13 @@ impl App {
         let mut load_bookmarks = false;
         let mut edit = None;
         let sidebar_frame = egui::Frame::new().fill(theme::palette(self.night).surface);
-        let max_width = (ctx.available_rect().width() * 0.5).clamp(220.0, 420.0);
-        let stable_panel = egui::panel::PanelState::load(ctx, id);
+        let max_width = (root.available_width() * 0.5).clamp(220.0, 420.0);
+        let stable_panel = egui::panel::PanelState::load(&ctx, id);
         let expanded_width = stable_panel
             .map_or(240.0, |state| state.rect.width())
             .clamp(220.0, max_width);
         let mut panel = egui::SidePanel::left(id)
-            .resizable(true)
+            .resizable(root.is_enabled())
             .default_width(240.0)
             .width_range(220.0..=max_width)
             .frame(sidebar_frame);
@@ -1133,7 +1167,7 @@ impl App {
                 .resizable(false)
                 .exact_width(expansion * expanded_width);
         }
-        panel.show(ctx, |panel_ui| {
+        panel.show_inside(root, |panel_ui| {
             let bounds = panel_ui.max_rect();
             panel_ui.set_min_width(bounds.width());
             let mut content = bounds.shrink2(egui::vec2(14.0, 12.0));
@@ -1505,10 +1539,231 @@ impl App {
             self.editing = Some(mark);
         }
     }
-}
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn close_reader(&mut self) {
+        self.reader.close();
+        self.comic.close();
+        self.illustrations.close();
+        self.editing = None;
+        self.opening = None;
+    }
+
+    fn show_scene(&mut self, root: &mut egui::Ui, view: View) {
+        let ctx = root.ctx().clone();
+        let mut back = false;
+        let mut toggle_theme = false;
+        let mut generate_comic = false;
+        let mut open_reading_ai = false;
+        let mut show_illustrations = false;
+        let mut toggle_sidebar = false;
+        let p = theme::palette(self.night);
+        let toolbar_frame = egui::Frame::new()
+            .fill(p.surface)
+            .inner_margin(egui::Margin::symmetric(16, 10));
+        egui::TopBottomPanel::top(if view == View::Shelf {
+            "shelf-toolbar"
+        } else {
+            "reader-toolbar"
+        })
+        .frame(toolbar_frame)
+        .show_inside(root, |ui| {
+            ui.horizontal(|ui| {
+                let (logo, _) =
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                ui.painter().rect_filled(logo, 8.0, p.accent);
+                ui.painter().text(
+                    logo.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "V",
+                    egui::FontId::proportional(16.0),
+                    p.on_accent,
+                );
+                ui.add_space(2.0);
+                ui.label(RichText::new("Velmira").size(20.0).strong().color(p.ink));
+                ui.add_space(6.0);
+                if view != View::Shelf && ui.button(self.tr("返回书架", "Library")).clicked() {
+                    back = true;
+                }
+                ui.separator();
+                let enabled = self.storage_ready && !self.importing;
+                let label = if self.importing {
+                    self.tr("正在导入…", "Importing…")
+                } else {
+                    self.tr("导入书籍", "Import book")
+                };
+                let button = if enabled {
+                    egui::Button::new(RichText::new(label).strong().color(p.on_accent))
+                        .fill(p.accent)
+                        .stroke(egui::Stroke::NONE)
+                } else {
+                    egui::Button::new(label)
+                };
+                if ui.add_enabled(enabled, button).clicked() {
+                    self.start_import(ImportRequest::Pick);
+                }
+                if view == View::Novel && ui.button("小说转漫画").clicked() {
+                    generate_comic = true;
+                }
+                if view == View::Novel && ui.button(self.tr("阅读 AI", "Reading AI")).clicked() {
+                    open_reading_ai = true;
+                }
+                if view == View::Novel && self.reader.is_epub() && ui.button("插图").clicked() {
+                    show_illustrations = true;
+                }
+                if view == View::Novel {
+                    let label = if self.reader_sidebar_open {
+                        self.tr("收起目录", "Hide contents")
+                    } else {
+                        self.tr("展开目录", "Show contents")
+                    };
+                    toggle_sidebar = ui
+                        .button(label)
+                        .on_hover_text(
+                            self.tr("显示或隐藏阅读侧栏", "Show or hide the reader sidebar"),
+                        )
+                        .clicked();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if self.night {
+                        self.tr("日间模式", "Day mode")
+                    } else {
+                        self.tr("夜间模式", "Night mode")
+                    };
+                    if ui.button(label).clicked() {
+                        toggle_theme = true;
+                    }
+                    if ui.button("更新").clicked() {
+                        self.updates.open = true;
+                    }
+                });
+            });
+            if let Some((notice, error)) = &self.notice {
+                let color = if *error { p.danger } else { p.success };
+                ui.add_space(2.0);
+                ui.label(RichText::new(notice).color(color).size(13.0));
+            }
+        });
+        if toggle_theme {
+            self.night = !self.night;
+            theme::apply(&ctx, self.night);
+            ctx.request_repaint();
+        }
+        if toggle_sidebar {
+            self.reader_sidebar_open = !self.reader_sidebar_open;
+        }
+        if generate_comic {
+            if let (Some(book), Some(source)) = (self.reader.book_id(), self.reader.comic_source())
+            {
+                self.generator
+                    .prepare(book.to_owned(), self.reader.chapter_index(), source);
+            }
+        }
+        if open_reading_ai {
+            if let Some(source) = self
+                .reader
+                .selected_text()
+                .or_else(|| self.reader.current_paragraph())
+            {
+                self.reading_ai.prepare(source, self.localized);
+            }
+        }
+        if show_illustrations {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                let request = self
+                    .illustrations
+                    .open(book_id, self.reader.chapter_index());
+                if !self.send(request) {
+                    self.illustrations.fail("书库暂忙，请关闭后重试。".into());
+                }
+            }
+        }
+        let p = theme::palette(self.night);
+        if view == View::Comic {
+            let mut flip = None;
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                flip = self.comic.show(ui, self.localized);
+            });
+            if let Some((book_id, page_index)) = flip {
+                if !self.send(Command::ReadComicPage {
+                    book_id,
+                    page_index,
+                }) {
+                    self.comic.reset_load();
+                }
+            }
+        } else if view == View::Novel {
+            let dialog_open = !root.is_enabled()
+                || self.editing.is_some()
+                || self.generator.open
+                || self.updates.open
+                || self.illustrations.is_open();
+            let dialog_open = dialog_open || self.reading_ai.is_open();
+            if !dialog_open
+                && !egui::Popup::is_any_open(&ctx)
+                && (!ctx.wants_keyboard_input() || self.reader.navigation_has_focus(&ctx))
+            {
+                let (contents, search, bookmark) = ctx.input_mut(|input| {
+                    let plain = egui::Modifiers::NONE;
+                    (
+                        input.consume_key(plain, egui::Key::T),
+                        input.consume_key(plain, egui::Key::F),
+                        input.consume_key(plain, egui::Key::B),
+                    )
+                });
+                if contents {
+                    self.reader_sidebar_open = !self.reader_sidebar_open;
+                }
+                if search {
+                    self.reader_sidebar_open = true;
+                    self.focus_search = true;
+                }
+                if bookmark {
+                    if let (Some(book_id), Some(loc)) = (self.reader.book_id(), self.reader.loc()) {
+                        self.send(Command::AddBookmark {
+                            book_id: book_id.to_owned(),
+                            loc,
+                            label: None,
+                        });
+                    }
+                }
+            }
+            let resizing = self.reader_sidebar(root);
+            let mut chapter_step = None;
+            egui::CentralPanel::default().show_inside(root, |ui| {
+                chapter_step = self.reader.show(ui, self.localized, resizing, dialog_open);
+            });
+            if let Some((chapter, last_page)) = chapter_step {
+                if let Some((book_id, chapter)) = self.reader.prepare_adjacent(chapter, last_page) {
+                    if !self.send(Command::ReadChapter { book_id, chapter }) {
+                        self.reader.reset_load();
+                    }
+                }
+            }
+            if let Some((loc, end_off)) = self.reader.take_mark() {
+                self.editing = Some(MarkEdit {
+                    id: None,
+                    loc,
+                    end_off,
+                    color: vm_store::AnnotationColor::Yellow,
+                    note: String::new(),
+                });
+            }
+        } else {
+            let shelf_frame = egui::Frame::new()
+                .fill(p.bg)
+                .inner_margin(egui::Margin::symmetric(20, 12));
+            egui::CentralPanel::default()
+                .frame(shelf_frame)
+                .show_inside(root, |ui| {
+                    self.shelf(ui);
+                });
+        }
+        if back {
+            self.close_reader();
+            ctx.request_repaint();
+        }
+    }
+    fn draw(&mut self, ctx: &egui::Context) {
         if self.first_ui {
             self.first_ui = false;
             self.bench.mark("first_ui_frame", None);
@@ -1560,140 +1815,6 @@ impl eframe::App for App {
         }) {
             self.start_import(ImportRequest::File(path));
         }
-        let mut back = false;
-        let mut toggle_theme = false;
-        let mut generate_comic = false;
-        let mut open_reading_ai = false;
-        let mut show_illustrations = false;
-        let mut toggle_sidebar = false;
-        let p = theme::palette(self.night);
-        let toolbar_frame = egui::Frame::new()
-            .fill(p.surface)
-            .inner_margin(egui::Margin::symmetric(16, 10));
-        egui::TopBottomPanel::top("toolbar")
-            .frame(toolbar_frame)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let (logo, _) =
-                        ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                    ui.painter().rect_filled(logo, 8.0, p.accent);
-                    ui.painter().text(
-                        logo.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "V",
-                        egui::FontId::proportional(16.0),
-                        p.on_accent,
-                    );
-                    ui.add_space(2.0);
-                    ui.label(RichText::new("Velmira").size(20.0).strong().color(p.ink));
-                    ui.add_space(6.0);
-                    if (self.reader.is_open() || self.comic.book_id().is_some())
-                        && ui.button(self.tr("返回书架", "Library")).clicked()
-                    {
-                        back = true;
-                    }
-                    ui.separator();
-                    let enabled = self.storage_ready && !self.importing;
-                    let label = if self.importing {
-                        self.tr("正在导入…", "Importing…")
-                    } else {
-                        self.tr("导入书籍", "Import book")
-                    };
-                    let button = if enabled {
-                        egui::Button::new(RichText::new(label).strong().color(p.on_accent))
-                            .fill(p.accent)
-                            .stroke(egui::Stroke::NONE)
-                    } else {
-                        egui::Button::new(label)
-                    };
-                    if ui.add_enabled(enabled, button).clicked() {
-                        self.start_import(ImportRequest::Pick);
-                    }
-                    if self.reader.is_open() && ui.button("小说转漫画").clicked() {
-                        generate_comic = true;
-                    }
-                    if self.reader.is_open()
-                        && ui.button(self.tr("阅读 AI", "Reading AI")).clicked()
-                    {
-                        open_reading_ai = true;
-                    }
-                    if self.reader.is_epub() && ui.button("插图").clicked() {
-                        show_illustrations = true;
-                    }
-                    if self.reader.is_open() {
-                        let label = if self.reader_sidebar_open {
-                            self.tr("收起目录", "Hide contents")
-                        } else {
-                            self.tr("展开目录", "Show contents")
-                        };
-                        toggle_sidebar = ui
-                            .button(label)
-                            .on_hover_text(
-                                self.tr("显示或隐藏阅读侧栏", "Show or hide the reader sidebar"),
-                            )
-                            .clicked();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = if self.night {
-                            self.tr("日间模式", "Day mode")
-                        } else {
-                            self.tr("夜间模式", "Night mode")
-                        };
-                        if ui.button(label).clicked() {
-                            toggle_theme = true;
-                        }
-                        if ui.button("更新").clicked() {
-                            self.updates.open = true;
-                        }
-                    });
-                });
-                if let Some((notice, error)) = &self.notice {
-                    let color = if *error { p.danger } else { p.success };
-                    ui.add_space(2.0);
-                    ui.label(RichText::new(notice).color(color).size(13.0));
-                }
-            });
-        if toggle_theme {
-            self.night = !self.night;
-            theme::apply(ctx, self.night);
-        }
-        if toggle_sidebar {
-            self.reader_sidebar_open = !self.reader_sidebar_open;
-        }
-        if generate_comic {
-            if let (Some(book), Some(source)) = (self.reader.book_id(), self.reader.comic_source())
-            {
-                self.generator
-                    .prepare(book.to_owned(), self.reader.chapter_index(), source);
-            }
-        }
-        if open_reading_ai {
-            if let Some(source) = self
-                .reader
-                .selected_text()
-                .or_else(|| self.reader.current_paragraph())
-            {
-                self.reading_ai.prepare(source, self.localized);
-            }
-        }
-        if show_illustrations {
-            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
-                let request = self
-                    .illustrations
-                    .open(book_id, self.reader.chapter_index());
-                if !self.send(request) {
-                    self.illustrations.fail("书库暂忙，请关闭后重试。".into());
-                }
-            }
-        }
-        let p = theme::palette(self.night);
-        if back {
-            self.reader.close();
-            self.comic.close();
-            self.illustrations.close();
-            self.editing = None;
-            self.opening = None;
-        }
         let view = if self.comic.book_id().is_some() {
             View::Comic
         } else if self.reader.is_open() {
@@ -1701,99 +1822,60 @@ impl eframe::App for App {
         } else {
             View::Shelf
         };
-        let time = ctx.input(|input| input.time);
-        if self.view != view || toggle_theme {
-            self.view = view;
-            self.view_entered = time;
+        let ready = self.reader.ready() || self.comic.ready();
+        if self.opening.is_some()
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if self.opening.as_ref().is_some_and(|open| open.loaded) {
+                self.close_reader();
+                ctx.request_repaint();
+                self.show_scene(
+                    &mut opening::scene(ctx, egui::Id::new("shelf-scene"), true),
+                    View::Shelf,
+                );
+                return;
+            }
+            self.opening = None;
         }
-        let fade = ((time - self.view_entered) / 0.16).clamp(0.0, 1.0) as f32;
-        let opacity = 1.0 - 0.45 * (1.0 - fade).powi(3);
-        if fade < 1.0 {
-            ctx.request_repaint();
-        }
-        if view == View::Comic {
-            let mut flip = None;
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.multiply_opacity(opacity);
-                flip = self.comic.show(ui, self.localized);
-            });
-            if let Some((book_id, page_index)) = flip {
-                if !self.send(Command::ReadComicPage {
-                    book_id,
-                    page_index,
-                }) {
-                    self.comic.reset_load();
-                }
-            }
-        } else if view == View::Novel {
-            let dialog_open = self.editing.is_some()
-                || self.generator.open
-                || self.updates.open
-                || self.illustrations.is_open();
-            let dialog_open = dialog_open || self.reading_ai.is_open();
-            if !dialog_open
-                && !egui::Popup::is_any_open(ctx)
-                && (!ctx.wants_keyboard_input() || self.reader.navigation_has_focus(ctx))
-            {
-                let (contents, search, bookmark) = ctx.input_mut(|input| {
-                    let plain = egui::Modifiers::NONE;
-                    (
-                        input.consume_key(plain, egui::Key::T),
-                        input.consume_key(plain, egui::Key::F),
-                        input.consume_key(plain, egui::Key::B),
-                    )
-                });
-                if contents {
-                    self.reader_sidebar_open = !self.reader_sidebar_open;
-                }
-                if search {
-                    self.reader_sidebar_open = true;
-                    self.focus_search = true;
-                }
-                if bookmark {
-                    if let (Some(book_id), Some(loc)) = (self.reader.book_id(), self.reader.loc()) {
-                        self.send(Command::AddBookmark {
-                            book_id: book_id.to_owned(),
-                            loc,
-                            label: None,
-                        });
-                    }
-                }
-            }
-            let resizing = self.reader_sidebar(ctx);
-            let mut chapter_step = None;
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.multiply_opacity(opacity);
-                chapter_step = self.reader.show(ui, self.localized, resizing, dialog_open);
-            });
-            if let Some((chapter, last_page)) = chapter_step {
-                if let Some((book_id, chapter)) = self.reader.prepare_adjacent(chapter, last_page) {
-                    if !self.send(Command::ReadChapter { book_id, chapter }) {
-                        self.reader.reset_load();
-                    }
-                }
-            }
-            if let Some((loc, end_off)) = self.reader.take_mark() {
-                self.editing = Some(MarkEdit {
-                    id: None,
-                    loc,
-                    end_off,
-                    color: vm_store::AnnotationColor::Yellow,
-                    note: String::new(),
-                });
-            }
-            self.annotation_editor(ctx);
+        let preparing = !ready && self.opening.as_ref().is_some_and(|open| open.loaded);
+        let reveal = Opening::frame(&mut self.opening, ctx, ready);
+        let shown = if preparing || reveal.is_some() {
+            View::Shelf
         } else {
-            let shelf_frame = egui::Frame::new()
-                .fill(p.bg)
-                .inner_margin(egui::Margin::symmetric(20, 12));
-            egui::CentralPanel::default()
-                .frame(shelf_frame)
-                .show(ctx, |ui| {
-                    ui.multiply_opacity(opacity);
-                    self.shelf(ui);
-                });
+            view
+        };
+        let now = ctx.input(|input| input.time);
+        if self.view != shown {
+            self.view_entered = now;
+            self.view = shown;
         }
+        if shown == View::Shelf {
+            let mut ui = opening::scene(ctx, egui::Id::new("shelf-scene"), reveal.is_none());
+            let fade = ((now - self.view_entered) / 0.16).clamp(0.0, 1.0) as f32;
+            if fade < 1.0 && !preparing && reveal.is_none() {
+                ui.multiply_opacity(0.72 + 0.28 * fade);
+                ctx.request_repaint();
+            }
+            self.show_scene(&mut ui, View::Shelf);
+        }
+        if view != View::Shelf {
+            let mut ui = opening::scene(
+                ctx,
+                egui::Id::new("reader-scene"),
+                !preparing && reveal.is_none(),
+            );
+            if preparing {
+                ui.set_invisible();
+            }
+            if let Some(reveal) = reveal {
+                reveal.paint(&mut ui, theme::palette(self.night).bg, |ui| {
+                    self.show_scene(ui, view)
+                });
+            } else {
+                self.show_scene(&mut ui, view);
+            }
+        }
+        self.annotation_editor(ctx);
         if !self.importing && self.storage_ready {
             if let Some(request) = self.generator.show(ctx) {
                 self.start_import(request);
@@ -1811,6 +1893,12 @@ impl eframe::App for App {
                 self.illustrations.fail("书库暂忙，请重试。".into());
             }
         }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.draw(ctx);
     }
 }
 

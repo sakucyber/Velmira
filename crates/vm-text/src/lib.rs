@@ -114,6 +114,7 @@ struct Line {
     y: f32,
     height: f32,
     baseline: i32,
+    right_column: bool,
     glyphs: Vec<Glyph>,
 }
 
@@ -124,6 +125,12 @@ struct Page {
     illustrations: Vec<InlineIllustration>,
 }
 
+#[derive(Default)]
+struct PageFlow {
+    y: f32,
+    right_column: bool,
+}
+
 #[derive(Debug)]
 pub struct PageLayout {
     engine: u64,
@@ -132,6 +139,7 @@ pub struct PageLayout {
     width: u32,
     height: u32,
     pages: Vec<Page>,
+    right_column_x: u32,
     missing_glyphs: usize,
 }
 
@@ -184,7 +192,18 @@ impl PageLayout {
             return None;
         }
         let page = self.pages.get(index)?;
-        let line = match page.lines.as_slice() {
+        let lines = if self.right_column_x == 0 {
+            &page.lines[..]
+        } else {
+            let split = page.lines.partition_point(|line| !line.right_column);
+            let (left, right) = page.lines.split_at(split);
+            if (x >= self.width as f32 * 0.5 && !right.is_empty()) || left.is_empty() {
+                right
+            } else {
+                left
+            }
+        };
+        let line = match lines {
             [] => return Some(page.start),
             lines => {
                 let index = lines
@@ -256,21 +275,45 @@ impl PageLayout {
         self.missing_glyphs
     }
 
-    fn place_illustration(&mut self, item: IllustrationAnchor, y: &mut f32, page: PageBox) {
-        const GAP: f32 = 6.0;
-        let height = (page.height * 0.54).min(page.width).max(1.0);
-        if *y > 0.0 && *y + height + GAP > page.height {
+    fn advance(&mut self, flow: &mut PageFlow, start: Loc, height: f32, limit: f32) {
+        if flow.y == 0.0 || flow.y + height <= limit {
+            return;
+        }
+        flow.y = 0.0;
+        if self.right_column_x > 0 && !flow.right_column {
+            flow.right_column = true;
+        } else {
+            flow.right_column = false;
             self.pages.push(Page {
-                start: Loc {
-                    chapter: self.chapter,
-                    para: item.before_para,
-                    off: 0,
-                },
+                start,
                 lines: Vec::new(),
                 illustrations: Vec::new(),
             });
-            *y = 0.0;
         }
+    }
+
+    fn column_x(&self, flow: &PageFlow) -> f32 {
+        if flow.right_column {
+            self.right_column_x as f32
+        } else {
+            0.0
+        }
+    }
+
+    fn place_illustration(&mut self, item: IllustrationAnchor, flow: &mut PageFlow, page: PageBox) {
+        const GAP: f32 = 6.0;
+        let height = (page.height * 0.54).min(page.width).max(1.0);
+        self.advance(
+            flow,
+            Loc {
+                chapter: self.chapter,
+                para: item.before_para,
+                off: 0,
+            },
+            height + GAP,
+            page.height,
+        );
+        let x = self.column_x(flow);
         self.pages
             .last_mut()
             .expect("initial layout page")
@@ -278,13 +321,13 @@ impl PageLayout {
             .push(InlineIllustration {
                 ordinal: item.ordinal,
                 rect: Rect {
-                    x: 0.0,
-                    y: *y,
+                    x,
+                    y: flow.y,
                     width: page.width,
                     height,
                 },
             });
-        *y += height + GAP;
+        flow.y += height + GAP;
     }
 }
 
@@ -394,7 +437,32 @@ impl Paginator {
         justify: bool,
         illustrations: &[IllustrationAnchor],
     ) -> Result<PageLayout, LayoutError> {
+        self.paginate_spread(chapter, paragraphs, page, justify, illustrations, None)
+    }
+
+    /// Paginate in reading order, flowing down the left column and then the
+    /// right when a gutter in pixels is provided. Saved locations are unchanged.
+    pub fn paginate_spread(
+        &mut self,
+        chapter: u32,
+        paragraphs: &[impl AsRef<str>],
+        mut page: PageBox,
+        justify: bool,
+        illustrations: &[IllustrationAnchor],
+        gutter: Option<u32>,
+    ) -> Result<PageLayout, LayoutError> {
         let (width, height) = page.pixel_dimensions()?;
+        let right_column_x = if let Some(gutter) = gutter {
+            let column_width = width
+                .checked_sub(gutter)
+                .ok_or(LayoutError::InvalidPageBox)?
+                / 2;
+            page.width = column_width as f32;
+            page.pixel_dimensions()?;
+            width - column_width
+        } else {
+            0
+        };
         if self.fonts.db().is_empty() {
             return Err(LayoutError::NoFonts);
         }
@@ -441,9 +509,10 @@ impl Paginator {
                 lines: Vec::new(),
                 illustrations: Vec::new(),
             }],
+            right_column_x,
             missing_glyphs: 0,
         };
-        let mut y = 0.0;
+        let mut flow = PageFlow::default();
         let mut line_count = 0;
         let mut glyph_count = 0;
         let metrics = Metrics::new(page.font_size, page.line_height);
@@ -463,7 +532,7 @@ impl Paginator {
                 .is_some_and(|item| item.before_para as usize == para)
             {
                 let item = illustrations.next().expect("checked inline image");
-                result.place_illustration(item, &mut y, page);
+                result.place_illustration(item, &mut flow, page);
             }
             let buffer = if reuse_paragraphs {
                 if self.paragraph_buffers.len() == para {
@@ -511,14 +580,8 @@ impl Paginator {
                     para: para as u32,
                     off: start,
                 };
-                if y > 0.0 && y + run.line_height > page.height + 0.001 {
-                    result.pages.push(Page {
-                        start: loc,
-                        lines: Vec::new(),
-                        illustrations: Vec::new(),
-                    });
-                    y = 0.0;
-                }
+                result.advance(&mut flow, loc, run.line_height, page.height + 0.001);
+                let x = result.column_x(&flow);
                 let glyphs = run
                     .glyphs
                     .iter()
@@ -533,10 +596,10 @@ impl Paginator {
                             result.missing_glyphs += 1;
                         }
                         Glyph {
-                            physical: g.physical((0.0, 0.0), 1.0),
+                            physical: g.physical((x, 0.0), 1.0),
                             start: offsets.at(logical_line_start + g.start),
                             end: offsets.at(logical_line_start + g.end),
-                            x: g.x,
+                            x: x + g.x,
                             width: g.w,
                             rtl: g.level.is_rtl(),
                         }
@@ -550,16 +613,17 @@ impl Paginator {
                     .push(Line {
                         para: loc.para,
                         start,
-                        y,
+                        y: flow.y,
                         height: run.line_height,
-                        baseline: (y + run.line_y - run.line_top) as i32,
+                        baseline: (flow.y + run.line_y - run.line_top) as i32,
+                        right_column: flow.right_column,
                         glyphs,
                     });
-                y += run.line_height;
+                flow.y += run.line_height;
             }
         }
         for item in illustrations {
-            result.place_illustration(item, &mut y, page);
+            result.place_illustration(item, &mut flow, page);
         }
         if paragraphs.is_empty() {
             result.paragraph_lengths.push(0);
