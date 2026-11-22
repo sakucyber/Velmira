@@ -81,12 +81,20 @@ impl ComicService {
     }
 
     pub fn render(&self, board: &Storyboard) -> Result<ComicPage, Error> {
+        self.render_layout(board, crate::manga::Layout::default())
+    }
+
+    pub fn render_layout(
+        &self,
+        board: &Storyboard,
+        layout: crate::manga::Layout,
+    ) -> Result<ComicPage, Error> {
         self.router
             .run_filtered(
                 |candidate| self.connections[&candidate.connection].image_model == candidate.model,
                 |candidate, remaining| {
                     self.connections[&candidate.connection]
-                        .render(board.clone(), &candidate.model, remaining)
+                        .render_layout(board.clone(), &candidate.model, remaining, layout)
                         .map_err(classify)
                 },
             )

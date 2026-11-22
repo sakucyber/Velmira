@@ -7,6 +7,7 @@ mod pairing;
 mod protocol;
 mod replica;
 mod session;
+mod stream;
 
 use std::collections::BTreeSet;
 
@@ -21,6 +22,7 @@ pub use protocol::{
 };
 pub use replica::{AnnotationHeads, OperationLog, ReadingState, VersionedAnnotation};
 pub use session::{exchange, ExchangeError, ExchangeReport};
+pub use stream::TimedStream;
 
 pub const MAX_BATCH_OPS: usize = 128;
 pub const MAX_PEERS: usize = 64;

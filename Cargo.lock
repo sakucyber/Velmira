@@ -4128,6 +4128,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -4180,6 +4181,8 @@ dependencies = [
  "vm-core",
  "vm-format",
  "vm-media",
+ "vm-sync",
+ "zip",
  "zstd",
 ]
 

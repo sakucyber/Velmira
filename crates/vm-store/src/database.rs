@@ -3,9 +3,9 @@ use std::{fs, path::Path, time::Duration};
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use vm_core::{BookFormat, BookSummary, Chapter, ImportedText, Loc, TxtEncoding};
 
-use crate::{covers, Error, Result, SearchHit, ShelfFilter, ShelfSort, ShelfStatus};
+use crate::{covers, Error, ReadingStatus, Result, SearchHit, ShelfFilter, ShelfSort, ShelfStatus};
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const SHELF_PAGE: u32 = 60;
 const MAX_SHELF_QUERY_BYTES: usize = 1024;
 const MAX_TITLE_BYTES: usize = 4096;
@@ -55,6 +55,9 @@ pub(super) fn open(path: &Path) -> Result<Connection> {
     }
     if version < 5 {
         schema.execute_batch(include_str!("../migrations/0005_epub_illustrations.sql"))?;
+    }
+    if version < 6 {
+        schema.execute_batch(include_str!("../migrations/0006_sync.sql"))?;
         schema.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     schema.commit()?;
@@ -116,11 +119,18 @@ pub(super) fn list_shelf(
         ShelfSort::Title => "b.title COLLATE NOCASE ASC, b.id",
         ShelfSort::LastRead => "p.updated_at DESC, b.added_at DESC, b.id",
     };
+    let reading = match filter.reading {
+        ReadingStatus::All => "1",
+        ReadingStatus::Unread => "p.book_id IS NULL",
+        ReadingStatus::Reading => "p.chapter < b.chapter_count - 1",
+        ReadingStatus::LastChapter => "p.chapter = b.chapter_count - 1",
+    };
     let sql = format!(
         "SELECT {SUMMARY_COLUMNS}
          FROM book b LEFT JOIN progress p ON p.book_id = b.id
          WHERE b.status = ?1 AND (?2 IS NULL OR b.format = ?2)
            AND (?3 = '' OR instr(lower(b.title), lower(?3)) > 0)
+           AND ({reading})
          ORDER BY {order} LIMIT ?4 OFFSET ?5"
     );
     let mut stmt = db.prepare_cached(&sql)?;
@@ -404,16 +414,29 @@ pub(super) fn paragraph_len(db: &Connection, book_id: &str, loc: &Loc) -> Result
         .optional()?)
 }
 
+pub(super) fn valid_progress(db: &Connection, book_id: &str, loc: &Loc) -> Result<bool> {
+    if let Some(char_len) = paragraph_len(db, book_id, loc)? {
+        return Ok(loc.off <= char_len);
+    }
+    if loc.off != 0 {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chapter c
+            WHERE c.book_id=?1 AND c.idx=?2 AND (?3=0 OR EXISTS(
+                SELECT 1 FROM epub_illustration i
+                WHERE i.book_id=c.book_id AND i.chapter=c.idx AND i.before_para=?3
+            )))",
+        params![book_id, loc.chapter, loc.para],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn save_progress(db: &Connection, book_id: &str, loc: &Loc) -> Result<()> {
-    match paragraph_len(db, book_id, loc)? {
-        Some(char_len) if loc.off <= char_len => {}
-        // A chapter containing only images or a title still has a start position.
-        None if loc.para == 0 && loc.off == 0 => {}
-        _ => {
-            return Err(Error::Invalid(
-                "reading position is outside a paragraph".into(),
-            ))
-        }
+    if !valid_progress(db, book_id, loc)? {
+        return Err(Error::Invalid(
+            "reading position is outside a paragraph".into(),
+        ));
     }
     db.prepare_cached(
         "INSERT INTO progress(book_id, chapter, para, off) VALUES (?1, ?2, ?3, ?4)

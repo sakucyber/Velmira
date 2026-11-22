@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::channel::handshake;
 use crate::noise;
-use crate::{ChannelError, DeviceId, Role};
+use crate::{ChannelError, DeviceId, Role, TimedStream};
 
 const CODE_SPACE: u32 = 1_000_000;
 const PROLOGUE: &[u8] = b"Velmira device enrollment v1";
@@ -109,10 +109,7 @@ pub fn pair(
     if timeout.is_zero() || timeout > MAX_TIMEOUT {
         return Err(PairingError::InvalidTimeout);
     }
-    let mut stream = DeadlineStream {
-        stream,
-        deadline: Instant::now() + timeout,
-    };
+    let mut stream = TimedStream::new(stream, Instant::now() + timeout, timeout);
     let first = Identity::new(PAKE_INITIATOR);
     let second = Identity::new(PAKE_RESPONDER);
     let (state, ours) = {
@@ -191,7 +188,7 @@ fn validate_pake_point(message: &[u8; PAKE_BYTES]) -> Result<(), PairingError> {
 }
 
 fn write_confirmation(
-    stream: &mut DeadlineStream,
+    stream: &mut TimedStream,
     channel: &mut TransportState,
     value: u8,
 ) -> Result<(), PairingError> {
@@ -207,7 +204,7 @@ fn write_confirmation(
 }
 
 fn read_confirmation(
-    stream: &mut DeadlineStream,
+    stream: &mut TimedStream,
     channel: &mut TransportState,
     expected: u8,
 ) -> Result<(), PairingError> {
@@ -221,40 +218,4 @@ fn read_confirmation(
         return Err(PairingError::Authentication);
     }
     Ok(())
-}
-
-struct DeadlineStream {
-    stream: TcpStream,
-    deadline: Instant,
-}
-
-impl DeadlineStream {
-    fn remaining(&self) -> io::Result<Duration> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "pairing deadline elapsed",
-            ));
-        }
-        Ok(remaining)
-    }
-}
-
-impl Read for DeadlineStream {
-    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(bytes)
-    }
-}
-
-impl Write for DeadlineStream {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.stream.flush()
-    }
 }

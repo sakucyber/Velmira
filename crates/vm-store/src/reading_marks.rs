@@ -53,7 +53,7 @@ pub(super) fn list_bookmarks(
 ) -> Result<(Vec<Bookmark>, bool)> {
     let mut stmt = db.prepare_cached(
         "SELECT chapter, para, off, label, created_at FROM bookmark
-         WHERE book_id = ?1 ORDER BY created_at DESC, chapter, para LIMIT ?2 OFFSET ?3",
+         WHERE book_id = ?1 ORDER BY created_at DESC, chapter, para, off LIMIT ?2 OFFSET ?3",
     )?;
     let mut bookmarks = stmt
         .query_map(params![book_id, BOOKMARK_PAGE + 1, offset], bookmark_row)?
@@ -88,22 +88,27 @@ pub(super) fn add_bookmark(
     }
     tx.prepare_cached(
         "INSERT INTO bookmark(book_id, chapter, para, off, label)
-         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (book_id, chapter, para) DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (book_id, chapter, para, off) DO NOTHING",
     )?
     .execute(params![book_id, loc.chapter, loc.para, loc.off, label])?;
     let bookmark = tx
         .prepare_cached(
             "SELECT chapter, para, off, label, created_at FROM bookmark
-         WHERE book_id = ?1 AND chapter = ?2 AND para = ?3",
+         WHERE book_id = ?1 AND chapter = ?2 AND para = ?3 AND off = ?4",
         )?
-        .query_row(params![book_id, loc.chapter, loc.para], bookmark_row)?;
+        .query_row(
+            params![book_id, loc.chapter, loc.para, loc.off],
+            bookmark_row,
+        )?;
     tx.commit()?;
     Ok(bookmark)
 }
 
 pub(super) fn delete_bookmark(db: &Connection, book_id: &str, loc: Loc) -> Result<()> {
-    db.prepare_cached("DELETE FROM bookmark WHERE book_id = ?1 AND chapter = ?2 AND para = ?3")?
-        .execute(params![book_id, loc.chapter, loc.para])?;
+    db.prepare_cached(
+        "DELETE FROM bookmark WHERE book_id = ?1 AND chapter = ?2 AND para = ?3 AND off = ?4",
+    )?
+    .execute(params![book_id, loc.chapter, loc.para, loc.off])?;
     Ok(())
 }
 

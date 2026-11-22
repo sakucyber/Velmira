@@ -10,6 +10,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use zip::write::SimpleFileOptions;
 
+pub mod manga;
+pub mod reading;
 pub mod route;
 pub mod service;
 
@@ -82,11 +84,13 @@ impl Storyboard {
         Ok(())
     }
 
-    fn image_prompt(&self) -> String {
+    fn image_prompt(&self, layout: manga::Layout) -> String {
         let mut prompt = format!(
             "Draw one portrait comic page with exactly {} panels, ordered left to right and top to bottom. Use consistent character designs, clear panel borders, and no written text. Draw these panels:",
             self.panels.len()
         );
+        prompt.push(' ');
+        prompt.push_str(layout.prompt());
         for (index, panel) in self.panels.iter().enumerate() {
             use std::fmt::Write as _;
             let _ = write!(prompt, "\n{}. {}", index + 1, panel.visual.trim());
@@ -162,6 +166,13 @@ impl Provider {
         if text_model.is_empty() && image_model.is_empty() {
             return Err(Error::Model);
         }
+        let mut provider = Self::connect(endpoint, key)?;
+        provider.text_model = text_model.into();
+        provider.image_model = image_model.into();
+        Ok(provider)
+    }
+
+    fn connect(endpoint: Url, key: String) -> Result<Self, Error> {
         let mut client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -174,8 +185,8 @@ impl Provider {
             client,
             endpoint,
             key,
-            text_model: text_model.into(),
-            image_model: image_model.into(),
+            text_model: String::new(),
+            image_model: String::new(),
         })
     }
 
@@ -234,6 +245,16 @@ impl Provider {
         model: &str,
         timeout: Duration,
     ) -> Result<ComicPage, Error> {
+        self.render_layout(board, model, timeout, manga::Layout::default())
+    }
+
+    pub fn render_layout(
+        &self,
+        board: Storyboard,
+        model: &str,
+        timeout: Duration,
+        layout: manga::Layout,
+    ) -> Result<ComicPage, Error> {
         if model.trim().is_empty() {
             return Err(Error::Model);
         }
@@ -249,7 +270,7 @@ impl Provider {
             "images/generations",
             json!({
                 "model": model,
-                "prompt": board.image_prompt(),
+                "prompt": board.image_prompt(layout),
                 "response_format": "b64_json",
                 "n": 1
             }),
@@ -276,6 +297,15 @@ impl Provider {
         limit: usize,
         timeout: Duration,
     ) -> Result<T, Error> {
+        response_json(self.post_response(route, body, timeout)?, limit)
+    }
+
+    fn post_response(
+        &self,
+        route: &str,
+        body: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Response, Error> {
         let url = self.endpoint.join(route).map_err(|_| Error::Endpoint)?;
         let mut request = self.client.post(url).timeout(timeout).json(&body);
         if !self.key.is_empty() {
@@ -283,7 +313,7 @@ impl Provider {
         }
         let response = request.send().map_err(network_error)?;
         match response.status() {
-            status if status.is_success() => response_json(response, limit),
+            status if status.is_success() => Ok(response),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 Err(Error::Auth(response.status().as_u16()))
             }
@@ -340,6 +370,11 @@ fn network_error(error: reqwest::Error) -> Error {
 }
 
 fn response_json<T: DeserializeOwned>(response: Response, limit: usize) -> Result<T, Error> {
+    let bytes = response_bytes(response, limit)?;
+    serde_json::from_slice(&bytes).map_err(|_| Error::Response)
+}
+
+fn response_bytes(response: Response, limit: usize) -> Result<Vec<u8>, Error> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -354,7 +389,7 @@ fn response_json<T: DeserializeOwned>(response: Response, limit: usize) -> Resul
     if bytes.len() > limit {
         return Err(Error::ResponseTooLarge);
     }
-    serde_json::from_slice(&bytes).map_err(|_| Error::Response)
+    Ok(bytes)
 }
 
 fn image_extension(image: &[u8]) -> Result<&'static str, Error> {

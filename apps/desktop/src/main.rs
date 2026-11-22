@@ -5,7 +5,9 @@ mod covers;
 mod generate;
 mod illustrations;
 mod pairing_cli;
+mod preferences;
 mod reader;
+mod reading_ai;
 mod theme;
 mod updates;
 mod workers;
@@ -19,7 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 use vm_core::{BookFormat, BookSummary, Loc};
-use vm_store::{Bookmark, Command, Event, SearchHit, ShelfFilter, ShelfSort, ShelfStatus, Store};
+use vm_store::{
+    Bookmark, Command, Event, ReadingStatus, SearchHit, ShelfFilter, ShelfSort, ShelfStatus, Store,
+};
 use workers::{ImportBook, ImportRequest, ImportWorker, LayoutWorker};
 
 struct Options {
@@ -51,8 +55,8 @@ fn options() -> Result<Option<Options>, String> {
             Some("--migrate-legacy") => legacy = Some(path_value(args.next(), "--migrate-legacy")?),
             Some("--bench-startup") => bench = Some(path_value(args.next(), "--bench-startup")?),
             Some(
-                flag
-                @ ("--pair-listen" | "--pair-connect" | "--paired-devices" | "--unpair-device"),
+                flag @ ("--pair-listen" | "--pair-connect" | "--paired-devices" | "--unpair-device"
+                | "--sync-listen" | "--sync-connect"),
             ) => {
                 if pairing.is_some() {
                     return Err("Choose one pairing command.".into());
@@ -63,6 +67,19 @@ fn options() -> Result<Option<Options>, String> {
                     }
                     "--pair-connect" => {
                         pairing_cli::Command::Connect(socket_address(args.next(), flag)?)
+                    }
+                    "--sync-listen" | "--sync-connect" => {
+                        let address = socket_address(args.next(), flag)?;
+                        let peer = args
+                            .next()
+                            .and_then(|value| value.into_string().ok())
+                            .filter(|value| !value.is_empty())
+                            .ok_or("Synchronization needs a paired device ID.")?;
+                        if flag == "--sync-listen" {
+                            pairing_cli::Command::SyncListen(address, peer)
+                        } else {
+                            pairing_cli::Command::SyncConnect(address, peer)
+                        }
                     }
                     "--paired-devices" => pairing_cli::Command::List,
                     _ => pairing_cli::Command::Revoke(
@@ -77,6 +94,7 @@ fn options() -> Result<Option<Options>, String> {
                 pairing_cli::attach_console();
                 println!("velmira-native [--data-dir PATH] [--import BOOK] [--migrate-legacy OLD_DATA_DIR] [--bench-startup LOG.jsonl]");
                 println!("velmira-native [--data-dir PATH] [--pair-listen IP:PORT | --pair-connect IP:PORT | --paired-devices | --unpair-device ID]");
+                println!("velmira-native [--data-dir PATH] [--sync-listen IP:PORT PEER_ID | --sync-connect IP:PORT PEER_ID]");
                 return Ok(None);
             }
             _ => return Err(format!("Unknown option: {}", arg.to_string_lossy())),
@@ -154,6 +172,8 @@ struct App {
     localized: bool,
     night: bool,
     reader_sidebar_open: bool,
+    compact_shelf: bool,
+    saved_preferences: preferences::SavedPreferences,
     view: View,
     view_entered: f64,
     book_list: Vec<BookSummary>,
@@ -165,6 +185,7 @@ struct App {
     reader: Reader,
     comic: comic::Comic,
     generator: generate::Generator,
+    reading_ai: reading_ai::ReadingAi,
     updates: updates::Updates,
     illustrations: illustrations::Illustrations,
     covers: covers::ShelfCovers,
@@ -178,6 +199,8 @@ struct App {
     startup_legacy: Option<PathBuf>,
     notice: Option<(String, bool)>,
     search: String,
+    toc_filter: String,
+    focus_search: bool,
     last_query: Option<String>,
     search_hits: Vec<SearchHit>,
     bench: Bench,
@@ -344,7 +367,8 @@ impl App {
         start: Instant,
         options: Options,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        theme::apply(&ctx, false);
+        let (saved_preferences, prefs) = preferences::SavedPreferences::load(&options.data_dir);
+        theme::apply(&ctx, prefs.night);
         let mut fonts = FontDefinitions::default();
         fonts.font_data.insert(
             "velmira-cjk".into(),
@@ -372,12 +396,16 @@ impl App {
         let idle_sample = bench
             .enabled()
             .then(|| Instant::now() + Duration::from_secs(300));
+        let mut reader = Reader::new(layout);
+        reader.apply_preferences(prefs.font_size, prefs.paper.as_deref());
         Ok(Self {
             store,
             importer,
             localized: true,
-            night: false,
-            reader_sidebar_open: true,
+            night: prefs.night,
+            reader_sidebar_open: prefs.contents,
+            compact_shelf: prefs.compact,
+            saved_preferences,
             view: View::Shelf,
             view_entered: f64::NEG_INFINITY,
             book_list: Vec::new(),
@@ -386,10 +414,11 @@ impl App {
             shelf_filter: Default::default(),
             shelf_query: String::new(),
             renaming: None,
-            reader: Reader::new(layout),
+            reader,
             storage_ready: false,
             comic,
             generator: generate::Generator::new(&options.data_dir),
+            reading_ai: reading_ai::ReadingAi::new(&options.data_dir),
             updates,
             illustrations: Default::default(),
             covers,
@@ -402,6 +431,8 @@ impl App {
             startup_legacy: options.legacy,
             notice: None,
             search: String::new(),
+            toc_filter: String::new(),
+            focus_search: false,
             last_query: None,
             search_hits: Vec::new(),
             bench,
@@ -613,6 +644,7 @@ impl App {
                 self.more_bookmarks = false;
                 self.editing = None;
                 self.search.clear();
+                self.toc_filter.clear();
                 self.search_hits.clear();
                 self.last_query = None;
                 self.bench.mark("book_opened", None);
@@ -625,6 +657,7 @@ impl App {
                     chapter: chapter_index,
                 });
                 self.reader.open(book, toc, chapter_index, chapter);
+                self.load_inline_illustrations();
             }
             Event::ComicOpened { book, page } => {
                 if self.opening.as_ref() != Some(&book.id) {
@@ -642,15 +675,22 @@ impl App {
                 book_id,
                 chapter,
                 illustrations,
-            } => self.illustrations.listed(&book_id, chapter, illustrations),
+            } => {
+                self.reader
+                    .inline_illustrations(&book_id, chapter, &illustrations);
+                self.illustrations.listed(&book_id, chapter, illustrations);
+            }
             Event::IllustrationRead {
                 book_id,
                 chapter,
                 ordinal,
                 image,
-            } => self
-                .illustrations
-                .loaded(ctx, &book_id, chapter, ordinal, image),
+            } => {
+                self.reader
+                    .receive_inline_image(ctx, &book_id, chapter, ordinal, &image);
+                self.illustrations
+                    .loaded(ctx, &book_id, chapter, ordinal, image);
+            }
             Event::ChapterRead {
                 book_id,
                 chapter_index,
@@ -663,6 +703,7 @@ impl App {
                         book_id,
                         chapter: chapter_index,
                     });
+                    self.load_inline_illustrations();
                 }
             }
             Event::ProgressSaved { book_id, loc } => {
@@ -742,6 +783,11 @@ impl App {
                     "read_cover" => self.covers.read_failed(),
                     "list_illustrations" | "read_illustration" => {
                         self.illustrations.fail(message.clone());
+                        if operation == "list_illustrations" {
+                            self.reader.inline_illustrations_failed();
+                        } else {
+                            self.reader.inline_image_failed();
+                        }
                     }
                     "insert_book" => self.importing = false,
                     "list_books" => self.list_pending = false,
@@ -759,6 +805,19 @@ impl App {
     fn refresh_annotations(&mut self, book_id: String, chapter: u32) {
         if self.reader.book_id() == Some(&book_id) && self.reader.chapter_index() == chapter {
             self.send(Command::ListAnnotations { book_id, chapter });
+        }
+    }
+
+    fn load_inline_illustrations(&mut self) {
+        if self.reader.is_epub() {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                if !self.send(Command::ListIllustrations {
+                    book_id,
+                    chapter: self.reader.chapter_index(),
+                }) {
+                    self.reader.inline_illustrations_failed();
+                }
+            }
         }
     }
 
@@ -790,6 +849,29 @@ impl App {
                 ShelfStatus::Active,
                 self.tr("书库", "Library"),
             );
+            let reading_options = [
+                (ReadingStatus::All, self.tr("全部进度", "All progress")),
+                (ReadingStatus::Unread, self.tr("未读", "Unread")),
+                (ReadingStatus::Reading, self.tr("阅读中", "In progress")),
+                (
+                    ReadingStatus::LastChapter,
+                    self.tr("读到末章", "At final chapter"),
+                ),
+            ];
+            egui::ComboBox::from_id_salt("shelf-reading")
+                .selected_text(
+                    reading_options
+                        .iter()
+                        .find(|(status, _)| *status == filter.reading)
+                        .map_or("", |(_, label)| *label),
+                )
+                .show_ui(ui, |ui| {
+                    for (status, label) in reading_options {
+                        ui.selectable_value(&mut filter.reading, status, label);
+                    }
+                });
+            let compact = self.tr("紧凑书架", "Compact shelf");
+            ui.checkbox(&mut self.compact_shelf, compact);
             ui.selectable_value(
                 &mut filter.status,
                 ShelfStatus::Removed,
@@ -840,6 +922,11 @@ impl App {
                     .char_limit(120)
                     .hint_text(placeholder),
             );
+            if !ui.ctx().wants_keyboard_input()
+                && ui.input(|input| input.key_pressed(egui::Key::Slash))
+            {
+                field.request_focus();
+            }
             if (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || ui.button(self.tr("搜索", "Find")).clicked()
             {
@@ -925,7 +1012,11 @@ impl App {
         };
         let chinese = self.localized;
         let mut actions: Vec<CardAction> = Vec::new();
-        let (card_w, cover_h, card_h, gap) = (148.0, 222.0, 347.0, 19.0);
+        let (card_w, cover_h, card_h, gap) = if self.compact_shelf {
+            (112.0, 168.0, 282.0, 13.0)
+        } else {
+            (148.0, 222.0, 347.0, 19.0)
+        };
         let columns = (((ui.available_width() + gap) / (card_w + gap)).floor() as usize).max(1);
         let rows = self.book_list.len().div_ceil(columns);
         ui.scope(|ui| {
@@ -1019,6 +1110,8 @@ impl App {
         let animating = expansion < 1.0;
         let mut collapse = false;
         let mut jump = None;
+        let mut search_jump = None;
+        let mut chapter_search = None;
         let mut submit = false;
         let mut bookmark = false;
         let mut remove_bookmark = None;
@@ -1081,9 +1174,16 @@ impl App {
                         .desired_width((ui.available_width() - 62.0).clamp(90.0, 180.0))
                         .char_limit(120),
                 );
+                if std::mem::take(&mut self.focus_search) {
+                    field.request_focus();
+                }
                 let enter =
                     field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                submit = enter || ui.button(self.tr("搜索", "Find")).clicked();
+                submit = enter || ui.button(self.tr("搜全书", "Search book")).clicked();
+                if ui.button(self.tr("搜本章", "Search chapter")).clicked() {
+                    chapter_search = Some(self.reader.chapter_index());
+                    submit = true;
+                }
             });
             if !self.search_hits.is_empty() {
                 egui::ScrollArea::vertical()
@@ -1101,7 +1201,7 @@ impl App {
                                 .on_hover_text(&hit.excerpt)
                                 .clicked()
                             {
-                                jump = Some(hit.loc);
+                                search_jump = Some(hit.loc);
                             }
                         }
                     });
@@ -1171,12 +1271,42 @@ impl App {
                         }
                     });
             });
-            egui::ScrollArea::vertical().id_salt("toc").show_rows(
-                ui,
-                32.0,
-                self.reader.toc().len(),
-                |ui, rows| {
-                    for index in rows {
+            let toc_hint = if self.localized {
+                "筛选目录"
+            } else {
+                "Filter contents"
+            };
+            ui.add(
+                egui::TextEdit::singleline(&mut self.toc_filter)
+                    .hint_text(toc_hint)
+                    .char_limit(120),
+            );
+            let query = self.toc_filter.trim().to_lowercase();
+            let filtered: Vec<_> = if query.is_empty() {
+                Vec::new()
+            } else {
+                self.reader
+                    .toc()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, title)| {
+                        title.to_lowercase().contains(&query).then_some(index)
+                    })
+                    .collect()
+            };
+            if !query.is_empty() && filtered.is_empty() {
+                ui.label(self.tr("没有匹配章节", "No matching chapters"));
+            }
+            let length = if query.is_empty() {
+                self.reader.toc().len()
+            } else {
+                filtered.len()
+            };
+            egui::ScrollArea::vertical()
+                .id_salt(("toc", self.toc_filter.as_str()))
+                .show_rows(ui, 32.0, length, |ui, rows| {
+                    for row in rows {
+                        let index = if query.is_empty() { row } else { filtered[row] };
                         if ui
                             .add_sized(
                                 [ui.available_width(), 32.0],
@@ -1195,8 +1325,7 @@ impl App {
                             });
                         }
                     }
-                },
-            );
+                });
         });
         if animating {
             // The animation must not replace our last user-resized panel width.
@@ -1248,16 +1377,24 @@ impl App {
                 self.search_hits.clear();
                 self.last_query = (!query.is_empty()).then(|| query.clone());
                 if !query.is_empty() {
+                    let chapter = chapter_search.or_else(|| {
+                        (query.chars().count() == 1).then(|| self.reader.chapter_index())
+                    });
                     self.send(Command::Search {
                         query,
                         book_id,
-                        chapter: Some(self.reader.chapter_index()),
+                        chapter,
                         limit: 50,
                     });
                 }
             }
         }
-        if let Some(loc) = jump {
+        if let Some(loc) = search_jump {
+            if let Some(query) = &self.last_query {
+                self.reader.highlight_search(loc, query);
+            }
+            self.jump(loc);
+        } else if let Some(loc) = jump {
             self.jump(loc);
         }
         animating || collapse
@@ -1387,7 +1524,20 @@ impl eframe::App for App {
             }
         }
         self.events(ctx);
-        if ctx.input(|input| input.viewport().close_requested())
+        let closing = ctx.input(|input| input.viewport().close_requested());
+        let (font_size, paper) = self.reader.preferences();
+        self.saved_preferences.update(
+            ctx,
+            preferences::Preferences {
+                night: self.night,
+                contents: self.reader_sidebar_open,
+                compact: self.compact_shelf,
+                font_size,
+                paper: paper.map(str::to_owned),
+            },
+            closing,
+        );
+        if closing
             && !self.allow_close
             && (!self.pending_progress.is_empty() || self.reader.unsaved().is_some())
         {
@@ -1413,6 +1563,7 @@ impl eframe::App for App {
         let mut back = false;
         let mut toggle_theme = false;
         let mut generate_comic = false;
+        let mut open_reading_ai = false;
         let mut show_illustrations = false;
         let mut toggle_sidebar = false;
         let p = theme::palette(self.night);
@@ -1461,6 +1612,11 @@ impl eframe::App for App {
                     if self.reader.is_open() && ui.button("小说转漫画").clicked() {
                         generate_comic = true;
                     }
+                    if self.reader.is_open()
+                        && ui.button(self.tr("阅读 AI", "Reading AI")).clicked()
+                    {
+                        open_reading_ai = true;
+                    }
                     if self.reader.is_epub() && ui.button("插图").clicked() {
                         show_illustrations = true;
                     }
@@ -1505,8 +1661,19 @@ impl eframe::App for App {
             self.reader_sidebar_open = !self.reader_sidebar_open;
         }
         if generate_comic {
-            if let Some(source) = self.reader.comic_source() {
-                self.generator.prepare(source);
+            if let (Some(book), Some(source)) = (self.reader.book_id(), self.reader.comic_source())
+            {
+                self.generator
+                    .prepare(book.to_owned(), self.reader.chapter_index(), source);
+            }
+        }
+        if open_reading_ai {
+            if let Some(source) = self
+                .reader
+                .selected_text()
+                .or_else(|| self.reader.current_paragraph())
+            {
+                self.reading_ai.prepare(source, self.localized);
             }
         }
         if show_illustrations {
@@ -1559,11 +1726,41 @@ impl eframe::App for App {
                 }
             }
         } else if view == View::Novel {
-            let resizing = self.reader_sidebar(ctx);
             let dialog_open = self.editing.is_some()
                 || self.generator.open
                 || self.updates.open
                 || self.illustrations.is_open();
+            let dialog_open = dialog_open || self.reading_ai.is_open();
+            if !dialog_open
+                && !egui::Popup::is_any_open(ctx)
+                && (!ctx.wants_keyboard_input() || self.reader.navigation_has_focus(ctx))
+            {
+                let (contents, search, bookmark) = ctx.input_mut(|input| {
+                    let plain = egui::Modifiers::NONE;
+                    (
+                        input.consume_key(plain, egui::Key::T),
+                        input.consume_key(plain, egui::Key::F),
+                        input.consume_key(plain, egui::Key::B),
+                    )
+                });
+                if contents {
+                    self.reader_sidebar_open = !self.reader_sidebar_open;
+                }
+                if search {
+                    self.reader_sidebar_open = true;
+                    self.focus_search = true;
+                }
+                if bookmark {
+                    if let (Some(book_id), Some(loc)) = (self.reader.book_id(), self.reader.loc()) {
+                        self.send(Command::AddBookmark {
+                            book_id: book_id.to_owned(),
+                            loc,
+                            label: None,
+                        });
+                    }
+                }
+            }
+            let resizing = self.reader_sidebar(ctx);
             let mut chapter_step = None;
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.multiply_opacity(opacity);
@@ -1603,6 +1800,12 @@ impl eframe::App for App {
             }
         }
         self.updates.show(ctx);
+        self.reading_ai.show(ctx);
+        if let Some(request) = self.reader.inline_image_request() {
+            if !self.send(request) {
+                self.reader.inline_image_failed();
+            }
+        }
         if let Some(request) = self.illustrations.show(ctx) {
             if !self.send(request) {
                 self.illustrations.fail("书库暂忙，请重试。".into());

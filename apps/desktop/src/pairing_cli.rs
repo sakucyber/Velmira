@@ -8,6 +8,9 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 use vm_sync::{generate_keypair, pair, DeviceId, PairedPeer, PairingCode, Role};
 use zeroize::Zeroizing;
 
+#[path = "sync_cli.rs"]
+mod sync_cli;
+
 const INVITATION_LIFETIME: Duration = Duration::from_secs(120);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -19,6 +22,8 @@ pub enum Command {
     Connect(SocketAddr),
     List,
     Revoke(String),
+    SyncListen(SocketAddr, String),
+    SyncConnect(SocketAddr, String),
 }
 
 #[cfg(windows)]
@@ -82,6 +87,10 @@ pub fn run(command: Command, data_dir: &Path) -> Result<()> {
         }
         Command::List => TrustStore::open(data_dir)?.list()?,
         Command::Revoke(text) => TrustStore::open(data_dir)?.revoke(parse_id(&text)?)?,
+        Command::SyncListen(address, id) => sync_cli::run(address, &id, data_dir, Role::Responder)?,
+        Command::SyncConnect(address, id) => {
+            sync_cli::run(address, &id, data_dir, Role::Initiator)?
+        }
     }
     Ok(())
 }
@@ -110,10 +119,7 @@ fn accept_until(listener: TcpListener, deadline: Instant) -> io::Result<TcpStrea
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "pairing invitation expired",
-            ));
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "listener expired"));
         }
         match listener.accept() {
             Ok((stream, _)) => {
@@ -230,6 +236,31 @@ impl TrustStore {
             println!("{}", display_id(DeviceId(id)));
         }
         Ok(())
+    }
+
+    fn peer_key(&self, peer: DeviceId) -> io::Result<[u8; 32]> {
+        let public = self
+            .0
+            .query_row(
+                "SELECT public_key FROM trusted_peer WHERE device_id = ?1",
+                [peer.0.as_slice()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::PermissionDenied, "paired device not found")
+            })?;
+        let key = public.try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid stored peer public key")
+        })?;
+        if DeviceId::from_public_key(&key) != peer {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stored peer ID does not match its key",
+            ));
+        }
+        Ok(key)
     }
 
     fn revoke(&self, peer: DeviceId) -> Result<()> {

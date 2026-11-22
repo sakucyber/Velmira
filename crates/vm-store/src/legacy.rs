@@ -60,7 +60,11 @@ pub(super) fn migrate(
         [],
         |row| row.get::<_, bool>(0),
     )? && has_table(&snapshot, "records")?;
-    let revision = if android { "android-v1" } else { "v2-media" };
+    let revision = if android {
+        "android-v2-media"
+    } else {
+        "v2-media"
+    };
     let marker = format!("migrated_from:{revision}:{source_key}");
     if tx
         .query_row("SELECT 1 FROM meta WHERE key = ?1", [&marker], |_| Ok(()))
@@ -73,8 +77,10 @@ pub(super) fn migrate(
         });
     }
     if android {
-        let report = android::migrate(&snapshot, &tx, source_key)?;
-        tx.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", [&marker])?;
+        let report = android::migrate(&snapshot, &tx, blobs, library, source_key)?;
+        if report.pending_comics == 0 {
+            tx.execute("INSERT INTO meta(key, value) VALUES (?1, '1')", [&marker])?;
+        }
         tx.commit()?;
         return Ok(report);
     }
@@ -494,7 +500,7 @@ fn insert_bookmark(
     }
     report.bookmarks += new.execute(
         "INSERT INTO bookmark(book_id, chapter, para, off, label, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(book_id, chapter, para) DO NOTHING",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(book_id, chapter, para, off) DO NOTHING",
         params![book_id, loc.chapter, loc.para, loc.off, label, created_at],
     )? as u32;
     Ok(())

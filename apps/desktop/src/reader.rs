@@ -1,12 +1,18 @@
 use crate::workers::{Flip, LayoutCommand, LayoutWorker};
-use crossbeam_channel::TrySendError;
+use crossbeam_channel::{bounded, Receiver, TryRecvError, TrySendError};
 use eframe::egui::{self, Color32, ColorImage, Key, PointerButton, TextureHandle, TextureOptions};
 use std::{sync::Arc, time::Duration};
 use vm_core::{BookSummary, Chapter, Loc};
-use vm_store::{Annotation, AnnotationColor};
-use vm_text::{PageBox, PageLayout};
+use vm_store::{Annotation, AnnotationColor, Command, Illustration, IllustrationImage};
+use vm_text::{IllustrationAnchor, PageBox, PageLayout};
 
 const PAGE_TURN_SECONDS: f64 = 0.20;
+const MAX_INLINE_EDGE: u32 = 1200;
+const DEFAULT_FONT_SIZE: f32 = 19.0;
+
+fn page_surface_id() -> egui::Id {
+    egui::Id::new("reader-page-surface")
+}
 
 struct ReadingBook {
     summary: BookSummary,
@@ -37,6 +43,28 @@ struct PageTurn {
     theme: Theme,
     direction: f32,
     start: f64,
+    illustrations: Vec<(TextureHandle, vm_text::Rect)>,
+}
+
+#[derive(Default)]
+struct InlineImages {
+    anchors: Arc<[IllustrationAnchor]>,
+    textures: Vec<(u32, Option<TextureHandle>)>,
+    waiting: Option<(u32, u32)>,
+    awaiting_list: bool,
+}
+
+struct InlineDecode {
+    receiver: Receiver<Option<vm_media::RgbaImage>>,
+    book_id: String,
+    chapter: u32,
+    ordinal: u32,
+}
+
+#[derive(Default)]
+struct TouchGesture {
+    active: Vec<(egui::TouchDeviceId, egui::TouchId)>,
+    start: Option<egui::Pos2>,
 }
 
 enum Navigation {
@@ -98,6 +126,10 @@ pub struct Reader {
     pub annotations: Vec<Annotation>,
     selection: Option<(Loc, Loc)>,
     mark: Option<(Loc, u32)>,
+    search_highlight: Option<(Loc, String)>,
+    inline: InlineImages,
+    inline_decode: Option<InlineDecode>,
+    touch: TouchGesture,
 }
 
 impl Reader {
@@ -133,7 +165,7 @@ impl Reader {
             page: 0,
             page_count: 0,
             theme: None,
-            font_px: 19.0,
+            font_px: DEFAULT_FONT_SIZE,
             missing_glyphs: 0,
             unsaved: None,
             first_page: true,
@@ -141,6 +173,10 @@ impl Reader {
             annotations: Vec::new(),
             selection: None,
             mark: None,
+            search_highlight: None,
+            inline: InlineImages::default(),
+            inline_decode: None,
+            touch: TouchGesture::default(),
         }
     }
 
@@ -169,14 +205,239 @@ impl Reader {
         self.mark.take()
     }
 
-    pub fn open(&mut self, summary: BookSummary, toc: Vec<String>, index: u32, chapter: Chapter) {
-        let loc = summary
-            .progress
-            .filter(|loc| loc.chapter == index)
-            .unwrap_or(Loc {
-                chapter: index,
-                ..Loc::default()
+    pub fn selected_text(&self) -> Option<String> {
+        let (a, b) = self.selection?;
+        let (start, end) = (a.min(b), a.max(b));
+        let book = self.book.as_ref()?;
+        if start == end || start.chapter != book.chapter || end.chapter != book.chapter {
+            return None;
+        }
+        let mut selected = String::new();
+        for para in start.para..=end.para {
+            let chunk = book.paragraphs.get(para as usize)?;
+            let begin = if para == start.para { start.off } else { 0 };
+            let chars = if para == end.para {
+                end.off - begin
+            } else {
+                u32::MAX
+            };
+            if para > start.para {
+                selected.push('\n');
+            }
+            selected.extend(chunk.chars().skip(begin as usize).take(chars as usize));
+        }
+        (!selected.is_empty()).then_some(selected)
+    }
+
+    pub fn current_paragraph(&self) -> Option<String> {
+        let book = self.book.as_ref()?;
+        book.paragraphs.get(book.loc.para as usize).cloned()
+    }
+
+    pub fn preferences(&self) -> (f32, Option<&'static str>) {
+        let theme = self.theme.map(|theme| match theme {
+            Theme::Paper => "paper",
+            Theme::White => "light",
+            Theme::Night => "dark",
+        });
+        (self.font_px, theme)
+    }
+
+    pub fn apply_preferences(&mut self, font: f32, theme: Option<&str>) {
+        let size = if font.is_finite() {
+            (font.clamp(12.0, 48.0) * 10.0).round() / 10.0
+        } else {
+            DEFAULT_FONT_SIZE
+        };
+        if self.font_px != size {
+            self.font_px = size;
+            self.layout_dirty = true;
+        }
+        self.theme = match theme {
+            Some("paper") => Some(Theme::Paper),
+            Some("light") => Some(Theme::White),
+            Some("dark") => Some(Theme::Night),
+            _ => None,
+        };
+    }
+
+    pub fn navigation_has_focus(&self, ctx: &egui::Context) -> bool {
+        self.is_open() && ctx.memory(|memory| memory.has_focus(page_surface_id()))
+    }
+
+    pub fn highlight_search(&mut self, loc: Loc, query: &str) {
+        self.search_highlight = Some((loc, query.to_owned()));
+    }
+
+    fn search_range(&self) -> Option<(Loc, Loc)> {
+        let (loc, query) = self.search_highlight.as_ref()?;
+        let book = self.book.as_ref()?;
+        if book.chapter != loc.chapter {
+            return None;
+        }
+        let para = book.paragraphs.get(loc.para as usize)?;
+        let mut source = para.chars().skip(loc.off as usize);
+        let folded = query.to_lowercase();
+        let mut matched = folded.chars();
+        let mut consumed = 0;
+        while let Some(target) = matched.next() {
+            let value = source.next()?;
+            consumed += 1;
+            let mut lower = value.to_lowercase();
+            if lower.next() != Some(target) || !lower.all(|ch| matched.next() == Some(ch)) {
+                return None;
+            }
+        }
+        (consumed != 0).then_some((
+            *loc,
+            Loc {
+                off: loc.off + consumed,
+                ..*loc
+            },
+        ))
+    }
+
+    pub fn inline_illustrations(&mut self, id: &str, chapter: u32, entries: &[Illustration]) {
+        if !self.is_epub() || self.book_id() != Some(id) || self.chapter_index() != chapter {
+            return;
+        }
+        let anchors: Arc<[IllustrationAnchor]> = entries
+            .iter()
+            .map(|item| IllustrationAnchor {
+                ordinal: item.ordinal,
+                before_para: item.before_para,
+            })
+            .collect();
+        self.inline.awaiting_list = false;
+        if self.inline.anchors != anchors {
+            self.inline.anchors = anchors;
+            self.layout_dirty = true;
+        }
+    }
+
+    pub fn inline_illustrations_failed(&mut self) {
+        self.inline.awaiting_list = false;
+    }
+
+    pub fn inline_image_request(&mut self) -> Option<Command> {
+        if self.inline.waiting.is_some()
+            || self.inline.awaiting_list
+            || self.inline_decode.is_some()
+        {
+            return None;
+        }
+        let book = self.book.as_ref()?;
+        let layout = self.layout.as_ref()?;
+        let ordinal = layout
+            .illustrations(self.page)
+            .iter()
+            .map(|item| item.ordinal)
+            .find(|&ordinal| {
+                !self
+                    .inline
+                    .textures
+                    .iter()
+                    .any(|(loaded, _)| *loaded == ordinal)
+            })?;
+        self.inline.waiting = Some((book.chapter, ordinal));
+        Some(Command::ReadIllustration {
+            book_id: book.summary.id.clone(),
+            chapter: book.chapter,
+            ordinal,
+        })
+    }
+
+    pub fn receive_inline_image(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        chapter: u32,
+        ordinal: u32,
+        image: &IllustrationImage,
+    ) {
+        if self.book_id() != Some(id)
+            || self.inline.waiting != Some((chapter, ordinal))
+            || self.inline_decode.is_some()
+        {
+            return;
+        }
+        let bytes = image.bytes.clone();
+        let (tx, rx) = bounded(1);
+        let ctx = ctx.clone();
+        if std::thread::Builder::new()
+            .name("velmira-inline-illustration".into())
+            .spawn(move || {
+                let result = vm_media::decode_page(&bytes, MAX_INLINE_EDGE).ok();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            })
+            .is_ok()
+        {
+            self.inline_decode = Some(InlineDecode {
+                receiver: rx,
+                book_id: id.to_owned(),
+                chapter,
+                ordinal,
             });
+        } else {
+            self.inline_image_failed();
+        }
+    }
+
+    pub fn inline_image_failed(&mut self) {
+        if self.inline_decode.is_none() {
+            self.finish_image(None);
+        }
+    }
+
+    fn finish_image(&mut self, texture: Option<TextureHandle>) {
+        if let Some((chapter, ordinal)) = self.inline.waiting.take() {
+            if self.chapter_index() == chapter
+                && self.layout.as_ref().is_some_and(|layout| {
+                    layout
+                        .illustrations(self.page)
+                        .iter()
+                        .any(|item| item.ordinal == ordinal)
+                })
+            {
+                self.inline.textures.push((ordinal, texture));
+            }
+        }
+    }
+
+    fn poll_inline_images(&mut self, ctx: &egui::Context) {
+        let Some(decode) = self.inline_decode.as_ref() else {
+            return;
+        };
+        let image = match decode.receiver.try_recv() {
+            Ok(image) => image,
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => return,
+        };
+        let current = self.book_id() == Some(decode.book_id.as_str())
+            && self.inline.waiting == Some((decode.chapter, decode.ordinal));
+        self.inline_decode = None;
+        if current {
+            let texture = image.map(|image| {
+                ctx.load_texture(
+                    "reader-inline-illustration",
+                    ColorImage::from_rgba_unmultiplied(
+                        [image.width as usize, image.height as usize],
+                        &image.pixels,
+                    ),
+                    TextureOptions::LINEAR,
+                )
+            });
+            self.finish_image(texture);
+        }
+    }
+
+    pub fn open(&mut self, summary: BookSummary, toc: Vec<String>, index: u32, chapter: Chapter) {
+        let saved = summary.progress.filter(|loc| loc.chapter == index);
+        let loc = saved.unwrap_or(Loc {
+            chapter: index,
+            ..Loc::default()
+        });
         self.close();
         self.book = Some(ReadingBook {
             summary,
@@ -187,10 +448,11 @@ impl Reader {
             loc,
         });
         self.pending = Some(Request {
-            position: Flip::Keep(loc),
+            position: saved.map_or(Flip::First, Flip::Keep),
             persist_page_start: false,
             turn: 0,
         });
+        self.inline.awaiting_list = self.is_epub();
     }
 
     pub fn close(&mut self) {
@@ -209,6 +471,9 @@ impl Reader {
         self.annotations.clear();
         self.selection = None;
         self.mark = None;
+        self.search_highlight = None;
+        self.inline = InlineImages::default();
+        self.touch = TouchGesture::default();
     }
 
     pub fn prepare_jump(&mut self, loc: Loc) -> Option<(String, u32)> {
@@ -283,6 +548,11 @@ impl Reader {
         self.layout = None;
         self.annotations.clear();
         self.selection = None;
+        self.inline = InlineImages {
+            awaiting_list: self.is_epub(),
+            ..InlineImages::default()
+        };
+        self.touch = TouchGesture::default();
         true
     }
 
@@ -297,6 +567,7 @@ impl Reader {
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<Result<Shown, String>> {
+        self.poll_inline_images(ctx);
         while let Ok((id, result)) = self.worker.receive.try_recv() {
             let Some((active, request, theme)) = self.running else {
                 continue;
@@ -326,6 +597,13 @@ impl Reader {
                 book.summary.progress = Some(target);
                 self.unsaved = Some(target);
             }
+            if self
+                .search_highlight
+                .as_ref()
+                .is_some_and(|(loc, _)| rendered.layout.page_for(*loc) != Some(rendered.index))
+            {
+                self.search_highlight = None;
+            }
             let image = ColorImage::from_rgba_unmultiplied(
                 [
                     rendered.raster.width as usize,
@@ -334,11 +612,26 @@ impl Reader {
                 &rendered.raster.rgba,
             );
             if request.turn != 0 {
+                let illustrations = self.layout.as_ref().map_or_else(Vec::new, |layout| {
+                    layout
+                        .illustrations(self.page)
+                        .iter()
+                        .filter_map(|item| {
+                            self.inline.textures.iter().find_map(|(id, texture)| {
+                                (*id == item.ordinal)
+                                    .then_some(texture.as_ref())
+                                    .flatten()
+                                    .map(|texture| (texture.clone(), item.rect))
+                            })
+                        })
+                        .collect()
+                });
                 self.turn = self.texture.take().map(|(previous, theme)| PageTurn {
                     previous,
                     theme,
                     direction: f32::from(request.turn),
                     start: ctx.input(|input| input.time),
+                    illustrations,
                 });
             }
             if let Some((texture, rendered_theme)) = &mut self.texture {
@@ -354,6 +647,14 @@ impl Reader {
             self.page_count = rendered.count;
             self.missing_glyphs = rendered.missing_glyphs;
             self.layout = Some(rendered.layout);
+            if let Some(layout) = &self.layout {
+                self.inline.textures.retain(|(id, _)| {
+                    layout
+                        .illustrations(self.page)
+                        .iter()
+                        .any(|item| item.ordinal == *id)
+                });
+            }
             self.selection = None;
             let first = std::mem::replace(&mut self.first_page, false);
             return Some(Ok(Shown {
@@ -405,6 +706,9 @@ impl Reader {
         let book = self.book.as_ref()?;
         let night = ui.visuals().dark_mode;
         let p = crate::theme::palette(night);
+        let has_selection = self.selection.is_some_and(|(a, b)| a != b);
+        let chapter_count = book.summary.chapter_count.max(1);
+        let current_chapter = book.chapter;
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::Label::new(egui::RichText::new(&book.title).strong().size(20.0)).truncate(),
@@ -425,6 +729,7 @@ impl Reader {
             ui.label(egui::RichText::new(position).size(13.0).color(p.muted));
         });
         let mut navigation = None;
+        let mut copy_requested = false;
         ui.horizontal_wrapped(|ui| {
             if ui.button(tr("上一页", "Previous")).clicked() {
                 navigation = Some(Navigation::Page(-1));
@@ -445,14 +750,26 @@ impl Reader {
                     self.mark = Some((start, end.off));
                 }
             }
+            copy_requested =
+                has_selection && ui.button(tr("复制选中文字", "Copy selection")).clicked();
             let changed = ui
                 .add(
                     egui::Slider::new(&mut self.font_px, 12.0..=48.0)
                         .text(tr("字号", "Font"))
-                        .step_by(1.0),
+                        .step_by(0.1)
+                        .fixed_decimals(1),
                 )
                 .changed();
-            if changed {
+            let reset = ui
+                .add_enabled(
+                    (self.font_px - DEFAULT_FONT_SIZE).abs() > 0.01,
+                    egui::Button::new(tr("恢复字号", "Reset font")),
+                )
+                .clicked();
+            if reset {
+                self.font_px = DEFAULT_FONT_SIZE;
+            }
+            if changed || reset {
                 self.layout_dirty = true;
             }
             egui::ComboBox::from_id_salt("reader-theme")
@@ -507,7 +824,7 @@ impl Reader {
                 turn: 0,
             });
         }
-        if !resizing || self.texture.is_none() {
+        if (!resizing || self.texture.is_none()) && !self.inline.awaiting_list {
             self.submit(
                 ui.ctx(),
                 PageBox {
@@ -519,12 +836,21 @@ impl Reader {
                 theme,
             );
         }
-        let (id, canvas) = ui.allocate_space(egui::vec2(available.x, bg_size.y));
+        let (_, canvas) = ui.allocate_space(egui::vec2(available.x, bg_size.y));
         let rect = egui::Rect::from_min_size(
             egui::pos2(canvas.center().x - bg_size.x / 2.0, canvas.top()),
             bg_size,
         );
-        let response = ui.interact(canvas, id, egui::Sense::click_and_drag());
+        let response = ui.interact(canvas, page_surface_id(), egui::Sense::click_and_drag());
+        let blocked = dialog_open || egui::Popup::is_any_open(ui.ctx()) || resizing;
+        let (touch_page, touch_input) = ui.input(|input| {
+            if input.focused {
+                self.touch.update(&input.events, rect, !blocked)
+            } else {
+                self.touch = TouchGesture::default();
+                (None, false)
+            }
+        });
         let time = ui.input(|input| input.time);
         let progress = self
             .turn
@@ -533,17 +859,33 @@ impl Reader {
         if progress.is_some_and(|progress| progress >= 1.0) {
             self.turn = None;
         }
-        if !dialog_open && !egui::Popup::is_any_open(ui.ctx()) {
-            if !ui.ctx().wants_keyboard_input() || response.has_focus() {
+        if !blocked {
+            if !ui.ctx().wants_keyboard_input() || self.navigation_has_focus(ui.ctx()) {
                 navigation = ui.input(|input| keyboard_navigation(input).or(navigation));
             }
-            if response.clicked_by(PointerButton::Primary) {
+            if let Some(step) = touch_page {
+                self.selection = None;
+                navigation = Some(Navigation::Page(step));
+            } else if response.clicked_by(PointerButton::Primary) && !touch_input {
                 if let Some(pointer) = response.interact_pointer_pos() {
                     let step = if pointer.x < rect.center().x { -1 } else { 1 };
                     self.selection = None;
                     navigation = Some(Navigation::Page(step));
                     response.request_focus();
                 }
+            }
+        }
+        if !blocked && (self.navigation_has_focus(ui.ctx()) || !ui.ctx().wants_keyboard_input()) {
+            copy_requested |= ui.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Copy))
+            });
+        }
+        if !blocked && copy_requested {
+            if let Some(text) = self.selected_text() {
+                ui.ctx().copy_text(text);
             }
         }
         let (bg, fg) = displayed_theme.colors();
@@ -572,6 +914,14 @@ impl Reader {
                 IMAGE_UV,
                 Color32::WHITE.gamma_multiply(1.0 - eased),
             );
+            for (image, slot) in &turn.illustrations {
+                paint_illustration(
+                    &painter,
+                    image,
+                    illustration_rect(*slot, old_body.min, scale),
+                    Color32::WHITE.gamma_multiply(1.0 - eased),
+                );
+            }
             painter.rect_filled(incoming, 9.0, bg.gamma_multiply(0.80 + 0.20 * eased));
             let edge = if turn.direction > 0.0 {
                 incoming.left()
@@ -625,9 +975,16 @@ impl Reader {
                         color,
                     );
                 }
+                if let Some((start, end)) = self.search_range() {
+                    draw(
+                        start,
+                        end,
+                        Color32::from_rgba_unmultiplied(247, 155, 34, 155),
+                    );
+                }
                 let dragging = response.dragged_by(PointerButton::Primary)
                     || response.drag_stopped_by(PointerButton::Primary);
-                if !resizing && self.turn.is_none() && !dialog_open && dragging {
+                if !blocked && self.turn.is_none() && dragging && !touch_input {
                     if let Some(pointer) = response.interact_pointer_pos() {
                         let to_loc = |p: egui::Pos2| {
                             let p = (p - visible.min) * scale;
@@ -652,6 +1009,34 @@ impl Reader {
                         Color32::from_rgba_unmultiplied(65, 134, 201, 110),
                     );
                 }
+                for item in layout.illustrations(self.page) {
+                    let slot = illustration_rect(item.rect, visible.min, scale);
+                    match self
+                        .inline
+                        .textures
+                        .iter()
+                        .find(|(id, _)| *id == item.ordinal)
+                    {
+                        Some((_, Some(image))) => {
+                            paint_illustration(&painter, image, slot, Color32::WHITE)
+                        }
+                        item => {
+                            let label = if item.is_some() {
+                                tr("插图不可用", "Image unavailable")
+                            } else {
+                                tr("正在加载插图…", "Loading illustration…")
+                            };
+                            painter.rect_filled(slot, 6.0, p.surface2);
+                            painter.text(
+                                slot.center(),
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                egui::FontId::proportional(14.0),
+                                p.muted,
+                            );
+                        }
+                    }
+                }
             }
             ui.painter_at(rect)
                 .image(texture.id(), visible, IMAGE_UV, Color32::WHITE);
@@ -665,7 +1050,9 @@ impl Reader {
             );
         }
         if self.page_count > 0 && rect.width() > 20.0 && rect.height() > 6.0 {
-            let fraction = (self.page + 1) as f32 / self.page_count as f32;
+            let fraction = (current_chapter as f32
+                + (self.page + 1) as f32 / self.page_count as f32)
+                / chapter_count as f32;
             let track = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x + 10.0, rect.max.y - 6.0),
                 egui::vec2(rect.width() - 20.0, 3.0),
@@ -675,7 +1062,7 @@ impl Reader {
             painter.rect_filled(
                 egui::Rect::from_min_size(
                     track.min,
-                    egui::vec2(track.width() * fraction.clamp(0.01, 1.0), track.height()),
+                    egui::vec2(track.width() * fraction.clamp(0.0, 1.0), track.height()),
                 ),
                 1.5,
                 crate::theme::palette(displayed_theme == Theme::Night).accent,
@@ -686,7 +1073,7 @@ impl Reader {
         } else {
             navigation.and_then(|navigation| self.request_navigation(navigation))
         };
-        if self.pending.is_some() && !resizing {
+        if self.pending.is_some() && !resizing && !self.inline.awaiting_list {
             ui.ctx().request_repaint();
         }
         chapter
@@ -706,6 +1093,7 @@ impl Reader {
             LayoutCommand::Reflow {
                 chapter: book.chapter,
                 paragraphs: Arc::clone(&book.paragraphs),
+                illustrations: Arc::clone(&self.inline.anchors),
                 page,
                 position: request.position,
                 color,
@@ -733,18 +1121,98 @@ const IMAGE_UV: egui::Rect = egui::Rect {
     max: egui::pos2(1.0, 1.0),
 };
 
+fn illustration_rect(slot: vm_text::Rect, origin: egui::Pos2, scale: f32) -> egui::Rect {
+    egui::Rect::from_min_size(
+        origin + egui::vec2(slot.x, slot.y) / scale,
+        egui::vec2(slot.width, slot.height) / scale,
+    )
+}
+
+fn paint_illustration(
+    painter: &egui::Painter,
+    image: &TextureHandle,
+    slot: egui::Rect,
+    tint: Color32,
+) {
+    let size = image.size_vec2();
+    let scale = (slot.width() / size.x).min(slot.height() / size.y);
+    painter.image(
+        image.id(),
+        egui::Rect::from_center_size(slot.center(), size * scale),
+        IMAGE_UV,
+        tint,
+    );
+}
+
+impl TouchGesture {
+    fn update(
+        &mut self,
+        events: &[egui::Event],
+        canvas: egui::Rect,
+        enabled: bool,
+    ) -> (Option<i8>, bool) {
+        let mut saw_touch = !self.active.is_empty();
+        let mut page = None;
+        if !enabled {
+            self.start = None;
+        }
+        for event in events {
+            let egui::Event::Touch {
+                device_id,
+                id,
+                phase,
+                pos,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            saw_touch = true;
+            let key = (*device_id, *id);
+            match phase {
+                egui::TouchPhase::Start => {
+                    self.start = (enabled && self.active.is_empty() && canvas.contains(*pos))
+                        .then_some(*pos);
+                    if !self.active.contains(&key) {
+                        self.active.push(key);
+                    }
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                    if let Some(index) = self.active.iter().position(|&known| known == key) {
+                        self.active.swap_remove(index);
+                        if let Some(start) = self.start.take() {
+                            let delta = *pos - start;
+                            if *phase == egui::TouchPhase::End {
+                                if delta.x.abs() >= 46.0 && delta.x.abs() > 1.3 * delta.y.abs() {
+                                    page = Some(if delta.x < 0.0 { 1 } else { -1 });
+                                } else if delta.length() < 10.0 && canvas.contains(*pos) {
+                                    page = Some(if pos.x < canvas.center().x { -1 } else { 1 });
+                                }
+                            }
+                        }
+                    }
+                }
+                egui::TouchPhase::Move => {}
+            }
+        }
+        (page, saw_touch)
+    }
+}
+
 fn keyboard_navigation(input: &egui::InputState) -> Option<Navigation> {
+    if input.modifiers.alt || input.modifiers.ctrl || input.modifiers.command {
+        return None;
+    }
     if input.key_pressed(Key::ArrowUp) {
         Some(Navigation::Chapter(-1))
     } else if input.key_pressed(Key::ArrowDown) {
         Some(Navigation::Chapter(1))
     } else if input.key_pressed(Key::ArrowLeft) || input.key_pressed(Key::PageUp) {
         Some(Navigation::Page(-1))
-    } else if input.key_pressed(Key::ArrowRight)
-        || input.key_pressed(Key::PageDown)
-        || input.key_pressed(Key::Space)
-    {
+    } else if input.key_pressed(Key::ArrowRight) || input.key_pressed(Key::PageDown) {
         Some(Navigation::Page(1))
+    } else if input.key_pressed(Key::Space) {
+        Some(Navigation::Page(if input.modifiers.shift { -1 } else { 1 }))
     } else {
         None
     }

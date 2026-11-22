@@ -74,6 +74,18 @@ pub struct Rect {
     pub height: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IllustrationAnchor {
+    pub ordinal: u32,
+    pub before_para: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineIllustration {
+    pub ordinal: u32,
+    pub rect: Rect,
+}
+
 #[derive(Debug)]
 struct Glyph {
     physical: PhysicalGlyph,
@@ -109,6 +121,7 @@ struct Line {
 struct Page {
     start: Loc,
     lines: Vec<Line>,
+    illustrations: Vec<InlineIllustration>,
 }
 
 #[derive(Debug)]
@@ -131,19 +144,38 @@ impl PageLayout {
         self.pages.get(index).map(|page| page.start)
     }
 
+    pub fn illustrations(&self, index: usize) -> &[InlineIllustration] {
+        self.pages
+            .get(index)
+            .map_or(&[], |page| page.illustrations.as_slice())
+    }
+
     /// Find a saved position by its Unicode scalar offset, independent of view
     /// width, height, or font size.
     pub fn page_for(&self, loc: Loc) -> Option<usize> {
-        if loc.chapter != self.chapter
-            || loc.off > *self.paragraph_lengths.get(loc.para as usize)?
-        {
+        if loc.chapter != self.chapter {
             return None;
         }
-        Some(
-            self.pages
-                .partition_point(|page| location_key(page.start) <= location_key(loc))
-                .saturating_sub(1),
-        )
+        match self.paragraph_lengths.get(loc.para as usize) {
+            Some(&len) if loc.off <= len => {}
+            // End-of-chapter illustrations can use the boundary after the
+            // last paragraph. A real page at this boundary must exist.
+            None if loc.para as usize == self.paragraph_lengths.len()
+                && loc.off == 0
+                && self.pages.last().is_some_and(|page| page.start == loc) => {}
+            _ => return None,
+        }
+        let index = self
+            .pages
+            .partition_point(|page| location_key(page.start) <= location_key(loc))
+            .saturating_sub(1);
+        if self.pages[index].start == loc && self.pages[index].lines.is_empty() {
+            return Some(
+                self.pages
+                    .partition_point(|page| location_key(page.start) < location_key(loc)),
+            );
+        }
+        Some(index)
     }
 
     /// Resolve a pointer to the nearest visual glyph-cluster edge.
@@ -222,6 +254,37 @@ impl PageLayout {
     /// Number of laid-out glyphs the font fallback could not resolve.
     pub fn missing_glyphs(&self) -> usize {
         self.missing_glyphs
+    }
+
+    fn place_illustration(&mut self, item: IllustrationAnchor, y: &mut f32, page: PageBox) {
+        const GAP: f32 = 6.0;
+        let height = (page.height * 0.54).min(page.width).max(1.0);
+        if *y > 0.0 && *y + height + GAP > page.height {
+            self.pages.push(Page {
+                start: Loc {
+                    chapter: self.chapter,
+                    para: item.before_para,
+                    off: 0,
+                },
+                lines: Vec::new(),
+                illustrations: Vec::new(),
+            });
+            *y = 0.0;
+        }
+        self.pages
+            .last_mut()
+            .expect("initial layout page")
+            .illustrations
+            .push(InlineIllustration {
+                ordinal: item.ordinal,
+                rect: Rect {
+                    x: 0.0,
+                    y: *y,
+                    width: page.width,
+                    height,
+                },
+            });
+        *y += height + GAP;
     }
 }
 
@@ -318,6 +381,19 @@ impl Paginator {
         page: PageBox,
         justify: bool,
     ) -> Result<PageLayout, LayoutError> {
+        self.paginate_with_illustrations(chapter, paragraphs, page, justify, &[])
+    }
+
+    /// Flow text and illustration boxes together in paragraph order. Images
+    /// are loaded separately from layout and can be fitted into these boxes.
+    pub fn paginate_with_illustrations(
+        &mut self,
+        chapter: u32,
+        paragraphs: &[impl AsRef<str>],
+        page: PageBox,
+        justify: bool,
+        illustrations: &[IllustrationAnchor],
+    ) -> Result<PageLayout, LayoutError> {
         let (width, height) = page.pixel_dimensions()?;
         if self.fonts.db().is_empty() {
             return Err(LayoutError::NoFonts);
@@ -336,6 +412,9 @@ impl Paginator {
             }
         }
         if paragraphs.len() > MAX_CHAPTER_LINES {
+            return Err(LayoutError::ChapterTooLarge);
+        }
+        if illustrations.len() > MAX_CHAPTER_LINES {
             return Err(LayoutError::ChapterTooLarge);
         }
         // Keep a small chapter's shaped paragraphs across relayout, without
@@ -360,6 +439,7 @@ impl Paginator {
                     off: 0,
                 },
                 lines: Vec::new(),
+                illustrations: Vec::new(),
             }],
             missing_glyphs: 0,
         };
@@ -369,8 +449,22 @@ impl Paginator {
         let metrics = Metrics::new(page.font_size, page.line_height);
         let mut scratch = Buffer::new_empty(metrics);
         let attrs = Attrs::new().family(Family::SansSerif);
+        let mut anchors = illustrations
+            .iter()
+            .copied()
+            .filter(|item| item.before_para as usize <= paragraphs.len())
+            .collect::<Vec<_>>();
+        anchors.sort_by_key(|anchor| (anchor.before_para, anchor.ordinal));
+        let mut illustrations = anchors.into_iter().peekable();
 
         for (para, paragraph) in paragraphs.iter().enumerate() {
+            while illustrations
+                .peek()
+                .is_some_and(|item| item.before_para as usize == para)
+            {
+                let item = illustrations.next().expect("checked inline image");
+                result.place_illustration(item, &mut y, page);
+            }
             let buffer = if reuse_paragraphs {
                 if self.paragraph_buffers.len() == para {
                     self.paragraph_buffers.push(Buffer::new_empty(metrics));
@@ -421,6 +515,7 @@ impl Paginator {
                     result.pages.push(Page {
                         start: loc,
                         lines: Vec::new(),
+                        illustrations: Vec::new(),
                     });
                     y = 0.0;
                 }
@@ -462,6 +557,9 @@ impl Paginator {
                     });
                 y += run.line_height;
             }
+        }
+        for item in illustrations {
+            result.place_illustration(item, &mut y, page);
         }
         if paragraphs.is_empty() {
             result.paragraph_lengths.push(0);

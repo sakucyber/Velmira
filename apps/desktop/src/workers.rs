@@ -2,7 +2,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::egui;
 use std::{path::PathBuf, sync::Arc, thread, time::Instant};
 use vm_core::{ImportedText, Loc};
-use vm_text::{PageBox, PageLayout, Paginator, RasterPage};
+use vm_text::{IllustrationAnchor, PageBox, PageLayout, Paginator, RasterPage};
 
 pub const CJK_FONT: &[u8] = include_bytes!("../assets/VelmiraCJK-Regular.ttf");
 
@@ -18,6 +18,7 @@ pub enum LayoutCommand {
     Reflow {
         chapter: u32,
         paragraphs: Arc<[String]>,
+        illustrations: Arc<[IllustrationAnchor]>,
         page: PageBox,
         position: Flip,
         color: [u8; 4],
@@ -75,6 +76,7 @@ impl LayoutWorker {
                             LayoutCommand::Reflow {
                                 chapter,
                                 paragraphs,
+                                illustrations,
                                 page,
                                 position,
                                 color,
@@ -83,7 +85,13 @@ impl LayoutWorker {
                                 layout = None;
                                 layout = Some(Arc::new(
                                     paginator
-                                        .paginate(chapter, &paragraphs, page)
+                                        .paginate_with_illustrations(
+                                            chapter,
+                                            &paragraphs,
+                                            page,
+                                            false,
+                                            &illustrations,
+                                        )
                                         .map_err(|error| error.to_string())?,
                                 ));
                                 (

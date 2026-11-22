@@ -6,6 +6,7 @@ mod database;
 mod illustrations;
 mod legacy;
 mod reading_marks;
+mod replication;
 
 use std::{path::PathBuf, thread};
 
@@ -18,6 +19,7 @@ pub use covers::CoverSize;
 pub use illustrations::{Illustration, IllustrationImage};
 pub use legacy::MigrationReport;
 pub use reading_marks::{Annotation, AnnotationColor, Bookmark};
+pub use replication::Replication;
 
 const COMMAND_CAPACITY: usize = 16;
 const EVENT_CAPACITY: usize = 16;
@@ -42,6 +44,8 @@ pub enum Error {
     Invalid(String),
     #[error("The annotation changed; reload it before saving or deleting")]
     AnnotationConflict,
+    #[error("Synchronization: {0}")]
+    Sync(#[from] vm_sync::SyncError),
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -68,12 +72,22 @@ pub enum ShelfSort {
     LastRead,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingStatus {
+    #[default]
+    All,
+    Unread,
+    Reading,
+    LastChapter,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ShelfFilter {
     pub status: ShelfStatus,
     pub format: Option<BookFormat>,
     pub query: String,
     pub sort: ShelfSort,
+    pub reading: ReadingStatus,
 }
 
 #[derive(Debug)]
