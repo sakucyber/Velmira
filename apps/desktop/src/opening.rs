@@ -19,9 +19,13 @@ impl Opening {
         }
     }
 
-    pub fn frame(opening: &mut Option<Self>, ctx: &egui::Context, ready: bool) -> Option<Reveal> {
+    pub fn frame(
+        opening: &mut Option<Self>,
+        ctx: &egui::Context,
+        ready: bool,
+        screen: Rect,
+    ) -> Option<Reveal> {
         let open = opening.as_mut().filter(|open| open.loaded && ready)?;
-        let screen = ctx.screen_rect();
         if !screen.is_positive() {
             return None;
         }
@@ -53,8 +57,8 @@ impl Opening {
     }
 }
 
-pub fn scene(ctx: &egui::Context, id: Id, enabled: bool) -> Ui {
-    let mut builder = UiBuilder::new().max_rect(ctx.screen_rect());
+pub fn scene(ctx: &egui::Context, id: Id, enabled: bool, bounds: Rect) -> Ui {
+    let mut builder = UiBuilder::new().max_rect(bounds);
     if !enabled {
         let mut style = (*ctx.style()).clone();
         style.visuals.disabled_alpha = 1.0;

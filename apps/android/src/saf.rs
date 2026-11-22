@@ -56,15 +56,87 @@ pub fn remove_import(path: &Path) {
     }
 }
 
-pub fn set_reading_book(app: &AndroidApp, reading: bool) -> Result<(), String> {
+pub fn set_handles_back(app: &AndroidApp, enabled: bool) -> Result<(), String> {
     with_activity(app, |env, activity| {
         env.call_method(
             activity,
-            jni_str!("setReadingBook"),
+            jni_str!("setHandlesBack"),
             jni_sig!("(Z)V"),
-            &[JValue::Bool(reading)],
+            &[JValue::Bool(enabled)],
         )?
         .v()
+    })
+}
+
+pub fn safe_insets(app: &AndroidApp) -> Result<Option<[u16; 4]>, String> {
+    let packed = with_activity(app, |env, activity| {
+        env.call_method(activity, jni_str!("getSafeInsets"), jni_sig!("()J"), &[])?
+            .j()
+    })?;
+    Ok((packed < 0).then(|| {
+        let pixels = packed as u64;
+        [
+            pixels as u16,
+            (pixels >> 16) as u16,
+            (pixels >> 32) as u16,
+            ((pixels >> 48) & 0x7fff) as u16,
+        ]
+    }))
+}
+
+pub fn set_dark_system_bar_icons(app: &AndroidApp, dark: bool) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            jni_str!("setDarkSystemBarIcons"),
+            jni_sig!("(Z)V"),
+            &[JValue::Bool(dark)],
+        )?
+        .v()
+    })
+}
+
+pub fn edit_field(
+    app: &AndroidApp,
+    title: &str,
+    value: &str,
+    kind: i32,
+    limit: i32,
+) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        let title = env.new_string(title)?;
+        let value = env.new_string(value)?;
+        env.call_method(
+            activity,
+            jni_str!("editField"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;II)V"),
+            &[
+                JValue::Object(title.as_ref()),
+                JValue::Object(value.as_ref()),
+                JValue::Int(kind),
+                JValue::Int(limit),
+            ],
+        )?
+        .v()
+    })
+}
+
+pub fn take_field(app: &AndroidApp) -> Result<Option<Option<String>>, String> {
+    with_activity(app, |env, activity| {
+        let text = env
+            .call_method(
+                activity,
+                jni_str!("takeField"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let text = env.cast_local::<JString>(text)?;
+        if text.is_null() {
+            return Ok(None);
+        }
+        let value = text.try_to_string(env)?;
+        Ok(Some(value.strip_prefix("ok\n").map(str::to_owned)))
     })
 }
 

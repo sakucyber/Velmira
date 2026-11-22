@@ -27,6 +27,8 @@ pub struct Comic {
     transition: Option<PageTransition>,
     scroll: f32,
     fit_width: bool,
+    #[cfg(target_os = "android")]
+    tools_requested: bool,
 }
 
 impl Comic {
@@ -58,6 +60,8 @@ impl Comic {
             transition: None,
             scroll: 0.0,
             fit_width: false,
+            #[cfg(target_os = "android")]
+            tools_requested: false,
         })
     }
 
@@ -155,13 +159,45 @@ impl Comic {
         ready
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, chinese: bool) -> Option<(String, u32)> {
+    #[cfg(target_os = "android")]
+    pub fn title(&self) -> &str {
+        self.summary.as_ref().map_or("", |book| &book.title)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn take_tools_request(&mut self) -> bool {
+        std::mem::take(&mut self.tools_requested)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn fit_mode_label(&self) -> &'static str {
+        if self.fit_width {
+            "适页"
+        } else {
+            "适宽"
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn toggle_fit_mode(&mut self) {
+        self.fit_width = !self.fit_width;
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        chinese: bool,
+        #[cfg(target_os = "android")] blocked: bool,
+        #[cfg(target_os = "android")] tap_area: Rect,
+    ) -> Option<(String, u32)> {
         let book = self.summary.as_ref()?;
         let total_pages = book.chapter_count;
         let tr = |zh: &'static str, en: &'static str| if chinese { zh } else { en };
+        #[cfg(not(target_os = "android"))]
         ui.add(egui::Label::new(egui::RichText::new(&book.title).strong().size(20.0)).truncate());
         let busy = self.pending.is_some() || self.decoding.is_some() || self.pending_page.is_some();
         let (mut previous, mut next) = (false, false);
+        #[cfg(not(target_os = "android"))]
         ui.horizontal_wrapped(|ui| {
             previous = ui
                 .add_enabled(
@@ -180,7 +216,9 @@ impl Comic {
             ui.selectable_value(&mut self.fit_width, false, tr("适页", "Fit page"));
             ui.selectable_value(&mut self.fit_width, true, tr("适宽", "Fit width"));
         });
-        if ui.is_enabled() && !busy && !ui.ctx().wants_keyboard_input() {
+        #[cfg(not(target_os = "android"))]
+        let blocked = false;
+        if ui.is_enabled() && !blocked && !busy && !ui.ctx().wants_keyboard_input() {
             (previous, next) = ui.input(|state| {
                 (
                     previous
@@ -193,11 +231,41 @@ impl Comic {
             });
         }
         if self.texture.is_some() {
+            #[cfg(not(target_os = "android"))]
             let (left, right) = self.show_page(
                 ui,
                 !busy && self.page > 0,
                 !busy && self.page + 1 < total_pages,
             );
+            #[cfg(target_os = "android")]
+            let (left, right) = {
+                let area = Vec2::new(
+                    ui.available_width(),
+                    (ui.available_height() - 34.0).max(0.0),
+                );
+                let (page, _) = ui.allocate_exact_size(area, egui::Sense::hover());
+                let mut page_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt("comic-canvas")
+                        .max_rect(page),
+                );
+                page_ui.set_clip_rect(page);
+                let actions = self.show_page(
+                    &mut page_ui,
+                    !blocked && !busy && self.page > 0,
+                    !blocked && !busy && self.page + 1 < total_pages,
+                    (!blocked).then_some(tap_area),
+                );
+                ui.centered_and_justified(|ui| {
+                    let p = crate::theme::palette(ui.visuals().dark_mode);
+                    ui.label(
+                        egui::RichText::new(format!("{} / {total_pages}", self.page + 1))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                });
+                actions
+            };
             previous |= left;
             next |= right;
         } else if busy {
@@ -216,7 +284,13 @@ impl Comic {
         Some((self.summary.as_ref()?.id.clone(), target))
     }
 
-    fn show_page(&mut self, ui: &mut egui::Ui, previous: bool, next: bool) -> (bool, bool) {
+    fn show_page(
+        &mut self,
+        ui: &mut egui::Ui,
+        previous: bool,
+        next: bool,
+        #[cfg(target_os = "android")] tap_area: Option<Rect>,
+    ) -> (bool, bool) {
         let Some(image) = &self.texture else {
             return (false, false);
         };
@@ -268,17 +342,29 @@ impl Comic {
                             egui::pos2(rect.right() - edge, rect.top()),
                             rect.max,
                         );
+                        #[cfg(target_os = "android")]
+                        let touch_clip = tap_area.unwrap_or(Rect::NOTHING);
+                        #[cfg(not(target_os = "android"))]
+                        let touch_clip = ui.clip_rect();
                         let click = |enabled, rect: Rect, id| {
                             enabled
+                                && rect.intersects(touch_clip)
                                 && ui
                                     .interact(
-                                        rect.intersect(ui.clip_rect()),
+                                        rect.intersect(ui.clip_rect()).intersect(touch_clip),
                                         ui.id().with(id),
                                         egui::Sense::click(),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                                     .clicked()
                         };
+                        #[cfg(target_os = "android")]
+                        {
+                            let center =
+                                Rect::from_x_y_ranges(left.right()..=right.left(), rect.y_range());
+                            self.tools_requested |=
+                                click(tap_area.is_some(), center, "comic-tools");
+                        }
                         (
                             click(previous, left, "comic-prev"),
                             click(next, right, "comic-next"),

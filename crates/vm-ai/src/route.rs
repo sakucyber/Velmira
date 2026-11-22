@@ -143,6 +143,14 @@ impl<E> Failure<E> {
         self
     }
 
+    pub(crate) fn map_error<T>(self, map: impl FnOnce(E) -> T) -> Failure<T> {
+        Failure {
+            error: map(self.error),
+            disposition: self.disposition,
+            retry_after: self.retry_after,
+        }
+    }
+
     fn new(error: E, disposition: Disposition) -> Self {
         Self {
             error,

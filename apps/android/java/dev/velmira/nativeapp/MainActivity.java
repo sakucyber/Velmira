@@ -1,12 +1,29 @@
 package dev.velmira.nativeapp;
 
 import android.app.NativeActivity;
+import android.app.AlertDialog;
 import android.content.ContentResolver;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
 import android.provider.OpenableColumns;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.util.Log;
+import android.view.DisplayCutout;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
+import android.widget.EditText;
+import android.widget.FrameLayout;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -29,14 +46,125 @@ public final class MainActivity extends NativeActivity {
     // JNI invokes begin/take from the native thread. Activity callbacks run on the UI thread.
     private boolean importing;
     private boolean destroyed;
-    private boolean readingBook;
+    private boolean handlesBack;
     private boolean readerBack;
     private File preparedBook;
     private String importResult;
+    private volatile String textResult;
+    private AlertDialog textDialog;
+    private boolean lightTheme;
+    private volatile long safeInsets;
 
-    public synchronized void setReadingBook(boolean reading) {
-        readingBook = reading;
-        if (!reading) {
+    @Override
+    public void onCreate(Bundle state) {
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+        } else {
+            window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        }
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            window.setAttributes(attributes);
+            window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.setStatusBarContrastEnforced(false);
+            window.setNavigationBarContrastEnforced(false);
+        }
+        super.onCreate(state);
+        View decor = window.getDecorView();
+        decor.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsets onApplyWindowInsets(View view, WindowInsets insets) {
+                updateSafeInsets(insets);
+                return view.onApplyWindowInsets(insets);
+            }
+        });
+        WindowInsets initial = decor.getRootWindowInsets();
+        if (initial != null) {
+            updateSafeInsets(initial);
+        }
+        decor.requestApplyInsets();
+        if (Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, new OnBackInvokedCallback() {
+                    @Override
+                    public void onBackInvoked() {
+                        handleBack();
+                    }
+                });
+        }
+    }
+
+    private void updateSafeInsets(WindowInsets insets) {
+        int left, top, right, bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Insets safe = insets.getInsets(WindowInsets.Type.systemBars()
+                | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
+            left = safe.left;
+            top = safe.top;
+            right = safe.right;
+            bottom = safe.bottom;
+        } else {
+            left = insets.getSystemWindowInsetLeft();
+            top = insets.getSystemWindowInsetTop();
+            right = insets.getSystemWindowInsetRight();
+            bottom = insets.getSystemWindowInsetBottom();
+            if (Build.VERSION.SDK_INT >= 28) {
+                DisplayCutout cutout = insets.getDisplayCutout();
+                if (cutout != null) {
+                    left = Math.max(left, cutout.getSafeInsetLeft());
+                    top = Math.max(top, cutout.getSafeInsetTop());
+                    right = Math.max(right, cutout.getSafeInsetRight());
+                    bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                }
+            }
+        }
+        // Publish all four physical-pixel insets together, including a valid all-zero result.
+        safeInsets = Long.MIN_VALUE | (Math.min(bottom, 0x7fffL) << 48)
+            | (Math.min(right, 0xffffL) << 32) | (Math.min(top, 0xffffL) << 16)
+            | Math.min(left, 0xffffL);
+    }
+
+    public long getSafeInsets() {
+        return safeInsets;
+    }
+
+    public void setDarkSystemBarIcons(boolean dark) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                lightTheme = dark;
+                Window window = getWindow();
+                if (Build.VERSION.SDK_INT >= 30) {
+                    WindowInsetsController controller = window.getInsetsController();
+                    if (controller != null) {
+                        int mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                        controller.setSystemBarsAppearance(dark ? mask : 0, mask);
+                    }
+                } else {
+                    View decor = window.getDecorView();
+                    int mask = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+                    if (Build.VERSION.SDK_INT >= 26) {
+                        mask |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                    }
+                    int flags = decor.getSystemUiVisibility() & ~mask;
+                    decor.setSystemUiVisibility(dark ? flags | mask : flags);
+                }
+            }
+        });
+    }
+
+    public synchronized void setHandlesBack(boolean enabled) {
+        handlesBack = enabled;
+        if (!enabled) {
             readerBack = false;
         }
     }
@@ -47,10 +175,79 @@ public final class MainActivity extends NativeActivity {
         return back;
     }
 
+    public void editField(String title, String value, int kind, int limit) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                showTextField(title, value, kind, limit);
+            }
+        });
+    }
+
+    private void showTextField(String title, String value, int kind, int limit) {
+        if (isFinishing() || isDestroyed() || textDialog != null) {
+            textResult = "cancel";
+            return;
+        }
+        EditText field = new EditText(this);
+        int type = InputType.TYPE_CLASS_TEXT;
+        if (kind == 1) {
+            type |= InputType.TYPE_TEXT_VARIATION_URI;
+        } else if (kind == 2) {
+            type |= InputType.TYPE_TEXT_VARIATION_PASSWORD;
+        } else if (kind == 3) {
+            type |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        }
+        field.setSingleLine(kind != 3);
+        field.setInputType(type);
+        field.setFilters(new InputFilter[] { new InputFilter.LengthFilter(limit) });
+        field.setText(value);
+        field.setSelection(field.length());
+        FrameLayout container = new FrameLayout(this);
+        int padding = Math.round(24 * getResources().getDisplayMetrics().density);
+        container.setPadding(padding, 0, padding, 0);
+        container.addView(field, new FrameLayout.LayoutParams(-1, -2));
+        String[] reply = { "cancel" };
+        int dialogTheme = lightTheme
+            ? android.R.style.Theme_Material_Light_Dialog_Alert
+            : android.R.style.Theme_Material_Dialog_Alert;
+        textDialog = new AlertDialog.Builder(this, dialogTheme)
+            .setTitle(title)
+            .setView(container)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定", new DialogInterface.OnClickListener() {
+                @Override
+                public void onClick(DialogInterface dialog, int which) {
+                    reply[0] = "ok\n" + field.getText();
+                }
+            })
+            .create();
+        textDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface dialog) {
+                textDialog = null;
+                textResult = reply[0];
+            }
+        });
+        field.requestFocus();
+        textDialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        textDialog.show();
+    }
+
+    public String takeField() {
+        String value = textResult;
+        textResult = null;
+        return value;
+    }
+
     @Override
     public void onBackPressed() {
+        handleBack();
+    }
+
+    private void handleBack() {
         synchronized (this) {
-            if (readingBook) {
+            if (handlesBack) {
                 readerBack = true;
                 return;
             }
@@ -135,6 +332,9 @@ public final class MainActivity extends NativeActivity {
 
     @Override
     protected void onDestroy() {
+        if (textDialog != null) {
+            textDialog.dismiss();
+        }
         File unclaimedBook;
         synchronized (this) {
             destroyed = true;

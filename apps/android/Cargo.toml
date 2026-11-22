@@ -1,6 +1,6 @@
 [package]
 name = "velmira-android"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -16,8 +16,10 @@ jni = "0.22.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+vm-ai = { path = "../../crates/vm-ai" }
 vm-core = { path = "../../crates/vm-core" }
 vm-format = { path = "../../crates/vm-format" }
 vm-media = { path = "../../crates/vm-media" }
 vm-store = { path = "../../crates/vm-store" }
 vm-text = { path = "../../crates/vm-text" }
+zeroize = "1"

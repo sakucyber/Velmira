@@ -4,6 +4,7 @@ mod comic;
 mod covers;
 mod generate;
 mod illustrations;
+mod model_settings;
 mod opening;
 mod pairing_cli;
 mod preferences;
@@ -1830,7 +1831,7 @@ impl App {
                 self.close_reader();
                 ctx.request_repaint();
                 self.show_scene(
-                    &mut opening::scene(ctx, egui::Id::new("shelf-scene"), true),
+                    &mut opening::scene(ctx, egui::Id::new("shelf-scene"), true, ctx.screen_rect()),
                     View::Shelf,
                 );
                 return;
@@ -1838,7 +1839,7 @@ impl App {
             self.opening = None;
         }
         let preparing = !ready && self.opening.as_ref().is_some_and(|open| open.loaded);
-        let reveal = Opening::frame(&mut self.opening, ctx, ready);
+        let reveal = Opening::frame(&mut self.opening, ctx, ready, ctx.screen_rect());
         let shown = if preparing || reveal.is_some() {
             View::Shelf
         } else {
@@ -1850,7 +1851,12 @@ impl App {
             self.view = shown;
         }
         if shown == View::Shelf {
-            let mut ui = opening::scene(ctx, egui::Id::new("shelf-scene"), reveal.is_none());
+            let mut ui = opening::scene(
+                ctx,
+                egui::Id::new("shelf-scene"),
+                reveal.is_none(),
+                ctx.screen_rect(),
+            );
             let fade = ((now - self.view_entered) / 0.16).clamp(0.0, 1.0) as f32;
             if fade < 1.0 && !preparing && reveal.is_none() {
                 ui.multiply_opacity(0.72 + 0.28 * fade);
@@ -1863,6 +1869,7 @@ impl App {
                 ctx,
                 egui::Id::new("reader-scene"),
                 !preparing && reveal.is_none(),
+                ctx.screen_rect(),
             );
             if preparing {
                 ui.set_invisible();

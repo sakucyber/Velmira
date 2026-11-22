@@ -332,6 +332,10 @@ impl Provider {
     }
 }
 
+pub fn validate_endpoint(input: &str) -> Result<(), Error> {
+    parse_endpoint(input).map(|_| ())
+}
+
 fn parse_endpoint(input: &str) -> Result<Url, Error> {
     let mut base = Url::parse(input.trim()).map_err(|_| Error::Endpoint)?;
     let loopback = match base.host() {

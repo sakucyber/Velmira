@@ -13,6 +13,8 @@ use vm_store::{AnnotationColor, Bookmark, Command, CoverSize, Event, SearchHit, 
 use crate::{
     comic::Comic,
     covers::ShelfCovers,
+    mobile_ui::{self, BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT},
+    models::Models,
     opening::{self, Opening},
     preferences::{Preferences, SavedPreferences},
     reader::Reader,
@@ -21,11 +23,22 @@ use crate::{
     workers::{self, ImportBook, LayoutWorker},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Drawer {
     Contents,
     Bookmarks,
     Search,
     Settings,
+    Models,
+    Assistant,
+    Annotation,
+}
+
+#[derive(Clone, Copy)]
+enum Field {
+    Contents,
+    Search,
+    Note,
 }
 
 type ParsedBook = (PathBuf, Result<ImportBook, String>);
@@ -47,9 +60,18 @@ pub(crate) struct Library {
     importing: Option<PathBuf>,
     notice: Option<String>,
     drawer: Option<Drawer>,
+    drawn_drawer: Option<Drawer>,
+    drawer_parent: Option<Drawer>,
+    controls: bool,
+    handles_back: bool,
+    dark_bar_icons: Option<bool>,
+    insets: Option<[u16; 4]>,
+    text_field: Option<Field>,
+    models: Models,
     bookmarks: Vec<Bookmark>,
     more_bookmarks: bool,
     filter: String,
+    focus_chapter: bool,
     search: String,
     hits: Vec<SearchHit>,
     mark: Option<(Loc, u32, String, AnnotationColor)>,
@@ -97,9 +119,18 @@ impl Library {
             importing: None,
             notice: None,
             drawer: None,
+            drawn_drawer: None,
+            drawer_parent: None,
+            controls: false,
+            handles_back: false,
+            dark_bar_icons: None,
+            insets: None,
+            text_field: None,
+            models: Models::new(data_dir),
             bookmarks: Vec::new(),
             more_bookmarks: false,
             filter: String::new(),
+            focus_chapter: false,
             search: String::new(),
             hits: Vec::new(),
             mark: None,
@@ -205,7 +236,7 @@ impl Library {
             })
         {
             self.opening = Some(Opening::new(book_id, origin));
-            let _ = saf::set_reading_book(&self.android, true);
+            self.controls = false;
             self.notice = None;
         }
     }
@@ -392,28 +423,41 @@ impl Library {
         self.reader.close();
         self.comic.close();
         self.drawer = None;
+        self.drawer_parent = None;
+        self.drawn_drawer = None;
+        self.controls = false;
         self.mark = None;
         self.notice = None;
-        let _ = saf::set_reading_book(&self.android, false);
     }
 
     fn shelf(&mut self, ui: &mut egui::Ui) {
         let p = theme::palette(self.night);
         let importing = self.picking || self.parsing.is_some() || self.importing.is_some();
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("书架");
-            if ui
-                .add_enabled(
-                    self.ready && !importing,
-                    egui::Button::new(RichText::new("导入书籍").color(p.on_accent))
-                        .fill(p.accent)
-                        .min_size(egui::vec2(84.0, 38.0)),
-                )
-                .clicked()
-            {
-                self.begin_import();
-            }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("书架").size(29.0).strong().color(p.ink));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([54.0, 48.0], egui::Button::new("设置").frame(false))
+                    .clicked()
+                {
+                    self.set_drawer(Drawer::Settings);
+                }
+                if ui
+                    .add_enabled(
+                        self.ready && !importing,
+                        egui::Button::new(RichText::new("＋ 导入").color(p.on_accent))
+                            .fill(p.accent)
+                            .min_size(egui::vec2(80.0, 48.0)),
+                    )
+                    .clicked()
+                {
+                    self.begin_import();
+                }
+            });
         });
+        if let Some(notice) = &self.notice {
+            ui.label(RichText::new(notice).color(p.danger));
+        }
         ui.add_space(12.0);
         if importing {
             ui.spinner();
@@ -478,304 +522,700 @@ impl Library {
         }
     }
 
-    fn drawer(&mut self, ctx: &egui::Context) {
-        let Some(mut tab) = self.drawer.take() else {
-            return;
-        };
-        let mut close = false;
-        let mut jump = None;
-        let response = egui::Modal::new(egui::Id::new("reader-drawer"))
-            .area(
-                egui::Modal::default_area(egui::Id::new("reader-drawer"))
-                    .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 52.0)),
-            )
-            .show(ctx, |ui| {
-                let width = (ctx.screen_rect().width() - 34.0).clamp(175.0, 340.0);
-                ui.set_width(width);
-                ui.horizontal_wrapped(|ui| {
-                    if self.reader.is_open() {
-                        if ui
-                            .selectable_label(matches!(tab, Drawer::Contents), "目录")
-                            .clicked()
-                        {
-                            tab = Drawer::Contents;
-                        }
-                        if ui
-                            .selectable_label(matches!(tab, Drawer::Bookmarks), "书签")
-                            .clicked()
-                        {
-                            tab = Drawer::Bookmarks;
-                            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
-                                self.send(Command::ListBookmarks { book_id, offset: 0 });
-                            }
-                        }
-                        if ui
-                            .selectable_label(matches!(tab, Drawer::Search), "搜索")
-                            .clicked()
-                        {
-                            tab = Drawer::Search;
-                        }
-                    }
-                    if ui
-                        .selectable_label(matches!(tab, Drawer::Settings), "设置")
-                        .clicked()
-                    {
-                        tab = Drawer::Settings;
-                    }
-                    close = ui.button("关闭").clicked();
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .max_height((ctx.screen_rect().height() - 180.0).max(100.0))
-                    .show(ui, |ui| match tab {
-                        Drawer::Contents => {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.filter)
-                                    .hint_text("筛选目录")
-                                    .char_limit(100),
-                            );
-                            let filter = self.filter.trim().to_lowercase();
-                            let current = self.reader.chapter_index();
-                            for (index, title) in self.reader.toc().iter().enumerate() {
-                                if (filter.is_empty() || title.to_lowercase().contains(&filter))
-                                    && ui
-                                        .add_sized(
-                                            [width, 39.0],
-                                            egui::Button::selectable(
-                                                index as u32 == current,
-                                                title,
-                                            )
-                                            .truncate(),
-                                        )
-                                        .clicked()
-                                {
-                                    jump = Some((
-                                        Loc {
-                                            chapter: index as u32,
-                                            ..Loc::default()
-                                        },
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                        Drawer::Bookmarks => {
-                            if let (Some(id), Some(loc)) =
-                                (self.reader.book_id(), self.reader.loc())
-                            {
-                                if ui.button("收藏当前位置").clicked() {
-                                    self.send(Command::AddBookmark {
-                                        book_id: id.to_owned(),
-                                        loc,
-                                        label: None,
-                                    });
-                                }
-                            }
-                            for bookmark in &self.bookmarks {
-                                if ui
-                                    .button(format!(
-                                        "第 {} 章 · 第 {} 段",
-                                        bookmark.loc.chapter + 1,
-                                        bookmark.loc.para + 1
-                                    ))
-                                    .clicked()
-                                {
-                                    jump = Some((bookmark.loc, false));
-                                }
-                            }
-                            if self.more_bookmarks && ui.button("更多书签").clicked() {
-                                if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
-                                    self.send(Command::ListBookmarks {
-                                        book_id,
-                                        offset: self.bookmarks.len() as u32,
-                                    });
-                                }
-                            }
-                        }
-                        Drawer::Search => {
-                            let input = ui.add(
-                                egui::TextEdit::singleline(&mut self.search)
-                                    .hint_text("搜索正文")
-                                    .char_limit(120),
-                            );
-                            if ui.button("搜索").clicked()
-                                || input.lost_focus()
-                                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
-                                    let query = self.search.trim().to_owned();
-                                    let chapter = (query.chars().count() == 1)
-                                        .then(|| self.reader.chapter_index());
-                                    self.hits.clear();
-                                    self.send(Command::Search {
-                                        book_id,
-                                        query,
-                                        chapter,
-                                        limit: 50,
-                                    });
-                                }
-                            }
-                            for hit in &self.hits {
-                                if ui.button(&hit.excerpt).clicked() {
-                                    jump = Some((hit.loc, true));
-                                }
-                            }
-                        }
-                        Drawer::Settings => {
-                            if ui.checkbox(&mut self.night, "夜间模式").changed() {
-                                theme::apply(ctx, self.night);
-                            }
-                            let (mut font, paper) = self.reader.preferences();
-                            let mut paper = paper;
-                            let previous = paper;
-                            let change = ui
-                                .add(
-                                    egui::Slider::new(&mut font, 12.0..=48.0)
-                                        .text("字号")
-                                        .step_by(0.1),
-                                )
-                                .changed();
-                            ui.horizontal_wrapped(|ui| {
-                                ui.selectable_value(&mut paper, None, "随系统界面");
-                                ui.selectable_value(&mut paper, Some("paper"), "纸色");
-                                ui.selectable_value(&mut paper, Some("light"), "浅色");
-                                ui.selectable_value(&mut paper, Some("dark"), "深色");
-                            });
-                            if change || previous != paper {
-                                self.reader.apply_preferences(font, paper);
-                            }
-                        }
-                    });
-            });
-        if let Some((loc, search)) = jump {
-            if search {
-                self.reader.highlight_search(loc, self.search.trim());
+    fn set_drawer(&mut self, tab: Drawer) {
+        if tab == Drawer::Contents && self.drawer != Some(tab) {
+            self.focus_chapter = true;
+        }
+        if tab == Drawer::Bookmarks && self.drawer != Some(Drawer::Bookmarks) {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                self.send(Command::ListBookmarks { book_id, offset: 0 });
             }
-            self.jump(loc);
-        } else if !close && !response.should_close() {
-            self.drawer = Some(tab);
+        }
+        if tab == Drawer::Assistant {
+            self.models.prepare(
+                self.reader
+                    .selected_text()
+                    .or_else(|| self.reader.current_paragraph()),
+            );
+        }
+        self.drawer = Some(tab);
+        self.drawer_parent = None;
+    }
+
+    fn dismiss_drawer(&mut self) {
+        if self.drawer == Some(Drawer::Annotation) {
+            self.mark = None;
+        }
+        self.drawer = self.drawer_parent.take();
+    }
+
+    fn edit_field(&mut self, field: Field) {
+        let (title, value, mode, limit) = match field {
+            Field::Contents => ("筛选目录", self.filter.as_str(), 0, 100),
+            Field::Search => ("搜索正文", self.search.as_str(), 0, 120),
+            Field::Note => (
+                "添加笔记",
+                self.mark.as_ref().map_or("", |mark| mark.2.as_str()),
+                3,
+                3000,
+            ),
+        };
+        match saf::edit_field(&self.android, title, value, mode, limit) {
+            Ok(()) => self.text_field = Some(field),
+            Err(error) => self.notice = Some(error),
         }
     }
 
-    fn edit_mark(&mut self, ctx: &egui::Context) {
-        let Some((loc, end_off, mut note, mut color)) = self.mark.take() else {
+    fn poll_field(&mut self, ctx: &egui::Context) {
+        let Some(field) = self.text_field else {
             return;
         };
-        let Some(book_id) = self.reader.book_id().map(str::to_owned) else {
+        match saf::take_field(&self.android) {
+            Ok(None) => ctx.request_repaint_after(Duration::from_millis(80)),
+            Ok(Some(value)) => {
+                self.text_field = None;
+                if let Some(value) = value {
+                    match field {
+                        Field::Contents => {
+                            self.filter = value;
+                            self.focus_chapter = true;
+                        }
+                        Field::Search => {
+                            self.search = value;
+                            self.search_book();
+                        }
+                        Field::Note => {
+                            if let Some(mark) = &mut self.mark {
+                                mark.2 = value;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                self.text_field = None;
+                self.notice = Some(error);
+            }
+        }
+    }
+
+    fn search_book(&mut self) {
+        let query = self.search.trim().to_owned();
+        self.hits.clear();
+        if !query.is_empty() {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                let chapter = (query.chars().count() == 1).then(|| self.reader.chapter_index());
+                self.send(Command::Search {
+                    book_id,
+                    query,
+                    chapter,
+                    limit: 50,
+                });
+            }
+        }
+    }
+
+    fn drawer(&mut self, ctx: &egui::Context, safe: egui::Rect) {
+        let active = self.drawer.is_some();
+        let progress = ctx.animate_bool_with_time_and_easing(
+            egui::Id::new("reader-sheet-motion"),
+            active,
+            0.23,
+            egui::emath::easing::cubic_out,
+        );
+        if active || progress == 0.0 {
+            self.drawn_drawer = self.drawer;
+        }
+        let Some(tab) = self.drawn_drawer else {
             return;
         };
-        let (mut save, mut cancel) = (false, false);
-        let response = egui::Modal::new(egui::Id::new("annotation")).show(ctx, |ui| {
-            ui.set_width((ctx.screen_rect().width() - 58.0).clamp(170.0, 330.0));
-            ui.heading("批注");
-            ui.horizontal_wrapped(|ui| {
-                for (value, name) in [
-                    (AnnotationColor::Yellow, "黄"),
-                    (AnnotationColor::Green, "绿"),
-                    (AnnotationColor::Blue, "蓝"),
-                    (AnnotationColor::Pink, "粉"),
-                ] {
-                    ui.selectable_value(&mut color, value, name);
+        let p = theme::palette(self.night);
+        let close = mobile_ui::sheet(ctx, safe, progress, active, p.surface, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            let (handle, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(handle.center(), egui::vec2(32.0, 3.0)),
+                2,
+                p.line,
+            );
+            let tabs = self.reader.is_open()
+                && matches!(
+                    tab,
+                    Drawer::Contents | Drawer::Bookmarks | Drawer::Search | Drawer::Settings
+                );
+            let mut close = false;
+            ui.horizontal(|ui| {
+                if tabs {
+                    let width =
+                        ((ui.available_width() - 4.0 * ui.spacing().item_spacing.x) / 5.0).max(1.0);
+                    for (candidate, title) in [
+                        (Drawer::Contents, "目录"),
+                        (Drawer::Bookmarks, "书签"),
+                        (Drawer::Search, "搜索"),
+                        (Drawer::Settings, "设置"),
+                    ] {
+                        let active = candidate == tab;
+                        let text = RichText::new(title).size(14.0).color(if active {
+                            p.accent
+                        } else {
+                            p.ink
+                        });
+                        let button = if active {
+                            egui::Button::new(text.strong())
+                                .fill(p.accent_weak)
+                                .stroke(egui::Stroke::NONE)
+                        } else {
+                            egui::Button::new(text).frame(false)
+                        };
+                        if ui.add_sized([width, 46.0], button).clicked() {
+                            self.set_drawer(candidate);
+                        }
+                    }
+                    close = ui
+                        .add_sized(
+                            [width, 46.0],
+                            egui::Button::new(RichText::new("完成").size(14.0).color(p.accent))
+                                .frame(false),
+                        )
+                        .clicked();
+                } else {
+                    let title = match tab {
+                        Drawer::Models => "模型池",
+                        Drawer::Assistant => "阅读 AI",
+                        Drawer::Annotation => "批注",
+                        _ => "设置",
+                    };
+                    ui.label(RichText::new(title).size(21.0).strong().color(p.ink));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if self.drawer_parent.is_some() {
+                            "返回"
+                        } else {
+                            "完成"
+                        };
+                        close = ui
+                            .add_sized(
+                                [64.0, 46.0],
+                                egui::Button::new(RichText::new(label).color(p.accent))
+                                    .frame(false),
+                            )
+                            .clicked();
+                    });
                 }
             });
-            ui.add(
-                egui::TextEdit::multiline(&mut note)
-                    .desired_rows(3)
-                    .char_limit(3000)
-                    .hint_text("添加笔记"),
-            );
-            ui.horizontal(|ui| {
-                save = ui.button("保存").clicked();
-                cancel = ui.button("取消").clicked();
-            });
-        });
-        if save {
-            let value = (!note.trim().is_empty()).then(|| note.trim().to_owned());
-            if !self.send(Command::AddAnnotation {
-                book_id,
-                loc,
-                end_off,
-                note: value,
-                color,
-            }) {
-                self.mark = Some((loc, end_off, note, color));
+            ui.separator();
+            if tab == Drawer::Contents {
+                self.contents(ui);
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt(("drawer-body", tab))
+                    .max_height(ui.available_height().max(0.0))
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.drawer_content(ui, tab));
             }
-        } else if !cancel && !response.should_close() {
-            self.mark = Some((loc, end_off, note, color));
+            close
+        });
+        if close {
+            self.dismiss_drawer();
+        }
+    }
+
+    fn contents(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(self.night);
+        let label = if self.filter.trim().is_empty() {
+            "筛选目录"
+        } else {
+            self.filter.as_str()
+        };
+        if mobile_ui::list_row(ui, "filter", label, p.muted, p.surface2).clicked() {
+            self.edit_field(Field::Contents);
+        }
+        let query = self.filter.trim().to_lowercase();
+        let toc = self.reader.toc();
+        let current = self.reader.chapter_index() as usize;
+        let filtered = (!query.is_empty()).then(|| {
+            toc.iter()
+                .enumerate()
+                .filter_map(|(index, title)| title.to_lowercase().contains(&query).then_some(index))
+                .collect::<Vec<_>>()
+        });
+        let count = filtered.as_ref().map_or(toc.len(), Vec::len);
+        let mut jump = None;
+        let mut list = egui::ScrollArea::vertical()
+            .id_salt("chapter-list")
+            .max_height(ui.available_height().max(0.0))
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false]);
+        if ui.is_enabled() && std::mem::take(&mut self.focus_chapter) {
+            let row = filtered.as_ref().map_or(current, |indices| {
+                indices.partition_point(|index| *index < current)
+            });
+            list = list.vertical_scroll_offset(
+                row.saturating_sub(2) as f32 * (48.0 + ui.spacing().item_spacing.y),
+            );
+        }
+        if count == 0 {
+            ui.label(RichText::new("没有匹配章节").color(p.muted));
+        }
+        list.show_rows(ui, 48.0, count, |ui, rows| {
+            for row in rows {
+                let index = filtered.as_ref().map_or(row, |indices| indices[row]);
+                let selected = index == current;
+                if mobile_ui::list_row(
+                    ui,
+                    ("chapter", index),
+                    &toc[index],
+                    if selected { p.accent } else { p.ink },
+                    if selected {
+                        p.accent_weak
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    },
+                )
+                .clicked()
+                {
+                    jump = Some(Loc {
+                        chapter: index as u32,
+                        ..Loc::default()
+                    });
+                }
+            }
+        });
+        if let Some(loc) = jump {
+            self.jump(loc);
+            self.dismiss_drawer();
+            self.controls = false;
+        }
+    }
+
+    fn drawer_content(&mut self, ui: &mut egui::Ui, tab: Drawer) {
+        let p = theme::palette(self.night);
+        match tab {
+            Drawer::Contents => self.contents(ui),
+            Drawer::Bookmarks => {
+                if mobile_ui::list_row(
+                    ui,
+                    "new-bookmark",
+                    "＋ 收藏当前位置",
+                    p.accent,
+                    p.accent_weak,
+                )
+                .clicked()
+                {
+                    if let (Some(book_id), Some(loc)) =
+                        (self.reader.book_id().map(str::to_owned), self.reader.loc())
+                    {
+                        self.send(Command::AddBookmark {
+                            book_id,
+                            loc,
+                            label: None,
+                        });
+                    }
+                }
+                let mut jump = None;
+                if self.bookmarks.is_empty() {
+                    ui.label(RichText::new("还没有书签").color(p.muted));
+                }
+                for (index, bookmark) in self.bookmarks.iter().enumerate() {
+                    let title = format!(
+                        "第 {} 章 · 第 {} 段",
+                        bookmark.loc.chapter + 1,
+                        bookmark.loc.para + 1
+                    );
+                    if mobile_ui::list_row(
+                        ui,
+                        ("bookmark", index),
+                        &title,
+                        p.ink,
+                        egui::Color32::TRANSPARENT,
+                    )
+                    .clicked()
+                    {
+                        jump = Some(bookmark.loc);
+                    }
+                }
+                if self.more_bookmarks
+                    && mobile_ui::list_row(
+                        ui,
+                        "more-bookmarks",
+                        "加载更多书签",
+                        p.accent,
+                        p.surface2,
+                    )
+                    .clicked()
+                {
+                    if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                        self.send(Command::ListBookmarks {
+                            book_id,
+                            offset: self.bookmarks.len() as u32,
+                        });
+                    }
+                }
+                if let Some(loc) = jump {
+                    self.jump(loc);
+                    self.dismiss_drawer();
+                    self.controls = false;
+                }
+            }
+            Drawer::Search => {
+                let label = if self.search.trim().is_empty() {
+                    "输入要搜索的文字"
+                } else {
+                    self.search.as_str()
+                };
+                if mobile_ui::list_row(ui, "search", label, p.muted, p.surface2).clicked() {
+                    self.edit_field(Field::Search);
+                }
+                if !self.search.is_empty() && self.hits.is_empty() {
+                    ui.label(RichText::new("暂无匹配结果").color(p.muted));
+                }
+                let mut jump = None;
+                for (index, hit) in self.hits.iter().enumerate() {
+                    if mobile_ui::list_row(
+                        ui,
+                        ("search-hit", index),
+                        &hit.excerpt,
+                        p.ink,
+                        egui::Color32::TRANSPARENT,
+                    )
+                    .clicked()
+                    {
+                        jump = Some(hit.loc);
+                    }
+                }
+                if let Some(loc) = jump {
+                    self.reader.highlight_search(loc, self.search.trim());
+                    self.jump(loc);
+                    self.dismiss_drawer();
+                    self.controls = false;
+                }
+            }
+            Drawer::Settings => self.reader_settings(ui),
+            Drawer::Models => self.models.configure(ui, &self.android),
+            Drawer::Assistant => {
+                if self.models.assistant(ui) {
+                    self.drawer_parent = self.drawer;
+                    self.drawer = Some(Drawer::Models);
+                }
+            }
+            Drawer::Annotation => self.annotation(ui),
+        }
+    }
+
+    fn reader_settings(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(self.night);
+        let mode = if self.night {
+            "界面主题 · 夜间"
+        } else {
+            "界面主题 · 日间"
+        };
+        if mobile_ui::list_row(ui, "night", mode, p.ink, p.surface2).clicked() {
+            self.night = !self.night;
+            theme::apply(ui.ctx(), self.night);
+        }
+        if self.reader.is_open() {
+            let (mut font, mut paper) = self.reader.preferences();
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!("字号  {:.0}", font))
+                    .strong()
+                    .color(p.ink),
+            );
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                if ui.add_sized([48.0, 48.0], egui::Button::new("−")).clicked() {
+                    font -= 1.0;
+                    changed = true;
+                }
+                let width = (ui.available_width() - 52.0).max(1.0);
+                ui.spacing_mut().slider_width = width;
+                changed |= ui
+                    .add_sized(
+                        [width, 48.0],
+                        egui::Slider::new(&mut font, 12.0..=48.0)
+                            .step_by(1.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    )
+                    .changed();
+                if ui
+                    .add_sized([48.0, 48.0], egui::Button::new("＋"))
+                    .clicked()
+                {
+                    font += 1.0;
+                    changed = true;
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("阅读纸色").strong().color(p.ink));
+            let old = paper;
+            ui.horizontal(|ui| {
+                let width =
+                    ((ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0).max(1.0);
+                for (value, label) in [
+                    (None, "自动"),
+                    (Some("paper"), "暖纸"),
+                    (Some("light"), "浅色"),
+                    (Some("dark"), "深色"),
+                ] {
+                    let selected = paper == value;
+                    let fill = if selected { p.accent_weak } else { p.surface2 };
+                    let tint = if selected { p.accent } else { p.ink };
+                    if ui
+                        .add_sized(
+                            [width, 48.0],
+                            egui::Button::new(RichText::new(label).color(tint))
+                                .fill(fill)
+                                .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        paper = value;
+                    }
+                }
+            });
+            if changed || old != paper {
+                self.reader.apply_preferences(font, paper);
+            }
+        }
+        ui.add_space(12.0);
+        ui.separator();
+        if mobile_ui::list_row(ui, "model-pool", "模型池   ›", p.ink, p.surface2).clicked() {
+            self.drawer_parent = self.drawer;
+            self.drawer = Some(Drawer::Models);
+        }
+    }
+
+    fn annotation(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(self.night);
+        let Some((loc, end_off, note, color)) = &mut self.mark else {
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                (AnnotationColor::Yellow, "黄"),
+                (AnnotationColor::Green, "绿"),
+                (AnnotationColor::Blue, "蓝"),
+                (AnnotationColor::Pink, "粉"),
+            ] {
+                ui.selectable_value(color, value, label);
+            }
+        });
+        let edit = mobile_ui::list_row(
+            ui,
+            "note-text",
+            if note.is_empty() {
+                "添加笔记"
+            } else {
+                note
+            },
+            p.ink,
+            p.surface2,
+        )
+        .clicked();
+        let save = ui
+            .add_sized([90.0, 48.0], egui::Button::new("保存"))
+            .clicked();
+        if save {
+            if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                let command = Command::AddAnnotation {
+                    book_id,
+                    loc: *loc,
+                    end_off: *end_off,
+                    note: (!note.trim().is_empty()).then(|| note.trim().to_owned()),
+                    color: *color,
+                };
+                if self.send(command) {
+                    self.dismiss_drawer();
+                }
+            }
+        } else if edit {
+            self.edit_field(Field::Note);
+        }
+    }
+
+    fn reader_controls(&mut self, root: &mut egui::Ui, bounds: egui::Rect, opacity: f32) {
+        let p = theme::palette(self.night);
+        let mut top = bounds;
+        top.max.y = (top.min.y + TOP_BAR_HEIGHT).min(top.max.y);
+        let mut bottom = bounds;
+        bottom.min.y = (bottom.max.y - BOTTOM_BAR_HEIGHT).max(bottom.min.y);
+        let mut back = false;
+        for (is_top, rect) in [(true, top), (false, bottom)] {
+            let mut ui = root.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("reader-actions", is_top))
+                    .max_rect(rect.shrink2(egui::vec2(8.0, 3.0))),
+            );
+            ui.set_clip_rect(rect);
+            ui.set_opacity(opacity);
+            if !self.controls || self.drawer.is_some() || self.drawn_drawer.is_some() {
+                ui.disable();
+            }
+            let painter = ui.painter();
+            painter.rect_filled(rect, 0, p.surface);
+            if is_top {
+                painter.line_segment(
+                    [rect.left_bottom(), rect.right_bottom()],
+                    egui::Stroke::new(1.0_f32, p.line),
+                );
+                ui.horizontal(|ui| {
+                    back = ui
+                        .add_sized([70.0, 48.0], egui::Button::new("‹ 书架").frame(false))
+                        .clicked();
+                    let title = if self.reader.is_open() {
+                        self.reader.book_title()
+                    } else {
+                        self.comic.title()
+                    };
+                    ui.add(
+                        egui::Label::new(RichText::new(title).size(17.0).strong().color(p.ink))
+                            .truncate(),
+                    );
+                });
+            } else {
+                painter.line_segment(
+                    [rect.left_top(), rect.right_top()],
+                    egui::Stroke::new(1.0_f32, p.line),
+                );
+                if self.reader.is_open() {
+                    ui.horizontal(|ui| {
+                        let width = ((ui.available_width() - 4.0 * ui.spacing().item_spacing.x)
+                            / 5.0)
+                            .max(1.0);
+                        for (tab, label) in [
+                            (Drawer::Contents, "目录"),
+                            (Drawer::Bookmarks, "书签"),
+                            (Drawer::Search, "搜索"),
+                            (Drawer::Settings, "设置"),
+                            (Drawer::Assistant, "AI"),
+                        ] {
+                            let mut button =
+                                egui::Button::new(RichText::new(label).size(14.0).color(p.ink))
+                                    .frame(false);
+                            if tab == Drawer::Assistant {
+                                button = button.fill(p.accent_weak).stroke(egui::Stroke::NONE);
+                            }
+                            if ui.add_sized([width, 48.0], button).clicked() {
+                                self.set_drawer(tab);
+                            }
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_sized(
+                                [84.0, 48.0],
+                                egui::Button::new(self.comic.fit_mode_label()).frame(false),
+                            )
+                            .clicked()
+                        {
+                            self.comic.toggle_fit_mode();
+                        }
+                        if ui
+                            .add_sized([72.0, 48.0], egui::Button::new("设置").frame(false))
+                            .clicked()
+                        {
+                            self.set_drawer(Drawer::Settings);
+                        }
+                    });
+                }
+            }
+        }
+        if back {
+            self.close_reader();
         }
     }
 
     fn show_scene(&mut self, root: &mut egui::Ui, reading: bool) {
         let p = theme::palette(self.night);
-        let mut back = false;
-        egui::TopBottomPanel::top(if reading {
-            "reader-toolbar"
-        } else {
-            "shelf-toolbar"
-        })
-        .frame(egui::Frame::new().fill(p.surface).inner_margin(9.0))
-        .show_inside(root, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if reading {
-                    if ui.button("‹ 书架").clicked() {
-                        back = true;
-                    }
-                    if self.reader.is_open() && ui.button("目录").clicked() {
-                        self.drawer = Some(Drawer::Contents);
-                    }
-                } else {
-                    ui.label(RichText::new("Velmira").size(20.0).strong());
-                }
-                if ui.button("设置").clicked() {
-                    self.drawer = Some(Drawer::Settings);
-                }
-            });
-            if let Some(text) = &self.notice {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(text).color(p.danger));
-                });
-            }
-        });
-        if !reading && self.more {
-            egui::TopBottomPanel::bottom("shelf-more").show_inside(root, |ui| {
-                if ui.button("加载更多").clicked() {
-                    self.send(Command::ListBooks {
-                        offset: self.books.len() as u32,
+        if !reading {
+            if self.more {
+                egui::TopBottomPanel::bottom("shelf-more")
+                    .frame(egui::Frame::new().fill(p.bg).inner_margin(8))
+                    .show_inside(root, |ui| {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 44.0],
+                                egui::Button::new("加载更多").frame(false),
+                            )
+                            .clicked()
+                        {
+                            self.send(Command::ListBooks {
+                                offset: self.books.len() as u32,
+                            });
+                        }
                     });
-                }
-            });
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(p.bg).inner_margin(16))
+                .show_inside(root, |ui| self.shelf(ui));
+            return;
         }
-        let dialog = !root.is_enabled() || self.drawer.is_some() || self.mark.is_some();
-        egui::CentralPanel::default().show_inside(root, |ui| {
-            if !reading {
-                self.shelf(ui);
-            } else if self.reader.is_open() {
-                if let Some((chapter, last_page)) = self.reader.show(ui, true, false, dialog) {
-                    if let Some((book_id, chapter)) =
-                        self.reader.prepare_adjacent(chapter, last_page)
+        let bounds = root.max_rect();
+        let opacity = root.ctx().animate_bool_with_time_and_easing(
+            egui::Id::new("android-reader-controls"),
+            self.controls,
+            0.16,
+            egui::emath::easing::cubic_out,
+        );
+        let paper = if self.reader.is_open() {
+            self.reader.paper_color(self.night)
+        } else {
+            p.bg
+        };
+        let blocked = !root.is_enabled() || self.drawer.is_some() || self.drawn_drawer.is_some();
+        let tap_bounds = mobile_ui::tap_rect(bounds, opacity > 0.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(paper))
+            .show_inside(root, |ui| {
+                if self.reader.is_open() {
+                    if let Some((chapter, last_page)) =
+                        self.reader.show(ui, true, false, blocked, tap_bounds)
                     {
-                        if !self.send(Command::ReadChapter { book_id, chapter }) {
-                            self.reader.reset_load();
+                        if let Some((book_id, chapter)) =
+                            self.reader.prepare_adjacent(chapter, last_page)
+                        {
+                            if !self.send(Command::ReadChapter { book_id, chapter }) {
+                                self.reader.reset_load();
+                            }
                         }
                     }
-                }
-                if let Some((loc, end)) = self.reader.take_mark() {
-                    self.mark = Some((loc, end, String::new(), AnnotationColor::Yellow));
-                }
-            } else if self.comic.book_id().is_some() {
-                if let Some((book_id, page_index)) = self.comic.show(ui, true) {
-                    if !self.send(Command::ReadComicPage {
-                        book_id,
-                        page_index,
-                    }) {
-                        self.comic.reset_load();
+                    if self.reader.take_tools_request() {
+                        self.controls = !self.controls;
+                    }
+                    if let Some((loc, end)) = self.reader.take_mark() {
+                        self.mark = Some((loc, end, String::new(), AnnotationColor::Yellow));
+                        self.set_drawer(Drawer::Annotation);
+                    }
+                } else {
+                    if let Some((book_id, page_index)) =
+                        self.comic.show(ui, true, blocked, tap_bounds)
+                    {
+                        if !self.send(Command::ReadComicPage {
+                            book_id,
+                            page_index,
+                        }) {
+                            self.comic.reset_load();
+                        }
+                    }
+                    if self.comic.take_tools_request() {
+                        self.controls = !self.controls;
                     }
                 }
-            }
-        });
-        if back {
-            self.close_reader();
-            root.ctx().request_repaint();
+            });
+        if opacity > 0.0 {
+            self.reader_controls(root, bounds, opacity);
+        }
+        if let Some(text) = &self.notice {
+            root.painter().text(
+                bounds.center_top() + egui::vec2(0.0, 10.0),
+                egui::Align2::CENTER_TOP,
+                text,
+                egui::FontId::proportional(13.0),
+                p.danger,
+            );
         }
     }
 }
@@ -783,6 +1223,8 @@ impl Library {
 impl eframe::App for Library {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll_import(ctx);
+        self.poll_field(ctx);
+        self.models.poll(ctx, &self.android);
         while let Ok(event) = self.store.events().try_recv() {
             self.event(ctx, event);
         }
@@ -831,45 +1273,90 @@ impl eframe::App for Library {
                 ctx.request_repaint_after(Duration::from_millis(35));
             }
         }
-        if self.opening.is_some() || self.reading() {
-            if saf::take_reader_back(&self.android).unwrap_or_default() {
-                if self.mark.take().is_none() && self.drawer.take().is_none() {
-                    self.close_reader();
-                }
+        if self.handles_back && saf::take_reader_back(&self.android).unwrap_or_default() {
+            if self.drawer.is_some() {
+                self.dismiss_drawer();
+            } else if self.controls {
+                self.controls = false;
+            } else {
+                self.close_reader();
             }
-            ctx.request_repaint_after(Duration::from_millis(90));
+        }
+        let screen = ctx.screen_rect();
+        if let Ok(Some(insets)) = saf::safe_insets(&self.android) {
+            self.insets = Some(insets);
+        }
+        let scale = ctx.pixels_per_point();
+        let fallback = (24.0 * scale) as u16;
+        let safe = mobile_ui::content_rect(
+            screen,
+            self.insets.unwrap_or([0, fallback, 0, fallback]),
+            scale,
+        );
+        if self.insets.is_none() {
+            ctx.request_repaint_after(Duration::from_millis(80));
         }
         let ready = self.reader.ready() || self.comic.ready();
         let preparing = self.reading() && !ready;
-        let reveal = Opening::frame(&mut self.opening, ctx, ready);
-        if !self.reading() || preparing || reveal.is_some() {
-            let mut ui = opening::scene(ctx, egui::Id::new("shelf-scene"), reveal.is_none());
-            self.show_scene(&mut ui, false);
+        let reveal = Opening::frame(&mut self.opening, ctx, ready, safe);
+        let library_visible = !self.reading() || preparing || reveal.is_some();
+        let p = theme::palette(self.night);
+        let background = if !library_visible && self.reader.is_open() {
+            self.reader.paper_color(self.night)
+        } else {
+            p.bg
+        };
+        ctx.layer_painter(egui::LayerId::background())
+            .rect_filled(screen, 0, background);
+        let dark_icons =
+            u16::from(background.r()) + u16::from(background.g()) + u16::from(background.b())
+                > 3 * 145;
+        if self.dark_bar_icons != Some(dark_icons)
+            && saf::set_dark_system_bar_icons(&self.android, dark_icons).is_ok()
+        {
+            self.dark_bar_icons = Some(dark_icons);
         }
-        if self.reading() {
-            let mut ui = opening::scene(
-                ctx,
-                egui::Id::new("reader-scene"),
-                !preparing && reveal.is_none(),
-            );
-            if preparing {
-                ui.set_invisible();
+        if safe.is_positive() {
+            if library_visible {
+                let mut ui =
+                    opening::scene(ctx, egui::Id::new("shelf-scene"), reveal.is_none(), safe);
+                self.show_scene(&mut ui, false);
             }
-            if let Some(reveal) = reveal {
-                reveal.paint(&mut ui, theme::palette(self.night).bg, |ui| {
-                    self.show_scene(ui, true)
-                });
-            } else {
-                self.show_scene(&mut ui, true);
+            if self.reading() {
+                let mut ui = opening::scene(
+                    ctx,
+                    egui::Id::new("reader-scene"),
+                    !preparing && reveal.is_none(),
+                    safe,
+                );
+                if preparing {
+                    ui.set_invisible();
+                }
+                if let Some(reveal) = reveal {
+                    reveal.paint(&mut ui, p.bg, |ui| self.show_scene(ui, true));
+                } else {
+                    self.show_scene(&mut ui, true);
+                }
             }
+            self.drawer(ctx, safe);
         }
         if let Some(command) = self.reader.inline_image_request() {
             if !self.send(command) {
                 self.reader.inline_image_failed();
             }
         }
-        self.drawer(ctx);
-        self.edit_mark(ctx);
+        let handles_back = self.opening.is_some()
+            || self.reading()
+            || self.drawer.is_some()
+            || self.drawn_drawer.is_some();
+        if self.handles_back != handles_back
+            && saf::set_handles_back(&self.android, handles_back).is_ok()
+        {
+            self.handles_back = handles_back;
+        }
+        if handles_back {
+            ctx.request_repaint_after(Duration::from_millis(80));
+        }
         let (font_size, paper) = self.reader.preferences();
         self.preferences.update(
             ctx,

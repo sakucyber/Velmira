@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
+use crate::reading::{Action, Language, ReadingError};
 use crate::route::{Candidate, Failure, Limits, Policy, RouteError, Router, Strategy, Unavailable};
 use crate::{ComicPage, Error, Provider, Storyboard};
 
@@ -78,6 +79,33 @@ impl ComicService {
                 },
             )
             .map_err(routing_error)
+    }
+
+    pub fn read_excerpt(
+        &self,
+        action: Action,
+        language: Language,
+        excerpt: &str,
+    ) -> Result<(String, String), RouteError<ReadingError>> {
+        self.router.run_filtered(
+            |candidate| self.connections[&candidate.connection].text_model == candidate.model,
+            |candidate, remaining| {
+                self.connections[&candidate.connection]
+                    .read_excerpt(
+                        action,
+                        language,
+                        excerpt,
+                        remaining.min(Duration::from_secs(45)),
+                    )
+                    .map(|text| (candidate.model.clone(), text))
+                    .map_err(|error| match error {
+                        ReadingError::Provider(error) => {
+                            classify(error).map_error(ReadingError::Provider)
+                        }
+                        other => Failure::abort(other),
+                    })
+            },
+        )
     }
 
     pub fn render(&self, board: &Storyboard) -> Result<ComicPage, Error> {

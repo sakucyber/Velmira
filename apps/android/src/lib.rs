@@ -4,6 +4,8 @@
 mod comic;
 #[path = "../../desktop/src/covers.rs"]
 mod covers;
+#[path = "../../desktop/src/model_settings.rs"]
+mod model_settings;
 #[path = "../../desktop/src/opening.rs"]
 mod opening;
 #[path = "../../desktop/src/preferences.rs"]
@@ -16,6 +18,8 @@ mod theme;
 mod workers;
 
 mod mobile;
+mod mobile_ui;
+mod models;
 mod saf;
 
 #[no_mangle]

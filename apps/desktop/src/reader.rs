@@ -68,9 +68,19 @@ struct TouchGesture {
     start: Option<egui::Pos2>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Navigation {
     Page(i8),
     Chapter(i8),
+    Tools,
+}
+
+fn tap_navigation(canvas: egui::Rect, x: f32, center_opens_tools: bool) -> Navigation {
+    if center_opens_tools && (x - canvas.center().x).abs() <= canvas.width() * 0.20 {
+        Navigation::Tools
+    } else {
+        Navigation::Page(if x < canvas.center().x { -1 } else { 1 })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -170,6 +180,7 @@ pub struct Reader {
     inline: InlineImages,
     inline_decode: Option<InlineDecode>,
     touch: TouchGesture,
+    tools_requested: bool,
 }
 
 impl Reader {
@@ -220,6 +231,7 @@ impl Reader {
             inline: InlineImages::default(),
             inline_decode: None,
             touch: TouchGesture::default(),
+            tools_requested: false,
         }
     }
 
@@ -244,6 +256,26 @@ impl Reader {
     pub fn loc(&self) -> Option<Loc> {
         self.book.as_ref().map(|book| book.loc)
     }
+    #[cfg(target_os = "android")]
+    pub fn take_tools_request(&mut self) -> bool {
+        std::mem::take(&mut self.tools_requested)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn book_title(&self) -> &str {
+        self.book
+            .as_ref()
+            .map_or("", |book| book.summary.title.as_str())
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn paper_color(&self, night: bool) -> Color32 {
+        self.theme
+            .unwrap_or(if night { Theme::Night } else { Theme::Paper })
+            .colors()
+            .0
+    }
+
     pub fn take_mark(&mut self) -> Option<(Loc, u32)> {
         self.mark.take()
     }
@@ -272,7 +304,6 @@ impl Reader {
         (!selected.is_empty()).then_some(selected)
     }
 
-    #[cfg(not(target_os = "android"))]
     pub fn current_paragraph(&self) -> Option<String> {
         let book = self.book.as_ref()?;
         book.paragraphs.get(book.loc.para as usize).cloned()
@@ -520,6 +551,7 @@ impl Reader {
         self.annotations.clear();
         self.selection = None;
         self.mark = None;
+        self.tools_requested = false;
         self.search_highlight = None;
         self.inline = InlineImages::default();
         self.touch = TouchGesture::default();
@@ -728,11 +760,16 @@ impl Reader {
     }
 
     fn request_navigation(&mut self, navigation: Navigation) -> Option<(u32, bool)> {
+        if navigation == Navigation::Tools {
+            self.tools_requested = true;
+            return None;
+        }
         if self.pending.is_some() || self.running.is_some() || self.chapter_request.is_some() {
             return None;
         }
         let book = self.book.as_ref()?;
         match navigation {
+            Navigation::Tools => None,
             Navigation::Chapter(step) => {
                 let chapter = book.chapter.checked_add_signed(i32::from(step))?;
                 (chapter < book.summary.chapter_count).then_some((chapter, false))
@@ -762,6 +799,7 @@ impl Reader {
         chinese: bool,
         resizing: bool,
         dialog_open: bool,
+        #[cfg(target_os = "android")] tap_area: egui::Rect,
     ) -> Option<(u32, bool)> {
         let tr = |zh: &'static str, en: &'static str| if chinese { zh } else { en };
         let book = self.book.as_ref()?;
@@ -770,6 +808,7 @@ impl Reader {
         let has_selection = self.selection.is_some_and(|(a, b)| a != b);
         let chapter_count = book.summary.chapter_count.max(1);
         let current_chapter = book.chapter;
+        #[cfg(not(target_os = "android"))]
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::Label::new(egui::RichText::new(&book.title).strong().size(20.0)).truncate(),
@@ -791,76 +830,88 @@ impl Reader {
         });
         let mut navigation = None;
         let mut copy_requested = false;
-        ui.horizontal_wrapped(|ui| {
-            if let Some((a, b)) = self.selection {
-                let (start, end) = (a.min(b), a.max(b));
-                if start.para == end.para
-                    && end.off > start.off
-                    && ui.button(tr("添加批注", "Add note")).clicked()
+        let mobile = cfg!(target_os = "android");
+        if !mobile || has_selection {
+            ui.horizontal_wrapped(|ui| {
+                if let Some((a, b)) = self.selection {
+                    let (start, end) = (a.min(b), a.max(b));
+                    if start.para == end.para
+                        && end.off > start.off
+                        && ui.button(tr("添加批注", "Add note")).clicked()
+                    {
+                        self.mark = Some((start, end.off));
+                    }
+                }
+                copy_requested =
+                    has_selection && ui.button(tr("复制选中文字", "Copy selection")).clicked();
+                #[cfg(not(target_os = "android"))]
                 {
-                    self.mark = Some((start, end.off));
+                    let changed = ui
+                        .add(
+                            egui::Slider::new(&mut self.font_px, 12.0..=48.0)
+                                .text(tr("字号", "Font"))
+                                .step_by(0.1)
+                                .fixed_decimals(1),
+                        )
+                        .changed();
+                    let reset = ui
+                        .add_enabled(
+                            (self.font_px - DEFAULT_FONT_SIZE).abs() > 0.01,
+                            egui::Button::new(tr("恢复字号", "Reset font")),
+                        )
+                        .clicked();
+                    if reset {
+                        self.font_px = DEFAULT_FONT_SIZE;
+                    }
+                    if changed || reset {
+                        self.layout_dirty = true;
+                    }
+                    egui::ComboBox::from_id_salt("reader-theme")
+                        .selected_text(match self.theme {
+                            None => tr("跟随应用", "Follow app"),
+                            Some(Theme::Paper) => tr("纸色", "Paper"),
+                            Some(Theme::White) => tr("浅色", "Light"),
+                            Some(Theme::Night) => tr("深色", "Dark"),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.theme,
+                                None,
+                                tr("跟随应用", "Follow app"),
+                            );
+                            ui.selectable_value(
+                                &mut self.theme,
+                                Some(Theme::Paper),
+                                tr("纸色", "Paper"),
+                            );
+                            ui.selectable_value(
+                                &mut self.theme,
+                                Some(Theme::White),
+                                tr("浅色", "Light"),
+                            );
+                            ui.selectable_value(
+                                &mut self.theme,
+                                Some(Theme::Night),
+                                tr("深色", "Dark"),
+                            );
+                        });
                 }
-            }
-            copy_requested =
-                has_selection && ui.button(tr("复制选中文字", "Copy selection")).clicked();
-            #[cfg(not(target_os = "android"))]
-            {
-                let changed = ui
-                    .add(
-                        egui::Slider::new(&mut self.font_px, 12.0..=48.0)
-                            .text(tr("字号", "Font"))
-                            .step_by(0.1)
-                            .fixed_decimals(1),
-                    )
-                    .changed();
-                let reset = ui
-                    .add_enabled(
-                        (self.font_px - DEFAULT_FONT_SIZE).abs() > 0.01,
-                        egui::Button::new(tr("恢复字号", "Reset font")),
-                    )
-                    .clicked();
-                if reset {
-                    self.font_px = DEFAULT_FONT_SIZE;
-                }
-                if changed || reset {
-                    self.layout_dirty = true;
-                }
-                egui::ComboBox::from_id_salt("reader-theme")
-                    .selected_text(match self.theme {
-                        None => tr("跟随应用", "Follow app"),
-                        Some(Theme::Paper) => tr("纸色", "Paper"),
-                        Some(Theme::White) => tr("浅色", "Light"),
-                        Some(Theme::Night) => tr("深色", "Dark"),
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.theme, None, tr("跟随应用", "Follow app"));
-                        ui.selectable_value(
-                            &mut self.theme,
-                            Some(Theme::Paper),
-                            tr("纸色", "Paper"),
-                        );
-                        ui.selectable_value(
-                            &mut self.theme,
-                            Some(Theme::White),
-                            tr("浅色", "Light"),
-                        );
-                        ui.selectable_value(
-                            &mut self.theme,
-                            Some(Theme::Night),
-                            tr("深色", "Dark"),
-                        );
-                    });
-            }
-        });
-        if self.missing_glyphs > 0 {
+            });
+        }
+        if !mobile && self.missing_glyphs > 0 {
             ui.label(tr(
                 "部分文字缺少字形。请安装包含这些文字的系统字体。",
                 "Some glyphs are missing. Install a system font that covers this text.",
             ));
         }
         let available = ui.available_size().max(egui::Vec2::ZERO);
-        let margin = egui::vec2((available.x * 0.04).clamp(12.0, 36.0), 14.0);
-        let size = egui::vec2(available.x, (available.y - 48.0).max(0.0));
+        let margin = if mobile {
+            egui::vec2((available.x * 0.05).clamp(16.0, 28.0), 13.0)
+        } else {
+            egui::vec2((available.x * 0.04).clamp(12.0, 36.0), 14.0)
+        };
+        let footer = if mobile { 34.0 } else { 48.0 };
+        let size = egui::vec2(available.x, (available.y - footer).max(0.0));
         let geometry = PageGeometry::new(
             size - margin * 2.0,
             self.font_px,
@@ -891,11 +942,15 @@ impl Reader {
             self.submit(ui.ctx(), geometry, theme);
         }
         let (_, rect) = ui.allocate_space(size);
-        let response = ui.interact(rect, page_surface_id(), egui::Sense::click_and_drag());
+        #[cfg(target_os = "android")]
+        let tap_area = rect.intersect(tap_area);
+        #[cfg(not(target_os = "android"))]
+        let tap_area = rect;
+        let response = ui.interact(tap_area, page_surface_id(), egui::Sense::click_and_drag());
         let blocked = dialog_open || egui::Popup::is_any_open(ui.ctx()) || resizing;
         let (touch_page, touch_input) = ui.input(|input| {
             if input.focused {
-                self.touch.update(&input.events, rect, !blocked)
+                self.touch.update(&input.events, tap_area, !blocked)
             } else {
                 self.touch = TouchGesture::default();
                 (None, false)
@@ -913,14 +968,18 @@ impl Reader {
             if !ui.ctx().wants_keyboard_input() || self.navigation_has_focus(ui.ctx()) {
                 navigation = ui.input(|input| keyboard_navigation(input).or(navigation));
             }
-            if let Some(step) = touch_page {
-                self.selection = None;
-                navigation = Some(Navigation::Page(step));
+            if let Some(action) = touch_page {
+                if action != Navigation::Tools {
+                    self.selection = None;
+                }
+                navigation = Some(action);
             } else if response.clicked_by(PointerButton::Primary) && !touch_input {
                 if let Some(pointer) = response.interact_pointer_pos() {
-                    let step = if pointer.x < rect.center().x { -1 } else { 1 };
-                    self.selection = None;
-                    navigation = Some(Navigation::Page(step));
+                    let action = tap_navigation(tap_area, pointer.x, mobile);
+                    if action != Navigation::Tools {
+                        self.selection = None;
+                    }
+                    navigation = Some(action);
                     response.request_focus();
                 }
             }
@@ -1093,37 +1152,62 @@ impl Reader {
             let fraction = (current_chapter as f32
                 + (self.page + 1) as f32 / self.page_count as f32)
                 / chapter_count as f32;
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!blocked, egui::Button::new(tr("上一页", "Previous")))
-                    .clicked()
-                {
-                    navigation = Some(Navigation::Page(-1));
-                }
-                ui.label(format!("{} / {}", self.page + 1, self.page_count));
-                if ui
-                    .add_enabled(!blocked, egui::Button::new(tr("下一页", "Next")))
-                    .clicked()
-                {
-                    navigation = Some(Navigation::Page(1));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{:.1}%", fraction * 100.0)).color(p.muted),
+            if mobile {
+                let percent = if fraction * 100.0 < 0.1 {
+                    "<0.1%".into()
+                } else {
+                    format!("{:.1}%", fraction * 100.0)
+                };
+                let position = format!("{} / {} · {percent}", self.page + 1, self.page_count);
+                let status = fg.gamma_multiply(0.68);
+                let title = self.book.as_ref().map_or("", |book| book.title.as_str());
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.add_sized(
+                        [(ui.available_width() - 130.0).max(1.0), 26.0],
+                        egui::Label::new(egui::RichText::new(title).size(12.0).color(status))
+                            .truncate(),
                     );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new(position).size(12.0).color(status));
+                    });
                 });
-            });
-            let (track, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
-            ui.painter().rect_filled(track, 1.5, p.line);
-            ui.painter().rect_filled(
-                egui::Rect::from_min_size(
-                    track.min,
-                    egui::vec2(track.width() * fraction.clamp(0.0, 1.0), track.height()),
-                ),
-                1.5,
-                p.accent,
-            );
+            } else {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!blocked, egui::Button::new(tr("上一页", "Previous")))
+                        .clicked()
+                    {
+                        navigation = Some(Navigation::Page(-1));
+                    }
+                    ui.label(format!("{} / {}", self.page + 1, self.page_count));
+                    if ui
+                        .add_enabled(!blocked, egui::Button::new(tr("下一页", "Next")))
+                        .clicked()
+                    {
+                        navigation = Some(Navigation::Page(1));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:.1}%", fraction * 100.0)).color(p.muted),
+                        );
+                    });
+                });
+                let (track, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 3.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(track, 1.5, p.line);
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        track.min,
+                        egui::vec2(track.width() * fraction.clamp(0.0, 1.0), track.height()),
+                    ),
+                    1.5,
+                    p.accent,
+                );
+            }
         }
         let chapter = if resizing || dialog_open {
             None
@@ -1226,7 +1310,7 @@ impl TouchGesture {
         events: &[egui::Event],
         canvas: egui::Rect,
         enabled: bool,
-    ) -> (Option<i8>, bool) {
+    ) -> (Option<Navigation>, bool) {
         let mut saw_touch = !self.active.is_empty();
         let mut page = None;
         if !enabled {
@@ -1260,9 +1344,14 @@ impl TouchGesture {
                             let delta = *pos - start;
                             if *phase == egui::TouchPhase::End {
                                 if delta.x.abs() >= 46.0 && delta.x.abs() > 1.3 * delta.y.abs() {
-                                    page = Some(if delta.x < 0.0 { 1 } else { -1 });
+                                    page =
+                                        Some(Navigation::Page(if delta.x < 0.0 { 1 } else { -1 }));
                                 } else if delta.length() < 10.0 && canvas.contains(*pos) {
-                                    page = Some(if pos.x < canvas.center().x { -1 } else { 1 });
+                                    page = Some(tap_navigation(
+                                        canvas,
+                                        pos.x,
+                                        cfg!(target_os = "android"),
+                                    ));
                                 }
                             }
                         }
