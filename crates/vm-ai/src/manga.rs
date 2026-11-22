@@ -11,6 +11,9 @@ use zip::write::SimpleFileOptions;
 
 use crate::{image_extension, ComicPage, Storyboard, MAX_CHAPTER_CHARS};
 
+pub mod automatic;
+
+
 const MAX_PAGES: u32 = 128;
 const MAX_CBZ_BYTES: i64 = 512 * 1024 * 1024;
 // The reader applies its limit to the entire ZIP file, including its entry headers and directory.
@@ -231,6 +234,12 @@ impl Project {
             "DELETE FROM manga_page WHERE book_id = ?1 AND id = ?2 AND revision = ?3",
             params![self.book_id, page.id, page.revision],
         )?)
+    }
+
+    pub(super) fn clear(&self) -> Result<(), ProjectError> {
+        self.db
+            .execute("DELETE FROM manga_page WHERE book_id = ?1", [&self.book_id])?;
+        Ok(())
     }
 
     pub fn preview(&self, page: &Page) -> Result<vm_media::RgbaImage, ProjectError> {

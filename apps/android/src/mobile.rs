@@ -14,6 +14,7 @@ use vm_store::{
 };
 
 use crate::{
+    automatic_manga::AutomaticManga,
     comic::Comic,
     covers::ShelfCovers,
     mobile_ui::{self, BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT},
@@ -46,6 +47,7 @@ enum Drawer {
     WebSearch,
     Network,
     Manga,
+    AutomaticManga,
 }
 
 #[derive(Clone, Copy)]
@@ -95,6 +97,7 @@ pub(crate) struct Library {
     insets: Option<[u16; 4]>,
     text_field: Option<Field>,
     models: Models,
+    automatic_manga: AutomaticManga,
     peers: PeerSync,
     bookmarks: Vec<Bookmark>,
     more_bookmarks: bool,
@@ -159,6 +162,7 @@ impl Library {
             insets: None,
             text_field: None,
             models: Models::new(data_dir),
+            automatic_manga: AutomaticManga::new(data_dir),
             peers: PeerSync::new(data_dir),
             bookmarks: Vec::new(),
             more_bookmarks: false,
@@ -335,6 +339,9 @@ impl Library {
                 }
                 self.generated_comic = None;
                 self.list_shelf(0);
+                if self.drawer == Some(Drawer::AutomaticManga) {
+                    self.dismiss_drawer();
+                }
                 self.open(book.id, None);
             }
             Event::BookOpened {
@@ -911,6 +918,7 @@ impl Library {
                         Drawer::WebSearch => "联网搜索",
                         Drawer::Network => "局域网同步",
                         Drawer::Manga => "漫画与画风",
+                        Drawer::AutomaticManga => "自动漫画",
                         _ => "设置",
                     };
                     ui.label(RichText::new(title).size(21.0).strong().color(p.ink));
@@ -1134,6 +1142,7 @@ impl Library {
             Drawer::Memory => self.models.prompt_settings(ui, &self.android, true),
             Drawer::WebSearch => self.models.web_search(ui, &self.android),
             Drawer::Manga => self.models.manga(ui, &self.android),
+            Drawer::AutomaticManga => self.automatic_manga.show(ui, &self.models),
             Drawer::Network => self.peers.show(ui, &self.android),
             Drawer::Assistant => {
                 if self.models.assistant(ui) {
@@ -1239,6 +1248,7 @@ impl Library {
             (
                 "扩展功能",
                 &[
+                    ("自动漫画", Drawer::AutomaticManga),
                     ("漫画与画风", Drawer::Manga),
                     ("翻译服务", Drawer::Translation),
                     ("联网搜索", Drawer::WebSearch),
@@ -1249,6 +1259,24 @@ impl Library {
             ui.label(RichText::new(label).strong().color(p.ink));
             for &(name, tab) in entries {
                 if mobile_ui::list_row(ui, name, name, p.ink, p.surface2).clicked() {
+                    if tab == Drawer::AutomaticManga {
+                        if let Some(book_id) = self.reader.book_id() {
+                            if !self.automatic_manga.open(
+                                ui.ctx(),
+                                book_id,
+                                self.reader.book_title(),
+                                self.reader.chapter_index(),
+                                self.reader.toc().len() as u32,
+                            ) {
+                                self.notice =
+                                    Some("另一本书正在生成，请等待当前任务结束后再切换。".into());
+                                return;
+                            }
+                        } else {
+                            self.notice = Some("请先打开一本小说。".into());
+                            return;
+                        }
+                    }
                     if tab == Drawer::Network {
                         self.peers.refresh(ui.ctx());
                     }
@@ -1688,8 +1716,13 @@ impl eframe::App for Library {
         self.poll_import(ctx);
         self.poll_field(ctx);
         self.models.poll(ctx, &self.android);
+        self.automatic_manga.poll();
         if self.importing.is_none() {
-            if let Some(comic) = self.models.take_comic() {
+            if let Some(comic) = self
+                .automatic_manga
+                .take_export()
+                .or_else(|| self.models.take_comic())
+            {
                 let path = comic.to_path_buf();
                 if self.send(Command::ImportCbz { path: path.clone() }) {
                     self.importing = Some(path);

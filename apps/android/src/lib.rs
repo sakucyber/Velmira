@@ -19,6 +19,7 @@ mod theme;
 #[path = "../../desktop/src/workers.rs"]
 mod workers;
 
+mod automatic_manga;
 mod mobile;
 mod mobile_ui;
 mod models;

@@ -433,6 +433,20 @@ impl Models {
         }
     }
 
+    pub fn manga_options(&self) -> (Layout, &str) {
+        (self.extras.layout, &self.extras.art_style)
+    }
+
+    pub fn manga_connections(&self) -> Result<(Vec<Connection>, Strategy), String> {
+        let connections = self.connections()?;
+        if !connections.iter().any(|c| !c.text_model.is_empty())
+            || !connections.iter().any(|c| !c.image_model.is_empty())
+        {
+            return Err("请在模型库配置文本模型和图像模型。".into());
+        }
+        Ok((connections, self.settings.strategy))
+    }
+
     pub fn manga(&mut self, ui: &mut egui::Ui, app: &AndroidApp) {
         let p = theme::palette(ui.visuals().dark_mode);
         let previous = self.extras.layout;

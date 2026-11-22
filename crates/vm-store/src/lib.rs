@@ -26,6 +26,15 @@ const EVENT_CAPACITY: usize = 16;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Read a chapter from an existing library for a background job. The job
+/// opens its own read-only connection and never changes the reading location.
+pub fn read_chapter(path: &std::path::Path, book_id: &str, index: u32) -> Result<Chapter> {
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(std::time::Duration::from_secs(3))?;
+    database::chapter(&db, book_id, index)
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("SQLite: {0}")]
