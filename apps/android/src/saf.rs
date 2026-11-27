@@ -147,6 +147,13 @@ pub fn take_reader_back(app: &AndroidApp) -> Result<bool, String> {
     })
 }
 
+pub fn background_task(app: &AndroidApp) -> Result<(), String> {
+    with_activity(app, |env, activity| {
+        env.call_method(activity, jni_str!("backgroundTask"), jni_sig!("()V"), &[])?
+            .v()
+    })
+}
+
 pub fn copy_text(app: &AndroidApp, text: &str) -> Result<(), String> {
     with_activity(app, |env, activity| {
         let text = env.new_string(text)?;

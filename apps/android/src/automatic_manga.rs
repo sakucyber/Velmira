@@ -12,12 +12,14 @@ use std::{
 use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use eframe::egui::{self, RichText};
 use vm_ai::{
-    manga::automatic::{Job, Plan, Progress, Stage},
-    route::Strategy,
-    service::{ComicService, Connection},
+    manga::{
+        automatic::{chapter_excerpts, Job, Plan, Progress, Stage},
+        Layout,
+    },
+    service::ComicService,
 };
 
-use crate::{mobile_ui, models::Models, theme};
+use crate::theme;
 
 const MAX_CHAPTERS: u32 = Plan::MAX_CHAPTERS;
 
@@ -27,14 +29,14 @@ struct Book {
     chapters: u32,
     first: u32,
     last: u32,
+    pages: u8,
 }
 
 enum Work {
     Inspect,
     Generate {
         plan: Plan,
-        connections: Vec<Connection>,
-        strategy: Strategy,
+        service: Arc<ComicService>,
     },
     Export,
     Reset,
@@ -49,7 +51,13 @@ struct State {
 
 enum Update {
     Stage(Progress, u32, Stage),
-    Finished(State, Option<tempfile::TempPath>),
+    Finished(State, Option<Export>),
+}
+
+pub struct Export {
+    pub file: tempfile::TempPath,
+    #[cfg(not(target_os = "android"))]
+    pub book: String,
 }
 
 struct Task {
@@ -63,8 +71,10 @@ pub struct AutomaticManga {
     book: Option<Book>,
     state: State,
     task: Option<Task>,
-    export: Option<tempfile::TempPath>,
+    export: Option<Export>,
     confirm_reset: bool,
+    #[cfg(not(target_os = "android"))]
+    pub visible: bool,
 }
 
 impl AutomaticManga {
@@ -76,6 +86,8 @@ impl AutomaticManga {
             task: None,
             export: None,
             confirm_reset: false,
+            #[cfg(not(target_os = "android"))]
+            visible: false,
         }
     }
 
@@ -108,6 +120,7 @@ impl AutomaticManga {
             chapters,
             first,
             last: first.saturating_add(2).min(chapters - 1),
+            pages: 1,
         });
         self.confirm_reset = false;
         self.state = State::default();
@@ -146,11 +159,17 @@ impl AutomaticManga {
         }
     }
 
-    pub fn take_export(&mut self) -> Option<tempfile::TempPath> {
+    pub fn take_export(&mut self) -> Option<Export> {
         self.export.take()
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, models: &Models) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        layout: Layout,
+        style: &str,
+        service: impl FnOnce() -> Result<Arc<ComicService>, String>,
+    ) {
         let Some(book) = &mut self.book else {
             if self.state.status.is_empty() {
                 ui.label("先打开要改编的小说。");
@@ -164,28 +183,36 @@ impl AutomaticManga {
         let mut operation = None;
         if let Some(plan) = &self.state.plan {
             ui.label(format!(
-                "第 {}–{} 章 · 每章一页",
+                "第 {}–{} 章 · 每章 {} 页",
                 plan.first + 1,
-                plan.last + 1
+                plan.last + 1,
+                plan.pages_per_chapter
             ));
             if !plan.style.is_empty() {
                 ui.label(RichText::new(&plan.style).color(p.muted));
             }
         } else {
             ui.add_enabled_ui(self.task.is_none(), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("每章页数");
+                    for pages in [1, 2, 3] {
+                        ui.selectable_value(&mut book.pages, pages, pages.to_string());
+                    }
+                });
+                let max_chapters = MAX_CHAPTERS / u32::from(book.pages);
                 let mut first = book.first + 1;
                 let mut last = book.last + 1;
                 chapter_control(ui, "起始章节", &mut first, 1, book.chapters);
                 last = last.clamp(
                     first,
-                    first.saturating_add(MAX_CHAPTERS - 1).min(book.chapters),
+                    first.saturating_add(max_chapters - 1).min(book.chapters),
                 );
                 chapter_control(
                     ui,
                     "结束章节",
                     &mut last,
                     first,
-                    first.saturating_add(MAX_CHAPTERS - 1).min(book.chapters),
+                    first.saturating_add(max_chapters - 1).min(book.chapters),
                 );
                 book.first = first - 1;
                 book.last = last - 1;
@@ -197,11 +224,11 @@ impl AutomaticManga {
                     .clicked()
                 {
                     book.last =
-                        (book.chapters - 1).min(book.first.saturating_add(MAX_CHAPTERS - 1));
+                        (book.chapters - 1).min(book.first.saturating_add(max_chapters - 1));
                 }
                 ui.label(format!(
-                    "将选取 {} 章，每章生成一页。沿用漫画与画风设置。",
-                    book.last - book.first + 1
+                    "将生成 {} 页，沿用漫画与画风设置。",
+                    (book.last - book.first + 1) * u32::from(book.pages)
                 ));
             });
         }
@@ -240,40 +267,47 @@ impl AutomaticManga {
             .progress
             .is_some_and(|value| value.done == value.total);
         if complete {
-            if mobile_ui::list_row(
-                ui,
-                "auto-export",
-                "导出 CBZ 并加入书架",
-                p.accent,
-                p.accent_weak,
-            )
-            .clicked()
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("导出 CBZ 并加入书架").color(p.on_accent))
+                        .fill(p.accent)
+                        .min_size(egui::vec2(ui.available_width(), 40.0)),
+                )
+                .clicked()
             {
                 operation = Some(Work::Export);
             }
         } else {
             let start = if self.state.plan.is_some() {
-                "继续自动漫画"
+                "继续自动漫画项目"
             } else {
-                "开始自动漫画"
+                "开始自动漫画项目"
             };
-            if mobile_ui::list_row(ui, "auto-start", start, p.accent, p.accent_weak).clicked() {
-                let (layout, style) = models.manga_options();
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(start).color(p.on_accent))
+                        .fill(p.accent)
+                        .min_size(egui::vec2(ui.available_width(), 40.0)),
+                )
+                .clicked()
+            {
                 let plan = self.state.plan.clone().unwrap_or_else(|| Plan {
                     title: book.title.clone(),
                     first: book.first,
                     last: book.last,
                     layout,
                     style: style.to_owned(),
+                    pages_per_chapter: book.pages,
                 });
-                match models.manga_connections() {
-                    Ok((connections, strategy)) => {
-                        operation = Some(Work::Generate {
-                            plan,
-                            connections,
-                            strategy,
-                        })
+                match service().and_then(|service| {
+                    if service.pool().has_task("planner") && service.pool().has_task("manga_image")
+                    {
+                        Ok(service)
+                    } else {
+                        Err("自动漫画项目需要配置分镜和生图模型。".into())
                     }
+                }) {
+                    Ok(service) => operation = Some(Work::Generate { plan, service }),
                     Err(error) => self.state.status = error,
                 }
             }
@@ -340,7 +374,11 @@ impl AutomaticManga {
                         if state.status.is_empty() {
                             state.status = status;
                         }
-                        file
+                        file.map(|file| Export {
+                            file,
+                            #[cfg(not(target_os = "android"))]
+                            book: book_id.clone(),
+                        })
                     }
                     Err(error) => {
                         state.status = error;
@@ -409,13 +447,7 @@ fn process(
             std::fs::remove_file(folder.join("plan.json")).map_err(file_error)?;
             Ok(("已清空项目".into(), None))
         }
-        Work::Generate {
-            plan,
-            connections,
-            strategy,
-        } => {
-            let service =
-                ComicService::new(connections, strategy).map_err(|error| error.to_string())?;
+        Work::Generate { plan, service } => {
             let plan = if let Some(existing) = load_plan(folder)? {
                 existing
             } else {
@@ -424,9 +456,27 @@ fn process(
             };
             let mut job = Job::open(&project_path, plan).map_err(|error| error.to_string())?;
             let library = data.join("velmira.db");
+            let analysis = data.join("ai-chapter-analysis.db");
+            let mut chapter_memory: Option<(u32, String)> = None;
             let progress = job.run(
                 &service,
-                |chapter| excerpt(&library, book_id, chapter),
+                |chapter, pages| {
+                    let source = vm_store::read_chapter(&library, book_id, chapter)
+                        .map_err(|error| error.to_string())?;
+                    chapter_excerpts(chapter, &source.paragraphs, pages)
+                },
+                |chapter| {
+                    if let Some((_, text)) = chapter_memory
+                        .as_ref()
+                        .filter(|(previous, _)| *previous == chapter)
+                    {
+                        return text.clone();
+                    }
+                    let text = vm_ai::analysis::prior_continuity(&analysis, book_id, chapter)
+                        .unwrap_or_default();
+                    chapter_memory = Some((chapter, text.clone()));
+                    text
+                },
                 || pause.load(Ordering::Relaxed),
                 notify,
             )?;
@@ -456,7 +506,7 @@ fn process(
                 .suffix(".cbz")
                 .tempfile_in(data)
                 .map_err(file_error)?;
-            job.export(file.as_file_mut())
+            job.export(file.as_file_mut(), book_id)
                 .map_err(|error| error.to_string())?;
             Ok((
                 "CBZ 已生成，正在加入书架".into(),
@@ -508,28 +558,4 @@ fn inspect(folder: &Path) -> Result<State, String> {
         progress: Some(progress),
         status: String::new(),
     })
-}
-
-fn excerpt(path: &Path, id: &str, chapter: u32) -> Result<String, String> {
-    let chapter_text =
-        vm_store::read_chapter(path, id, chapter).map_err(|error| error.to_string())?;
-    let paragraphs = &chapter_text.paragraphs;
-    let mut candidates = vm_core::segments::segment_chapter(chapter, paragraphs);
-    vm_core::segments::rank_segments(&mut candidates, 1);
-    let text = candidates
-        .iter()
-        .find(|segment| segment.selected)
-        .map_or(paragraphs.as_slice(), |segment| {
-            &paragraphs[segment.start_para..=segment.end_para]
-        });
-    let excerpt: String = text
-        .iter()
-        .flat_map(|paragraph| paragraph.chars().chain(['\n']))
-        .take(4000)
-        .collect();
-    if excerpt.trim().is_empty() {
-        Err("本章没有可用正文".into())
-    } else {
-        Ok(excerpt)
-    }
 }

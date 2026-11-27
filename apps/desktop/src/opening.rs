@@ -1,6 +1,7 @@
 use eframe::egui::{self, Color32, Id, LayerId, Rect, Ui, UiBuilder, Vec2};
 
 const DURATION: f64 = 0.34;
+const RETURN_DURATION: f64 = 0.29;
 
 pub struct Opening {
     pub book_id: String,
@@ -50,6 +51,56 @@ impl Opening {
         );
         Some(Reveal {
             rect,
+            screen,
+            eased,
+            progress,
+        })
+    }
+}
+
+pub struct Returning {
+    book_id: String,
+    target: Option<Rect>,
+    start: Option<f64>,
+}
+
+impl Returning {
+    pub fn new(book_id: String) -> Self {
+        Self {
+            book_id,
+            target: None,
+            start: None,
+        }
+    }
+
+    pub fn cover(&mut self, book_id: &str, cover: Rect) {
+        if self.start.is_none() && self.book_id == book_id && cover.is_positive() {
+            self.target = Some(cover);
+        }
+    }
+
+    pub fn frame(&mut self, ctx: &egui::Context, screen: Rect) -> Option<Reveal> {
+        if !screen.is_positive() {
+            return None;
+        }
+        let now = ctx.input(|input| input.time);
+        let elapsed = (now - *self.start.get_or_insert(now)) / RETURN_DURATION;
+        if elapsed >= 1.0 {
+            return None;
+        }
+        ctx.request_repaint();
+        let progress = 1.0 - elapsed as f32;
+        let eased = curve(progress, 0.0, 1.0);
+        let target = self
+            .target
+            .map(|target| target.intersect(screen))
+            .filter(|target| target.is_positive())
+            .unwrap_or_else(|| screen.shrink2(screen.size() * 0.07));
+        Some(Reveal {
+            rect: Rect::from_min_max(
+                target.min.lerp(screen.min, eased),
+                target.max.lerp(screen.max, eased),
+            ),
             screen,
             eased,
             progress,

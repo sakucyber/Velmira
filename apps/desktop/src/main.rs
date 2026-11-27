@@ -1,5 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[path = "../../android/src/automatic_manga.rs"]
+mod automatic_manga;
+mod chapter_analysis;
 mod comic;
 mod covers;
 mod generate;
@@ -7,15 +10,20 @@ mod illustrations;
 mod model_settings;
 mod opening;
 mod pairing_cli;
+mod plugins;
 mod preferences;
 mod reader;
 mod reading_ai;
+mod reading_preferences;
+mod selection_bar;
+mod settings;
 mod theme;
+mod ui;
 mod updates;
 mod workers;
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichText};
-use opening::Opening;
+use opening::{Opening, Returning};
 use reader::Reader;
 use std::{
     ffi::OsString,
@@ -27,6 +35,7 @@ use vm_core::{BookFormat, BookSummary, Loc};
 use vm_store::{
     Bookmark, Command, Event, ReadingStatus, SearchHit, ShelfFilter, ShelfSort, ShelfStatus, Store,
 };
+use vm_update::Channel;
 use workers::{ImportBook, ImportRequest, ImportWorker, LayoutWorker};
 
 struct Options {
@@ -171,6 +180,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 struct App {
     store: Store,
+    data_dir: PathBuf,
+    pairing_invite: Option<pairing_cli::Invitation>,
     importer: ImportWorker,
     localized: bool,
     night: bool,
@@ -187,9 +198,20 @@ struct App {
     renaming: Option<(String, String)>,
     reader: Reader,
     comic: comic::Comic,
+    companion: Companion,
     generator: generate::Generator,
     reading_ai: reading_ai::ReadingAi,
+    analysis: chapter_analysis::Analysis,
+    automatic_manga: automatic_manga::AutomaticManga,
+    automatic_import: Option<tempfile::TempPath>,
+    automatic_style: String,
     updates: updates::Updates,
+    settings: settings::SettingsState,
+    settings_open: bool,
+    preferences_open: bool,
+    plugins_open: bool,
+    plugins: plugins::Registry,
+    about_open: bool,
     illustrations: illustrations::Illustrations,
     covers: covers::ShelfCovers,
     bookmarks: Vec<Bookmark>,
@@ -197,7 +219,9 @@ struct App {
     editing: Option<MarkEdit>,
     storage_ready: bool,
     opening: Option<Opening>,
+    returning: Option<Returning>,
     importing: bool,
+    import_novel: Option<String>,
     startup_import: Option<PathBuf>,
     startup_legacy: Option<PathBuf>,
     notice: Option<(String, bool)>,
@@ -209,6 +233,7 @@ struct App {
     bench: Bench,
     idle_sample: Option<Instant>,
     first_ui: bool,
+    ui_preview: bool,
     pending_progress: std::collections::HashMap<String, Loc>,
     closing: bool,
     allow_close: bool,
@@ -216,10 +241,39 @@ struct App {
 
 struct MarkEdit {
     id: Option<(String, u32)>,
-    loc: Loc,
-    end_off: u32,
+    ranges: Vec<(Loc, u32)>,
     color: vm_store::AnnotationColor,
     note: String,
+}
+
+struct Companion {
+    picker: bool,
+    books: Vec<BookSummary>,
+    has_more: bool,
+    listing: bool,
+    pending: Option<String>,
+    keyboard_focus: bool,
+    source: Option<vm_core::ComicSource>,
+    follow_novel: bool,
+    interval_seconds: u8,
+    next_page_at: Option<f64>,
+}
+
+impl Default for Companion {
+    fn default() -> Self {
+        Self {
+            picker: false,
+            books: Vec::new(),
+            has_more: false,
+            listing: false,
+            pending: None,
+            keyboard_focus: false,
+            source: None,
+            follow_novel: false,
+            interval_seconds: 12,
+            next_page_at: None,
+        }
+    }
 }
 
 enum CardAction {
@@ -233,6 +287,10 @@ enum View {
     Shelf,
     Novel,
     Comic,
+    Preferences,
+    Settings,
+    Plugins,
+    About,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -250,7 +308,7 @@ fn book_card(
     status_label: &str,
     target_status: ShelfStatus,
     actions: &mut Vec<CardAction>,
-) {
+) -> egui::Rect {
     let p = theme::palette(ui.visuals().dark_mode);
     ui.allocate_ui_with_layout(
         egui::vec2(card_w, card_h),
@@ -366,8 +424,10 @@ fn book_card(
                     actions.push(CardAction::Status(book.id.clone(), target_status));
                 }
             });
+            cover.rect.intersect(ui.clip_rect())
         },
-    );
+    )
+    .inner
 }
 
 impl App {
@@ -376,6 +436,7 @@ impl App {
         start: Instant,
         options: Options,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let data_dir = options.data_dir.clone();
         let (saved_preferences, prefs) = preferences::SavedPreferences::load(&options.data_dir);
         theme::apply(&ctx, prefs.night);
         let mut fonts = FontDefinitions::default();
@@ -401,14 +462,19 @@ impl App {
         let comic = comic::Comic::spawn(ctx.clone())?;
         let covers = covers::ShelfCovers::spawn(ctx.clone())?;
         let bench = Bench::new(start, options.bench);
-        let updates = updates::Updates::new(start, !bench.enabled());
+        let updates = updates::Updates::new(start, false);
         let idle_sample = bench
             .enabled()
             .then(|| Instant::now() + Duration::from_secs(300));
         let mut reader = Reader::new(layout);
         reader.apply_preferences(prefs.font_size, prefs.paper.as_deref());
+        let (font_size, paper) = reader.preferences();
+        let settings = settings::SettingsState::new(font_size, paper);
+        let model_pool = Arc::new(model_settings::SharedPool::default());
         Ok(Self {
             store,
+            data_dir,
+            pairing_invite: None,
             importer,
             localized: true,
             night: prefs.night,
@@ -426,16 +492,29 @@ impl App {
             reader,
             storage_ready: false,
             comic,
-            generator: generate::Generator::new(&options.data_dir),
-            reading_ai: reading_ai::ReadingAi::new(&options.data_dir),
+            companion: Companion::default(),
+            generator: generate::Generator::new(&options.data_dir, Arc::clone(&model_pool)),
+            reading_ai: reading_ai::ReadingAi::new(&options.data_dir, model_pool),
+            analysis: chapter_analysis::Analysis::new(&options.data_dir),
+            automatic_manga: automatic_manga::AutomaticManga::new(&options.data_dir),
+            automatic_import: None,
+            automatic_style: String::new(),
             updates,
+            settings,
+            settings_open: false,
+            preferences_open: false,
+            plugins_open: false,
+            plugins: plugins::Registry::load(&options.data_dir).unwrap_or_default(),
+            about_open: false,
             illustrations: Default::default(),
             covers,
             bookmarks: Vec::new(),
             more_bookmarks: false,
             editing: None,
             opening: None,
+            returning: None,
             importing: false,
+            import_novel: None,
             startup_import: options.import,
             startup_legacy: options.legacy,
             notice: None,
@@ -447,6 +526,7 @@ impl App {
             bench,
             idle_sample,
             first_ui: true,
+            ui_preview: false,
             pending_progress: Default::default(),
             closing: false,
             allow_close: false,
@@ -487,19 +567,298 @@ impl App {
     fn start_import(&mut self, request: ImportRequest) {
         if self.storage_ready && !self.importing {
             match self.importer.send.try_send(request) {
-                Ok(()) => self.importing = true,
+                Ok(()) => {
+                    self.importing = true;
+                    self.import_novel = self.reader.book_id().map(str::to_owned);
+                }
                 Err(error) => self.say(error.to_string(), true),
             }
         }
     }
 
     fn open(&mut self, book_id: String, origin: Option<egui::Rect>) {
+        if self.returning.is_some() {
+            self.close_reader();
+        }
         if self.opening.is_none()
             && self.send(Command::OpenBook {
                 book_id: book_id.clone(),
             })
         {
             self.opening = Some(Opening::new(book_id, origin));
+        }
+    }
+
+    fn open_companion(&mut self, book_id: String) {
+        if self.companion.pending.is_some() {
+            return;
+        }
+        if self.comic.book_id() == Some(book_id.as_str()) {
+            self.companion.picker = false;
+            return;
+        }
+        if let Some(novel_id) = self.reader.book_id().map(str::to_owned) {
+            if self.send(Command::OpenCompanion {
+                novel_id,
+                book_id: book_id.clone(),
+            }) {
+                self.companion.pending = Some(book_id);
+            }
+        }
+    }
+
+    fn list_comics(&mut self, offset: u32) {
+        if !self.companion.listing && self.send(Command::ListComics { offset }) {
+            self.companion.listing = true;
+        }
+    }
+
+    fn comic_picker(&mut self, ctx: &egui::Context) {
+        if !self.companion.picker || !self.reader.is_open() {
+            return;
+        }
+        let mut open = true;
+        let mut selected = None;
+        let mut more = false;
+        egui::Window::new(self.tr("选择并排漫画", "Choose companion comic"))
+            .id(egui::Id::new("companion-picker"))
+            .default_width(390.0)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if self.companion.books.is_empty() && !self.companion.listing {
+                    ui.label(self.tr(
+                        "书架还没有 CBZ 漫画。可用「导入书籍」添加。",
+                        "Import a CBZ comic to read it alongside the novel.",
+                    ));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(330.0)
+                    .show(ui, |ui| {
+                        for book in &self.companion.books {
+                            let button = egui::Button::new(&book.title)
+                                .truncate()
+                                .min_size(egui::vec2(ui.available_width(), 34.0));
+                            if ui
+                                .add_enabled(self.companion.pending.is_none(), button)
+                                .clicked()
+                            {
+                                selected = Some(book.id.clone());
+                            }
+                        }
+                    });
+                if self.companion.listing || self.companion.pending.is_some() {
+                    ui.spinner();
+                } else if self.companion.has_more {
+                    more = ui.button(self.tr("加载更多", "Load more")).clicked();
+                }
+            });
+        self.companion.picker = open;
+        if !open {
+            self.companion.pending = None;
+        } else if let Some(book_id) = selected {
+            self.open_companion(book_id);
+        } else if more {
+            self.list_comics(self.companion.books.len() as u32);
+        }
+    }
+
+    fn show_comic_pane(&mut self, root: &mut egui::Ui, dialog_open: bool) -> Option<f32> {
+        if self.comic.book_id().is_none() {
+            self.companion.keyboard_focus = false;
+            return None;
+        }
+        let width = root.available_width();
+        let p = theme::palette(self.night);
+        let press = root.input(|input| {
+            input
+                .pointer
+                .any_pressed()
+                .then(|| input.pointer.press_origin())
+                .flatten()
+        });
+        if root.is_enabled()
+            && !dialog_open
+            && press.is_some_and(|point| root.max_rect().contains(point))
+        {
+            self.companion.keyboard_focus = false;
+        }
+        let mut close = false;
+        let mut flip = None;
+        let mut jump = None;
+        let panel = egui::SidePanel::right("companion-comic-pane")
+            .default_width(width * 0.43)
+            .width_range((width * 0.32).clamp(170.0, 260.0)..=(width * 0.56).max(190.0))
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(12))
+            .show_inside(root, |ui| {
+                ui.set_min_width(ui.available_width());
+                if !dialog_open
+                    && ui.is_enabled()
+                    && press.is_some_and(|point| ui.max_rect().contains(point))
+                {
+                    self.companion.keyboard_focus = true;
+                    ui.ctx().memory_mut(|memory| {
+                        if let Some(id) = memory.focused() {
+                            memory.surrender_focus(id);
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    close = ui.button(self.tr("关闭漫画", "Close comic")).clicked();
+                    ui.label(
+                        RichText::new(self.tr("并排漫画", "Companion comic"))
+                            .size(12.0)
+                            .color(p.muted),
+                    );
+                });
+                if let Some(chapter) = self
+                    .companion
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.chapters.get(self.comic.page_index() as usize))
+                    .copied()
+                {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                (chapter as usize) < self.reader.toc().len(),
+                                egui::Button::new(format!(
+                                    "跳到原文第 {} 章",
+                                    u64::from(chapter) + 1
+                                )),
+                            )
+                            .clicked()
+                        {
+                            jump = Some(chapter);
+                        }
+                        ui.checkbox(&mut self.companion.follow_novel, "跟随小说");
+                    });
+                    let now = ui.input(|input| input.time);
+                    ui.horizontal_wrapped(|ui| {
+                        let playing = self.companion.next_page_at.is_some();
+                        if ui
+                            .button(if playing {
+                                "暂停播放"
+                            } else {
+                                "自动播放"
+                            })
+                            .clicked()
+                        {
+                            self.companion.next_page_at = (!playing)
+                                .then_some(now + f64::from(self.companion.interval_seconds));
+                            self.companion.follow_novel |= !playing;
+                        }
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.companion.interval_seconds)
+                                    .range(3..=90)
+                                    .suffix(" 秒/页"),
+                            )
+                            .changed()
+                            && playing
+                        {
+                            self.companion.next_page_at =
+                                Some(now + f64::from(self.companion.interval_seconds));
+                        }
+                    });
+                }
+                flip = self.comic.show(
+                    ui,
+                    self.localized,
+                    self.companion.keyboard_focus && !dialog_open,
+                );
+            });
+        if close {
+            self.comic.close();
+            self.companion.pending = None;
+            self.companion.keyboard_focus = false;
+            self.companion.source = None;
+            self.companion.next_page_at = None;
+        } else if let Some((book_id, page_index)) = flip {
+            self.companion.follow_novel = false;
+            self.companion.next_page_at = None;
+            self.flip_comic(book_id, page_index);
+        } else if let Some(chapter) = jump {
+            self.companion.keyboard_focus = false;
+            self.jump(Loc {
+                chapter,
+                para: 0,
+                off: 0,
+            });
+        } else if self.companion.follow_novel {
+            let target = self.companion.source.as_ref().and_then(|source| {
+                source.page_for_chapter(self.reader.chapter_index(), self.comic.page_index())
+            });
+            if let Some((book_id, index)) = target.and_then(|index| self.comic.request_page(index))
+            {
+                self.flip_comic(book_id, index);
+            }
+        }
+        Some(panel.response.rect.left())
+    }
+
+    fn flip_comic(&mut self, book_id: String, page_index: u32) {
+        if !self.send(Command::ReadComicPage {
+            book_id,
+            page_index,
+        }) {
+            self.comic.reset_load();
+        }
+    }
+
+    fn show_selection_actions(&mut self, ctx: &egui::Context) {
+        use selection_bar::Action;
+        let Some(action) = self
+            .reader
+            .selection_anchor()
+            .and_then(|anchor| selection_bar::show(ctx, anchor, self.localized))
+        else {
+            return;
+        };
+        match action {
+            Action::Highlight(color) => {
+                let ranges = self.reader.selection_ranges();
+                if let Some(book_id) = self.reader.book_id().map(str::to_owned) {
+                    if !ranges.is_empty()
+                        && self.send(Command::AddAnnotations {
+                            book_id,
+                            ranges,
+                            note: None,
+                            color,
+                        })
+                    {
+                        self.reader.clear_selection();
+                    }
+                }
+            }
+            Action::Note => {
+                let ranges = self.reader.selection_ranges();
+                if !ranges.is_empty() {
+                    self.editing = Some(MarkEdit {
+                        id: None,
+                        ranges,
+                        note: String::new(),
+                        color: vm_store::AnnotationColor::Yellow,
+                    });
+                }
+            }
+            Action::Copy => {
+                if let Some(text) = self.reader.selected_text() {
+                    ctx.copy_text(text);
+                    self.reader.clear_selection();
+                }
+            }
+            Action::Translate | Action::Explain => {
+                if let Some(text) = self.reader.selected_text() {
+                    let action = if matches!(action, Action::Translate) {
+                        vm_ai::reading::Action::Translate
+                    } else {
+                        vm_ai::reading::Action::Explain
+                    };
+                    self.reading_ai
+                        .prepare_selection(text, self.localized, action);
+                }
+            }
         }
     }
 
@@ -512,6 +871,17 @@ impl App {
     }
 
     fn events(&mut self, ctx: &egui::Context) {
+        self.automatic_manga.poll();
+        if self.storage_ready && !self.importing {
+            if let Some(export) = self.automatic_manga.take_export() {
+                let path = export.file.to_path_buf();
+                if self.send(Command::ImportCbz { path }) {
+                    self.importing = true;
+                    self.import_novel = Some(export.book);
+                    self.automatic_import = Some(export.file);
+                }
+            }
+        }
         if let Ok(result) = self.importer.receive.try_recv() {
             match result {
                 Ok(Some(ImportBook::Text(book))) => {
@@ -523,9 +893,13 @@ impl App {
                 Ok(Some(ImportBook::Comic(path))) => {
                     self.importing = self.send(Command::ImportCbz { path })
                 }
-                Ok(None) => self.importing = false,
+                Ok(None) => {
+                    self.importing = false;
+                    self.import_novel = None;
+                }
                 Err(error) => {
                     self.importing = false;
+                    self.import_novel = None;
                     self.say(error, true);
                 }
             }
@@ -627,6 +1001,19 @@ impl App {
                 }
                 self.bench.mark("shelf_loaded", None);
             }
+            Event::Comics {
+                offset,
+                books,
+                has_more,
+            } => {
+                self.companion.listing = false;
+                if offset == 0 {
+                    self.companion.books = books;
+                } else if offset as usize == self.companion.books.len() {
+                    self.companion.books.extend(books);
+                }
+                self.companion.has_more = has_more;
+            }
             Event::Books { .. } => {}
             Event::BookUpdated { .. } => self.list(0),
             Event::CoverRead {
@@ -637,6 +1024,7 @@ impl App {
             Event::CoverRead { .. } => {}
             Event::BookInserted { book, duplicate } => {
                 self.importing = false;
+                self.automatic_import = None;
                 self.say(
                     if duplicate {
                         self.tr("已在书库", "Already in your library")
@@ -649,7 +1037,17 @@ impl App {
                 self.bench.mark("book_imported", None);
                 self.list_pending = false;
                 self.list(0);
-                self.open(book.id, None);
+                let origin = self.import_novel.take();
+                if book.format == BookFormat::Cbz && origin.is_some() {
+                    if self.reader.book_id() == origin.as_deref()
+                        && self.returning.is_none()
+                        && self.opening.is_none()
+                    {
+                        self.open_companion(book.id);
+                    }
+                } else {
+                    self.open(book.id, None);
+                }
             }
             Event::BookOpened {
                 book,
@@ -666,6 +1064,7 @@ impl App {
                 };
                 opening.loaded = true;
                 self.comic.close();
+                self.companion = Companion::default();
                 self.illustrations.close();
                 self.bookmarks.clear();
                 self.more_bookmarks = false;
@@ -696,10 +1095,30 @@ impl App {
                 };
                 opening.loaded = true;
                 self.reader.close();
+                self.companion = Companion::default();
                 self.illustrations.close();
                 self.editing = None;
                 self.bench.mark("comic_opened", None);
                 self.comic.open(book, page);
+            }
+            Event::CompanionOpened {
+                novel_id,
+                book,
+                page,
+                source,
+            } => {
+                if self.reader.book_id() == Some(novel_id.as_str())
+                    && self.companion.pending.as_deref() == Some(book.id.as_str())
+                    && self.returning.is_none()
+                {
+                    self.companion.pending = None;
+                    self.companion.picker = false;
+                    self.companion.keyboard_focus = false;
+                    self.companion.follow_novel = source.is_some();
+                    self.companion.next_page_at = None;
+                    self.companion.source = source;
+                    self.comic.open(book, page);
+                }
             }
             Event::ComicPageRead { book_id, page } => self.comic.loaded(&book_id, page),
             Event::Illustrations {
@@ -810,6 +1229,8 @@ impl App {
             Event::Error { operation, message } => {
                 match operation {
                     "open_book" => self.opening = None,
+                    "open_companion" => self.companion.pending = None,
+                    "list_comics" => self.companion.listing = false,
                     "read_chapter" => self.reader.reset_load(),
                     "read_comic_page" => self.comic.reset_load(),
                     "read_cover" => self.covers.read_failed(),
@@ -821,7 +1242,11 @@ impl App {
                             self.reader.inline_image_failed();
                         }
                     }
-                    "insert_book" => self.importing = false,
+                    "insert_book" => {
+                        self.importing = false;
+                        self.automatic_import = None;
+                        self.import_novel = None;
+                    }
                     "list_books" => self.list_pending = false,
                     "save_progress" => {
                         self.pending_progress.clear();
@@ -980,52 +1405,49 @@ impl App {
         }
         ui.add_space(10.0);
         if self.book_list.is_empty() {
-            let message = if self.list_pending {
-                self.tr("正在加载…", "Loading…")
+            let (title, message) = if self.list_pending {
+                (
+                    self.tr("正在加载书架", "Opening library"),
+                    self.tr("正在读取本地书籍…", "Reading local books…"),
+                )
             } else if self.storage_ready && self.shelf_filter != ShelfFilter::default() {
-                self.tr("没有符合条件的书籍。", "No matching books.")
+                (
+                    self.tr("没有匹配结果", "No matches"),
+                    self.tr(
+                        "试试清除筛选或更换关键词。",
+                        "Clear filters or try another title.",
+                    ),
+                )
             } else if self.storage_ready {
-                self.tr(
-                    "拖入 TXT、EPUB 或 CBZ，也可以点击「导入书籍」。",
-                    "Drop a TXT, EPUB, or CBZ file, or choose Import book.",
+                (
+                    self.tr("书架还是空的", "Your shelf is empty"),
+                    self.tr(
+                        "导入 TXT、EPUB 或 CBZ，开始本地阅读。",
+                        "Import a TXT, EPUB, or CBZ to start reading.",
+                    ),
                 )
             } else {
-                self.tr("正在打开本地书库…", "Opening the local library…")
+                (
+                    self.tr("正在打开书库", "Opening library"),
+                    self.tr("正在初始化本地数据库…", "Initializing the local database…"),
+                )
             };
-            ui.add_space(48.0);
+            ui.add_space(28.0);
             ui.vertical_centered(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(72.0, 92.0), egui::Sense::hover());
-                let painter = ui.painter();
-                painter.rect_filled(rect, 8.0, p.surface);
-                painter.rect_filled(
-                    egui::Rect::from_min_size(rect.min, egui::vec2(12.0, rect.height())),
-                    egui::CornerRadius {
-                        nw: 8,
-                        sw: 8,
-                        ne: 0,
-                        se: 0,
-                    },
-                    p.accent_weak,
-                );
-                for i in 0..3 {
-                    let y = rect.min.y + 28.0 + i as f32 * 16.0;
-                    painter.line_segment(
-                        [
-                            egui::pos2(rect.min.x + 24.0, y),
-                            egui::pos2(rect.max.x - 14.0, y),
-                        ],
-                        egui::Stroke::new(2.0_f32, p.line),
-                    );
+                ui::empty_state(ui, p, title, message);
+                if self.storage_ready && self.shelf_filter == ShelfFilter::default() {
+                    ui.add_space(12.0);
+                    if ui::primary_button(
+                        ui,
+                        p,
+                        theme::Tokens::desktop(),
+                        self.tr("导入书籍", "Import book"),
+                    )
+                    .clicked()
+                    {
+                        self.start_import(ImportRequest::Pick);
+                    }
                 }
-                painter.rect_stroke(
-                    rect,
-                    8,
-                    egui::Stroke::new(1.5_f32, p.line),
-                    egui::StrokeKind::Middle,
-                );
-                ui.add_space(16.0);
-                ui.label(RichText::new(message).size(14.0).color(p.muted));
             });
         }
         if self.has_more
@@ -1070,23 +1492,28 @@ impl App {
                                     let Some(book) = self.book_list.get(row * columns + col) else {
                                         break;
                                     };
-                                    ui.push_id(&book.id, |ui| {
-                                        book_card(
-                                            ui,
-                                            &mut self.covers,
-                                            &self.store,
-                                            book,
-                                            card_w,
-                                            cover_h,
-                                            card_h,
-                                            is_active,
-                                            chinese,
-                                            rename_label,
-                                            status_label,
-                                            target_status,
-                                            &mut actions,
-                                        )
-                                    });
+                                    let cover = ui
+                                        .push_id(&book.id, |ui| {
+                                            book_card(
+                                                ui,
+                                                &mut self.covers,
+                                                &self.store,
+                                                book,
+                                                card_w,
+                                                cover_h,
+                                                card_h,
+                                                is_active,
+                                                chinese,
+                                                rename_label,
+                                                status_label,
+                                                target_status,
+                                                &mut actions,
+                                            )
+                                        })
+                                        .inner;
+                                    if let Some(returning) = &mut self.returning {
+                                        returning.cover(&book.id, cover);
+                                    }
                                 }
                             })
                         });
@@ -1401,8 +1828,7 @@ impl App {
         if let Some(annotation) = edit {
             self.editing = Some(MarkEdit {
                 id: Some((annotation.id, annotation.revision)),
-                loc: annotation.loc,
-                end_off: annotation.end_off,
+                ranges: Vec::new(),
                 color: annotation.color,
                 note: annotation.note.unwrap_or_default(),
             });
@@ -1515,10 +1941,9 @@ impl App {
                     color: mark.color,
                 }
             } else {
-                Command::AddAnnotation {
+                Command::AddAnnotations {
                     book_id,
-                    loc: mark.loc,
-                    end_off: mark.end_off,
+                    ranges: mark.ranges.clone(),
                     note,
                     color: mark.color,
                 }
@@ -1539,26 +1964,366 @@ impl App {
         };
         if open && !sent {
             self.editing = Some(mark);
+        } else if sent {
+            self.reader.clear_selection();
         }
     }
 
     fn close_reader(&mut self) {
+        self.close_overlays();
         self.reader.close();
         self.comic.close();
-        self.illustrations.close();
+        self.companion = Companion::default();
         self.editing = None;
         self.opening = None;
+        self.returning = None;
+    }
+
+    fn close_pages(&mut self) {
+        self.settings_open = false;
+        self.preferences_open = false;
+        self.plugins_open = false;
+        self.about_open = false;
+    }
+
+    fn close_overlays(&mut self) {
+        self.reading_ai.close();
+        self.generator.open = false;
+        self.updates.open = false;
+        self.analysis.close();
+        self.automatic_manga.visible = false;
+        self.illustrations.close();
+        self.companion.picker = false;
+    }
+
+    fn overlay_open(&self) -> bool {
+        self.reading_ai.is_open()
+            || self.generator.open
+            || self.updates.open
+            || self.analysis.is_open()
+            || self.automatic_manga.visible
+            || self.illustrations.is_open()
+            || self.companion.picker
+    }
+
+    fn return_to_shelf(&mut self, ctx: &egui::Context) {
+        self.close_overlays();
+        self.close_pages();
+        let book_id = if self.reader.ready() {
+            self.reader.book_id()
+        } else if self.comic.ready() {
+            self.comic.book_id()
+        } else {
+            None
+        };
+        if let Some(book_id) = book_id {
+            self.opening = None;
+            self.returning = Some(Returning::new(book_id.to_owned()));
+        } else {
+            self.close_reader();
+        }
+        ctx.request_repaint();
+    }
+
+    fn set_global_theme(&mut self, ctx: &egui::Context, night: bool) {
+        self.night = night;
+        theme::apply(ctx, night);
+        let font = self.settings.font_size;
+        self.reader.apply_preferences(font, None);
+        self.settings.paper = None;
+    }
+
+    fn set_reading_theme(&mut self, ctx: &egui::Context, paper: String) {
+        self.night = paper == "dark";
+        theme::apply(ctx, self.night);
+        self.reader
+            .apply_preferences(self.settings.font_size, Some(&paper));
+        self.settings.paper = Some(paper);
+    }
+
+    fn show_settings(&mut self, ui: &mut egui::Ui) {
+        let action = settings::show(ui, &mut self.settings, self.night);
+        match action {
+            Some(settings::Action::Pair) => match pairing_cli::invite(&self.data_dir) {
+                Ok(invite) => {
+                    if let Err(error) = self
+                        .settings
+                        .set_invitation(&invite.payload, invite.expires)
+                    {
+                        self.say(error, true);
+                    } else {
+                        self.pairing_invite = Some(invite);
+                    }
+                }
+                Err(error) => self.say(error.to_string(), true),
+            },
+            Some(settings::Action::Revoke(id)) => {
+                if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    match pairing_cli::revoke(&self.data_dir, &id) {
+                        Ok(()) => {
+                            self.settings.refresh_devices(&self.data_dir);
+                            self.say("设备已撤销。".into(), false);
+                        }
+                        Err(error) => self.say(error.to_string(), true),
+                    }
+                } else {
+                    self.say("该设备尚未连接。".into(), false);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn show_preferences(&mut self, ui: &mut egui::Ui) {
+        let action = reading_preferences::show(
+            ui,
+            self.night,
+            self.localized,
+            &mut self.settings.font_size,
+            &mut self.settings.paper,
+            &mut self.settings.page_style,
+            &mut self.settings.fit_width,
+        );
+        match action {
+            Some(reading_preferences::Action::Font(font)) => {
+                self.reader
+                    .apply_preferences(font, self.settings.paper.as_deref());
+            }
+            Some(reading_preferences::Action::Paper(paper)) => {
+                self.set_reading_theme(ui.ctx(), paper);
+            }
+            Some(reading_preferences::Action::PageStyle(style)) => self.settings.page_style = style,
+            Some(reading_preferences::Action::FitWidth(fit)) => {
+                self.settings.fit_width = fit;
+                self.comic.set_fit_width(fit);
+            }
+            None => {}
+        }
+    }
+
+    fn show_plugins(&mut self, ui: &mut egui::Ui) {
+        match plugins::show(ui, &mut self.plugins, &self.data_dir, self.night) {
+            Some(plugins::PluginAction::Import) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Velmira 插件", &["json"])
+                    .pick_file()
+                {
+                    match self.plugins.import(&self.data_dir, &path) {
+                        Ok(()) => self.say("插件已导入并启用。".into(), false),
+                        Err(error) => self.say(error, true),
+                    }
+                }
+            }
+            Some(plugins::PluginAction::Toggle(id, enabled)) => {
+                match self.plugins.set_enabled(&self.data_dir, &id, enabled) {
+                    Ok(()) => {}
+                    Err(error) => self.say(error, true),
+                }
+            }
+            Some(plugins::PluginAction::Remove(id)) => {
+                match self.plugins.remove(&self.data_dir, &id) {
+                    Ok(()) => self.say("插件已删除。".into(), false),
+                    Err(error) => self.say(error, true),
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn show_about(&mut self, ui: &mut egui::Ui) {
+        let p = theme::palette(self.night);
+        ui::section_header(ui, p, "关于 Velmira", Some("本地优先的小说与漫画阅读器"));
+        ui.label(format!("版本 0.1.0 · {}", env!("CARGO_PKG_VERSION")));
+        ui.label("Rust · egui · SQLite");
+        ui.label("MIT 许可证");
+        ui.separator();
+        ui.label("书籍、阅读记录、模型配置和配对信息默认只保存在本机。");
+        ui.label("AI 功能仅在发送请求时联系配置的服务。");
+        ui.separator();
+        ui::section_header(ui, p, "更新", Some("首启不联网；可随时手动检查。"));
+        let mut channel = self.updates.channel();
+        let mut automatic = self.updates.automatic();
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_value(&mut channel, Channel::Stable, "稳定版")
+                .changed()
+            {
+                self.updates.set_channel(Channel::Stable);
+            }
+            if ui
+                .selectable_value(&mut channel, Channel::Beta, "测试版")
+                .changed()
+            {
+                self.updates.set_channel(Channel::Beta);
+            }
+        });
+        if ui
+            .checkbox(&mut automatic, "本次运行自动检查更新")
+            .changed()
+        {
+            self.updates.set_automatic(automatic);
+        }
+        if ui.button("检查更新").clicked() {
+            self.close_overlays();
+            self.updates.open = true;
+        }
     }
 
     fn show_scene(&mut self, root: &mut egui::Ui, view: View) {
         let ctx = root.ctx().clone();
+        let wide_nav =
+            root.available_width() >= 900.0 && self.opening.is_none() && self.returning.is_none();
+        if wide_nav {
+            let active = match view {
+                View::Shelf | View::Novel => ui::NavAction::Library,
+                View::Comic => ui::NavAction::Manga,
+                View::Preferences => ui::NavAction::Preferences,
+                View::Settings => ui::NavAction::Settings,
+                View::Plugins => ui::NavAction::Plugins,
+                View::About => ui::NavAction::About,
+            };
+            let mut selected = None;
+            let mut open_ai = false;
+            egui::SidePanel::left("velmira-navigation")
+                .exact_width(196.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::palette(self.night).surface)
+                        .inner_margin(egui::Margin::symmetric(10, 12)),
+                )
+                .show_inside(root, |ui| {
+                    selected = ui::nav_rail(
+                        ui,
+                        theme::palette(self.night),
+                        theme::Tokens::desktop(),
+                        active,
+                        self.localized,
+                    );
+                    ui.add_space(12.0);
+                    open_ai = ui::secondary_button(
+                        ui,
+                        theme::palette(self.night),
+                        theme::Tokens::desktop(),
+                        "阅读 AI",
+                    )
+                    .clicked();
+                });
+            if open_ai {
+                self.close_overlays();
+                self.close_pages();
+                let source = self
+                    .reader
+                    .selected_text()
+                    .or_else(|| self.reader.current_paragraph())
+                    .unwrap_or_default();
+                self.reading_ai.prepare(source, self.localized);
+            }
+            match selected {
+                Some(ui::NavAction::Library) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.return_to_shelf(&ctx);
+                }
+                Some(ui::NavAction::Manga) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.generator.open = true;
+                }
+                Some(ui::NavAction::Models) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.generator.open_config();
+                }
+                Some(ui::NavAction::Preferences) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.preferences_open = true;
+                }
+                Some(ui::NavAction::Settings) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.settings.refresh_devices(&self.data_dir);
+                    self.settings_open = true;
+                }
+                Some(ui::NavAction::Plugins) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.plugins_open = true;
+                }
+                Some(ui::NavAction::About) => {
+                    self.close_overlays();
+                    self.close_pages();
+                    self.about_open = true;
+                }
+                None => {}
+            }
+        }
+        let p = theme::palette(self.night);
+        let mut import_request = None;
+        if self.generator.open {
+            egui::SidePanel::right("manga-project-dock")
+                .width_range(420.0..=680.0)
+                .default_width(560.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.surface)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show_inside(root, |ui| {
+                    import_request = self.generator.show(ui);
+                });
+        } else if self.reading_ai.is_open() {
+            egui::SidePanel::right("reading-ai-dock")
+                .width_range(400.0..=560.0)
+                .default_width(460.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.surface)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show_inside(root, |ui| self.reading_ai.show(ui));
+        } else if self.automatic_manga.visible {
+            let mut style = self.automatic_style.clone();
+            egui::SidePanel::right("automatic-manga-dock")
+                .width_range(420.0..=620.0)
+                .default_width(500.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.surface)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show_inside(root, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("自动漫画项目").strong().size(18.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("关闭").clicked() {
+                                self.automatic_manga.visible = false;
+                            }
+                        });
+                    });
+                    ui.label("画风");
+                    ui.add(egui::TextEdit::singleline(&mut style).char_limit(400));
+                    self.automatic_manga
+                        .show(ui, vm_ai::manga::Layout::Automatic, &style, || {
+                            self.reading_ai.text_service()
+                        });
+                });
+            self.automatic_style = style;
+        }
         let mut back = false;
         let mut toggle_theme = false;
         let mut generate_comic = false;
         let mut open_reading_ai = false;
+        let mut open_preferences = false;
+        let mut open_auto = false;
+        let mut open_companion = false;
+        let mut open_analysis = false;
         let mut show_illustrations = false;
         let mut toggle_sidebar = false;
+        let mut close_all = false;
         let p = theme::palette(self.night);
+        let contents_available = view == View::Novel
+            && (self.comic.book_id().is_none() || root.available_width() >= 960.0);
         let toolbar_frame = egui::Frame::new()
             .fill(p.surface)
             .inner_margin(egui::Margin::symmetric(16, 10));
@@ -1569,16 +2334,36 @@ impl App {
         })
         .frame(toolbar_frame)
         .show_inside(root, |ui| {
-            ui.horizontal(|ui| {
+            if matches!(
+                view,
+                View::Preferences | View::Settings | View::Plugins | View::About
+            ) {
+                ui.horizontal(|ui| {
+                    if ui.button(self.tr("返回书架", "Library")).clicked() {
+                        back = true;
+                    }
+                    ui.separator();
+                    let title = match view {
+                        View::Preferences => "阅读设置",
+                        View::Settings => "离线与同步",
+                        View::Plugins => "插件",
+                        View::About => "关于",
+                        _ => unreachable!(),
+                    };
+                    ui.label(RichText::new(title).strong().color(p.ink));
+                });
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
                 let (logo, _) =
                     ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                ui.painter().rect_filled(logo, 8.0, p.accent);
+                ui.painter().rect_filled(logo, 8.0, p.surface2);
                 ui.painter().text(
                     logo.center(),
                     egui::Align2::CENTER_CENTER,
                     "V",
                     egui::FontId::proportional(16.0),
-                    p.on_accent,
+                    p.ink,
                 );
                 ui.add_space(2.0);
                 ui.label(RichText::new("Velmira").size(20.0).strong().color(p.ink));
@@ -1603,27 +2388,72 @@ impl App {
                 if ui.add_enabled(enabled, button).clicked() {
                     self.start_import(ImportRequest::Pick);
                 }
-                if view == View::Novel && ui.button("小说转漫画").clicked() {
-                    generate_comic = true;
+                if !wide_nav {
+                    ui.menu_button(self.tr("设置", "Settings"), |ui| {
+                        if ui.button(self.tr("阅读设置", "Reading settings")).clicked() {
+                            self.close_overlays();
+                            self.close_pages();
+                            self.preferences_open = true;
+                        }
+                        if ui.button(self.tr("离线与同步", "Offline & sync")).clicked() {
+                            self.close_overlays();
+                            self.close_pages();
+                            self.settings.refresh_devices(&self.data_dir);
+                            self.settings_open = true;
+                        }
+                        if ui.button(self.tr("插件", "Plugins")).clicked() {
+                            self.close_overlays();
+                            self.close_pages();
+                            self.plugins_open = true;
+                        }
+                        if ui.button(self.tr("关于", "About")).clicked() {
+                            self.close_overlays();
+                            self.close_pages();
+                            self.about_open = true;
+                        }
+                    });
                 }
                 if view == View::Novel && ui.button(self.tr("阅读 AI", "Reading AI")).clicked() {
                     open_reading_ai = true;
                 }
-                if view == View::Novel && self.reader.is_epub() && ui.button("插图").clicked() {
-                    show_illustrations = true;
-                }
                 if view == View::Novel {
-                    let label = if self.reader_sidebar_open {
-                        self.tr("收起目录", "Hide contents")
-                    } else {
-                        self.tr("展开目录", "Show contents")
-                    };
-                    toggle_sidebar = ui
-                        .button(label)
-                        .on_hover_text(
-                            self.tr("显示或隐藏阅读侧栏", "Show or hide the reader sidebar"),
-                        )
-                        .clicked();
+                    ui.menu_button(self.tr("更多", "More"), |ui| {
+                        if ui.button("新建漫画项目").clicked() {
+                            generate_comic = true;
+                        }
+                        if ui.button("自动漫画项目").clicked() {
+                            open_auto = true;
+                        }
+                        if ui
+                            .button(self.tr("并排阅读", "Read side by side"))
+                            .clicked()
+                        {
+                            open_companion = true;
+                        }
+                        if ui.button(self.tr("章节分析", "Analyze chapter")).clicked() {
+                            open_analysis = true;
+                        }
+                        if self.reader.is_epub() && ui.button("插图").clicked() {
+                            show_illustrations = true;
+                        }
+                        if contents_available {
+                            let label = if self.reader_sidebar_open {
+                                self.tr("收起目录", "Hide contents")
+                            } else {
+                                self.tr("展开目录", "Show contents")
+                            };
+                            if ui.button(label).clicked() {
+                                toggle_sidebar = true;
+                            }
+                        }
+                        if ui.button(self.tr("阅读设置", "Reading settings")).clicked() {
+                            open_preferences = true;
+                        }
+                    });
+                }
+                if self.overlay_open() && ui.button(self.tr("收起全部", "Close all")).clicked()
+                {
+                    close_all = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if self.night {
@@ -1634,9 +2464,6 @@ impl App {
                     if ui.button(label).clicked() {
                         toggle_theme = true;
                     }
-                    if ui.button("更新").clicked() {
-                        self.updates.open = true;
-                    }
                 });
             });
             if let Some((notice, error)) = &self.notice {
@@ -1646,14 +2473,17 @@ impl App {
             }
         });
         if toggle_theme {
-            self.night = !self.night;
-            theme::apply(&ctx, self.night);
+            self.set_global_theme(&ctx, !self.night);
             ctx.request_repaint();
         }
         if toggle_sidebar {
             self.reader_sidebar_open = !self.reader_sidebar_open;
         }
+        if close_all {
+            self.close_overlays();
+        }
         if generate_comic {
+            self.close_overlays();
             if let (Some(book), Some(source)) = (self.reader.book_id(), self.reader.comic_source())
             {
                 self.generator
@@ -1661,12 +2491,59 @@ impl App {
             }
         }
         if open_reading_ai {
+            self.close_overlays();
             if let Some(source) = self
                 .reader
                 .selected_text()
                 .or_else(|| self.reader.current_paragraph())
             {
                 self.reading_ai.prepare(source, self.localized);
+            }
+        }
+        if open_preferences {
+            self.close_overlays();
+            self.close_pages();
+            self.preferences_open = true;
+        }
+        if open_auto {
+            self.close_overlays();
+            if let Some(book) = self.reader.book_id() {
+                let index = self.reader.chapter_index();
+                if self.automatic_manga.open(
+                    &ctx,
+                    book,
+                    self.reader.book_title(),
+                    index,
+                    self.reader.toc().len() as u32,
+                ) {
+                    self.automatic_manga.visible = true;
+                } else {
+                    self.say("另一个自动漫画项目仍在运行。".into(), true);
+                }
+            }
+        }
+        if open_companion {
+            self.close_overlays();
+            self.companion.picker = true;
+            self.list_comics(0);
+        }
+        if open_analysis {
+            self.close_overlays();
+            let index = self.reader.chapter_index();
+            if let Some(book) = self.reader.book_id() {
+                let title = self
+                    .reader
+                    .toc()
+                    .get(index as usize)
+                    .map_or("", String::as_str);
+                self.analysis.prepare(
+                    book,
+                    self.reader.loc().unwrap_or(Loc {
+                        chapter: index,
+                        ..Loc::default()
+                    }),
+                    title,
+                );
             }
         }
         if show_illustrations {
@@ -1680,27 +2557,51 @@ impl App {
             }
         }
         let p = theme::palette(self.night);
-        if view == View::Comic {
+        if view == View::Preferences {
+            egui::CentralPanel::default().show_inside(root, |ui| self.show_preferences(ui));
+        } else if view == View::Settings {
+            egui::CentralPanel::default().show_inside(root, |ui| self.show_settings(ui));
+        } else if view == View::Plugins {
+            egui::CentralPanel::default().show_inside(root, |ui| self.show_plugins(ui));
+        } else if view == View::About {
+            egui::CentralPanel::default().show_inside(root, |ui| self.show_about(ui));
+        } else if view == View::Comic {
             let mut flip = None;
             egui::CentralPanel::default().show_inside(root, |ui| {
-                flip = self.comic.show(ui, self.localized);
+                flip = self.comic.show(ui, self.localized, true);
             });
             if let Some((book_id, page_index)) = flip {
-                if !self.send(Command::ReadComicPage {
-                    book_id,
-                    page_index,
-                }) {
-                    self.comic.reset_load();
-                }
+                self.flip_comic(book_id, page_index);
             }
         } else if view == View::Novel {
             let dialog_open = !root.is_enabled()
                 || self.editing.is_some()
                 || self.generator.open
                 || self.updates.open
-                || self.illustrations.is_open();
-            let dialog_open = dialog_open || self.reading_ai.is_open();
-            if !dialog_open
+                || self.illustrations.is_open()
+                || self.automatic_manga.visible;
+            let dialog_open = dialog_open
+                || self.reading_ai.is_open()
+                || self.companion.picker
+                || self.analysis.is_open();
+            let novel_right = self.show_comic_pane(root, dialog_open);
+            let mut novel_ui;
+            let root = if let Some(right) = novel_right {
+                let mut bounds = root.available_rect_before_wrap();
+                bounds.set_right(right);
+                novel_ui = root.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt("split-novel-pane")
+                        .max_rect(bounds),
+                );
+                novel_ui.set_clip_rect(bounds.intersect(root.clip_rect()));
+                &mut novel_ui
+            } else {
+                root
+            };
+            let reader_keys = !self.companion.keyboard_focus;
+            if reader_keys
+                && !dialog_open
                 && !egui::Popup::is_any_open(&ctx)
                 && (!ctx.wants_keyboard_input() || self.reader.navigation_has_focus(&ctx))
             {
@@ -1729,10 +2630,16 @@ impl App {
                     }
                 }
             }
-            let resizing = self.reader_sidebar(root);
+            let resizing = if novel_right.is_none() || root.available_width() >= 560.0 {
+                self.reader_sidebar(root)
+            } else {
+                false
+            };
             let mut chapter_step = None;
             egui::CentralPanel::default().show_inside(root, |ui| {
-                chapter_step = self.reader.show(ui, self.localized, resizing, dialog_open);
+                chapter_step =
+                    self.reader
+                        .show(ui, self.localized, resizing, dialog_open, reader_keys);
             });
             if let Some((chapter, last_page)) = chapter_step {
                 if let Some((book_id, chapter)) = self.reader.prepare_adjacent(chapter, last_page) {
@@ -1741,14 +2648,30 @@ impl App {
                     }
                 }
             }
-            if let Some((loc, end_off)) = self.reader.take_mark() {
-                self.editing = Some(MarkEdit {
-                    id: None,
-                    loc,
-                    end_off,
-                    color: vm_store::AnnotationColor::Yellow,
-                    note: String::new(),
-                });
+            if !dialog_open && chapter_step.is_none() {
+                let now = ctx.input(|input| input.time);
+                if let Some(due) = self.companion.next_page_at {
+                    if now >= due {
+                        let (more, step) = self.reader.advance_automatically();
+                        self.companion.next_page_at =
+                            more.then_some(now + f64::from(self.companion.interval_seconds));
+                        if let Some((chapter, last_page)) = step {
+                            if let Some((book_id, chapter)) =
+                                self.reader.prepare_adjacent(chapter, last_page)
+                            {
+                                if !self.send(Command::ReadChapter { book_id, chapter }) {
+                                    self.reader.reset_load();
+                                }
+                            }
+                        }
+                    }
+                    if let Some(next) = self.companion.next_page_at {
+                        ctx.request_repaint_after(Duration::from_secs_f64((next - now).max(0.0)));
+                    }
+                }
+            }
+            if !dialog_open {
+                self.show_selection_actions(&ctx);
             }
         } else {
             let shelf_frame = egui::Frame::new()
@@ -1760,12 +2683,17 @@ impl App {
                     self.shelf(ui);
                 });
         }
+        if let Some(request) = import_request {
+            self.start_import(request);
+        }
         if back {
-            self.close_reader();
-            ctx.request_repaint();
+            self.return_to_shelf(&ctx);
         }
     }
     fn draw(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+            self.ui_preview = !self.ui_preview;
+        }
         if self.first_ui {
             self.first_ui = false;
             self.bench.mark("first_ui_frame", None);
@@ -1781,8 +2709,24 @@ impl App {
             }
         }
         self.events(ctx);
+        let pairing_result = self
+            .pairing_invite
+            .as_ref()
+            .and_then(|invite| invite.poll());
+        if let Some(result) = pairing_result {
+            self.pairing_invite = None;
+            match result {
+                Ok(id) => {
+                    self.settings.refresh_devices(&self.data_dir);
+                    self.say(format!("已配对设备 {id}"), false);
+                }
+                Err(error) => self.say(error, true),
+            }
+        }
         let closing = ctx.input(|input| input.viewport().close_requested());
         let (font_size, paper) = self.reader.preferences();
+        self.settings.font_size = font_size;
+        self.settings.paper = paper.map(str::to_owned);
         self.saved_preferences.update(
             ctx,
             preferences::Preferences {
@@ -1817,10 +2761,18 @@ impl App {
         }) {
             self.start_import(ImportRequest::File(path));
         }
-        let view = if self.comic.book_id().is_some() {
-            View::Comic
+        let view = if self.preferences_open {
+            View::Preferences
+        } else if self.settings_open {
+            View::Settings
+        } else if self.plugins_open {
+            View::Plugins
+        } else if self.about_open {
+            View::About
         } else if self.reader.is_open() {
             View::Novel
+        } else if self.comic.book_id().is_some() {
+            View::Comic
         } else {
             View::Shelf
         };
@@ -1841,13 +2793,20 @@ impl App {
         }
         let preparing = !ready && self.opening.as_ref().is_some_and(|open| open.loaded);
         let reveal = Opening::frame(&mut self.opening, ctx, ready, ctx.screen_rect());
-        let shown = if preparing || reveal.is_some() {
+        let returning = self.returning.is_some();
+        let shown = if preparing || reveal.is_some() || returning {
             View::Shelf
         } else {
             view
         };
         let now = ctx.input(|input| input.time);
         if self.view != shown {
+            if matches!(
+                shown,
+                View::Shelf | View::Preferences | View::Settings | View::Plugins | View::About
+            ) {
+                self.close_overlays();
+            }
             self.view_entered = now;
             self.view = shown;
         }
@@ -1855,27 +2814,30 @@ impl App {
             let mut ui = opening::scene(
                 ctx,
                 egui::Id::new("shelf-scene"),
-                reveal.is_none(),
+                reveal.is_none() && !returning,
                 ctx.screen_rect(),
             );
-            let fade = ((now - self.view_entered) / 0.16).clamp(0.0, 1.0) as f32;
-            if fade < 1.0 && !preparing && reveal.is_none() {
-                ui.multiply_opacity(0.72 + 0.28 * fade);
-                ctx.request_repaint();
-            }
             self.show_scene(&mut ui, View::Shelf);
         }
-        if view != View::Shelf {
+        let return_frame = self
+            .returning
+            .as_mut()
+            .and_then(|motion| motion.frame(ctx, ctx.screen_rect()));
+        if returning && return_frame.is_none() {
+            self.close_reader();
+            ctx.request_repaint();
+        }
+        if view != View::Shelf && (!returning || return_frame.is_some()) {
             let mut ui = opening::scene(
                 ctx,
                 egui::Id::new("reader-scene"),
-                !preparing && reveal.is_none(),
+                !preparing && reveal.is_none() && !returning,
                 ctx.screen_rect(),
             );
             if preparing {
                 ui.set_invisible();
             }
-            if let Some(reveal) = reveal {
+            if let Some(reveal) = reveal.or(return_frame) {
                 reveal.paint(&mut ui, theme::palette(self.night).bg, |ui| {
                     self.show_scene(ui, view)
                 });
@@ -1884,13 +2846,18 @@ impl App {
             }
         }
         self.annotation_editor(ctx);
-        if !self.importing && self.storage_ready {
-            if let Some(request) = self.generator.show(ctx) {
-                self.start_import(request);
+        self.comic_picker(ctx);
+        self.updates.show(ctx);
+        if self.ui_preview {
+            egui::Window::new("UI 验证页 · F12")
+                .default_width(620.0)
+                .show(ctx, |ui| ui::validation_page(ui, self.night));
+        }
+        if let Some((book, loc)) = self.analysis.show(ctx, || self.reading_ai.text_service()) {
+            if self.reader.book_id() == Some(book.as_str()) {
+                self.jump(loc);
             }
         }
-        self.updates.show(ctx);
-        self.reading_ai.show(ctx);
         if let Some(request) = self.reader.inline_image_request() {
             if !self.send(request) {
                 self.reader.inline_image_failed();

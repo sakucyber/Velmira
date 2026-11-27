@@ -28,13 +28,12 @@ pub(super) struct ComicReader {
 }
 
 impl ComicReader {
-    pub(super) fn read_page(
-        &mut self,
+    fn reader<'a>(
+        &'a mut self,
         db: &Connection,
         blobs: &Path,
         book_id: &str,
-        index: u32,
-    ) -> Result<ComicPage> {
+    ) -> Result<&'a mut CbzReader<File>> {
         if self.active.as_ref().is_none_or(|(id, _)| id != book_id) {
             let hash: String = db
                 .prepare_cached("SELECT blob_hash FROM comic_archive WHERE book_id = ?1")?
@@ -42,7 +41,26 @@ impl ComicReader {
             let reader = CbzReader::open(&blob_path(blobs, &hash)?)?;
             self.active = Some((book_id.to_owned(), reader));
         }
-        let (_, reader) = self.active.as_mut().expect("reader opened above");
+        Ok(&mut self.active.as_mut().expect("reader opened above").1)
+    }
+
+    pub(super) fn source(
+        &mut self,
+        db: &Connection,
+        blobs: &Path,
+        book_id: &str,
+    ) -> Result<Option<vm_core::ComicSource>> {
+        Ok(self.reader(db, blobs, book_id)?.source())
+    }
+
+    pub(super) fn read_page(
+        &mut self,
+        db: &Connection,
+        blobs: &Path,
+        book_id: &str,
+        index: u32,
+    ) -> Result<ComicPage> {
+        let reader = self.reader(db, blobs, book_id)?;
         let index_usize = index as usize;
         let media_type = reader
             .pages()

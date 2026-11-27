@@ -15,11 +15,12 @@ use vm_store::{
 
 use crate::{
     automatic_manga::AutomaticManga,
+    chapter_analysis::Analysis,
     comic::Comic,
     covers::ShelfCovers,
-    mobile_ui::{self, BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT},
+    mobile_ui::{self, Detent, BOTTOM_BAR_HEIGHT, TOP_BAR_HEIGHT},
     models::Models,
-    opening::{self, Opening},
+    opening::{self, Opening, Returning},
     peer_sync::PeerSync,
     preferences::{Preferences, SavedPreferences},
     reader::Reader,
@@ -48,6 +49,8 @@ enum Drawer {
     Network,
     Manga,
     AutomaticManga,
+    ChapterAnalysis,
+    Plugins,
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +73,7 @@ type ParsedBook = (PathBuf, Result<ImportBook, String>);
 
 pub(crate) struct Library {
     android: AndroidApp,
+    data_dir: PathBuf,
     store: Store,
     reader: Reader,
     comic: Comic,
@@ -83,6 +87,7 @@ pub(crate) struct Library {
     shelf_filter: ShelfFilter,
     managed_book: Option<BookSummary>,
     opening: Option<Opening>,
+    returning: Option<Returning>,
     picking: bool,
     parsing: Option<Receiver<ParsedBook>>,
     importing: Option<PathBuf>,
@@ -91,6 +96,7 @@ pub(crate) struct Library {
     drawer: Option<Drawer>,
     drawn_drawer: Option<Drawer>,
     drawer_parent: Option<Drawer>,
+    sheet_detent: Detent,
     controls: bool,
     handles_back: bool,
     dark_bar_icons: Option<bool>,
@@ -98,6 +104,8 @@ pub(crate) struct Library {
     text_field: Option<Field>,
     models: Models,
     automatic_manga: AutomaticManga,
+    analysis: Analysis,
+    plugins: crate::plugins::Registry,
     peers: PeerSync,
     bookmarks: Vec<Bookmark>,
     more_bookmarks: bool,
@@ -107,6 +115,8 @@ pub(crate) struct Library {
     hits: Vec<SearchHit>,
     mark: Option<MarkEditor>,
     comic_progress: Option<(String, Loc)>,
+    page_style: crate::reading_preferences::PageStyle,
+    comic_fit_width: bool,
 }
 
 impl Library {
@@ -127,7 +137,7 @@ impl Library {
             .insert(0, "velmira-cjk".into());
         ctx.set_fonts(fonts);
         let (preferences, prefs) = SavedPreferences::load(data_dir);
-        theme::apply(&ctx, prefs.night);
+        theme::apply_with_tokens(&ctx, prefs.night, theme::Tokens::android(1.0));
         let wake = ctx.clone();
         let store = Store::spawn(data_dir.join("velmira.db"), move || wake.request_repaint())
             .map_err(std::io::Error::other)?;
@@ -135,6 +145,7 @@ impl Library {
         reader.apply_preferences(prefs.font_size, prefs.paper.as_deref());
         Ok(Self {
             android,
+            data_dir: data_dir.to_owned(),
             store,
             reader,
             comic: Comic::spawn(ctx.clone())?,
@@ -148,6 +159,7 @@ impl Library {
             shelf_filter: ShelfFilter::default(),
             managed_book: None,
             opening: None,
+            returning: None,
             picking: false,
             parsing: None,
             importing: None,
@@ -156,6 +168,7 @@ impl Library {
             drawer: None,
             drawn_drawer: None,
             drawer_parent: None,
+            sheet_detent: Detent::Half,
             controls: false,
             handles_back: false,
             dark_bar_icons: None,
@@ -163,6 +176,8 @@ impl Library {
             text_field: None,
             models: Models::new(data_dir),
             automatic_manga: AutomaticManga::new(data_dir),
+            analysis: Analysis::new(data_dir),
+            plugins: crate::plugins::Registry::load(data_dir).unwrap_or_default(),
             peers: PeerSync::new(data_dir),
             bookmarks: Vec::new(),
             more_bookmarks: false,
@@ -172,6 +187,8 @@ impl Library {
             hits: Vec::new(),
             mark: None,
             comic_progress: None,
+            page_style: crate::reading_preferences::PageStyle::Page,
+            comic_fit_width: false,
         })
     }
 
@@ -276,6 +293,9 @@ impl Library {
     }
 
     fn open(&mut self, book_id: String, origin: Option<egui::Rect>) {
+        if self.returning.is_some() {
+            self.close_reader();
+        }
         if self.opening.is_none()
             && self.send(Command::OpenBook {
                 book_id: book_id.clone(),
@@ -485,6 +505,7 @@ impl Library {
 
     fn close_reader(&mut self) {
         self.opening = None;
+        self.returning = None;
         self.reader.close();
         self.models.book_context(None);
         self.comic.close();
@@ -494,6 +515,26 @@ impl Library {
         self.controls = false;
         self.mark = None;
         self.notice = None;
+    }
+
+    fn return_to_shelf(&mut self, ctx: &egui::Context) {
+        if self.returning.is_some() {
+            return;
+        }
+        let book_id = if self.reader.ready() {
+            self.reader.book_id()
+        } else if self.comic.ready() {
+            self.comic.book_id()
+        } else {
+            None
+        };
+        if let Some(book_id) = book_id {
+            self.opening = None;
+            self.returning = Some(Returning::new(book_id.to_owned()));
+        } else {
+            self.close_reader();
+        }
+        ctx.request_repaint();
     }
 
     fn shelf(&mut self, ui: &mut egui::Ui) {
@@ -553,18 +594,25 @@ impl Library {
             }
         });
         if self.books.is_empty() {
-            ui.label(
-                RichText::new(if self.listing || !self.ready {
-                    "正在打开书库…"
-                } else if self.shelf_filter.status == ShelfStatus::Removed {
-                    "没有移出的书籍"
-                } else if self.shelf_filter != ShelfFilter::default() {
-                    "没有匹配的书籍"
-                } else {
-                    "导入 TXT、EPUB 或 CBZ，在本机离线阅读。"
-                })
-                .color(p.muted),
-            );
+            let (title, message) = if self.listing || !self.ready {
+                ("正在打开书库", "正在读取本地书籍…")
+            } else if self.shelf_filter.status == ShelfStatus::Removed {
+                ("没有移出的书籍", "从书架移出的书籍会保留在这里。")
+            } else if self.shelf_filter != ShelfFilter::default() {
+                ("没有匹配结果", "试试清除筛选或更换关键词。")
+            } else {
+                ("书架还是空的", "导入 TXT、EPUB 或 CBZ，在本机离线阅读。")
+            };
+            ui.add_space(18.0);
+            crate::ui::empty_state(ui, p, title, message);
+            if self.ready && self.shelf_filter == ShelfFilter::default() {
+                ui.add_space(12.0);
+                if crate::ui::primary_button(ui, p, theme::Tokens::android(1.0), "导入书籍")
+                    .clicked()
+                {
+                    self.begin_import();
+                }
+            }
         }
 
         let width = ui.available_width();
@@ -587,6 +635,10 @@ impl Library {
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     let cover = self.covers.show_at(ui, &self.store, book, cover);
+                                    if let Some(returning) = &mut self.returning {
+                                        returning
+                                            .cover(&book.id, cover.rect.intersect(ui.clip_rect()));
+                                    }
                                     let title_clicked = ui
                                         .add_sized(
                                             [card, 30.0],
@@ -736,6 +788,9 @@ impl Library {
                     .or_else(|| self.reader.current_paragraph()),
             );
         }
+        if self.drawer != Some(tab) {
+            self.sheet_detent = Detent::Half;
+        }
         self.drawer = Some(tab);
         self.drawer_parent = None;
     }
@@ -839,6 +894,14 @@ impl Library {
         }
     }
 
+    fn reader_chrome_is_dark(&self) -> bool {
+        if self.reader.is_open() {
+            self.reader.uses_dark_paper(self.night)
+        } else {
+            self.night
+        }
+    }
+
     fn drawer(&mut self, ctx: &egui::Context, safe: egui::Rect) {
         let active = self.drawer.is_some();
         let progress = ctx.animate_bool_with_time_and_easing(
@@ -853,113 +916,121 @@ impl Library {
         let Some(tab) = self.drawn_drawer else {
             return;
         };
-        let p = theme::palette(self.night);
-        let close = mobile_ui::sheet(ctx, safe, progress, active, p.surface, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            let (handle, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
-            ui.painter().rect_filled(
-                egui::Rect::from_center_size(handle.center(), egui::vec2(32.0, 3.0)),
-                2,
-                p.line,
-            );
-            let tabs = self.reader.is_open()
-                && matches!(
-                    tab,
-                    Drawer::Contents | Drawer::Bookmarks | Drawer::Search | Drawer::Settings
-                );
-            let mut close = false;
-            ui.horizontal(|ui| {
-                if tabs {
-                    let width =
-                        ((ui.available_width() - 4.0 * ui.spacing().item_spacing.x) / 5.0).max(1.0);
-                    for (candidate, title) in [
-                        (Drawer::Contents, "目录"),
-                        (Drawer::Bookmarks, "书签"),
-                        (Drawer::Search, "搜索"),
-                        (Drawer::Settings, "设置"),
-                    ] {
-                        let active = candidate == tab;
-                        let text = RichText::new(title).size(14.0).color(if active {
-                            p.accent
-                        } else {
-                            p.ink
-                        });
-                        let button = if active {
-                            egui::Button::new(text.strong())
-                                .fill(p.accent_weak)
-                                .stroke(egui::Stroke::NONE)
-                        } else {
-                            egui::Button::new(text).frame(false)
-                        };
-                        if ui.add_sized([width, 46.0], button).clicked() {
-                            self.set_drawer(candidate);
+        let night = self.reader_chrome_is_dark();
+        let p = theme::palette(night);
+        let tokens = theme::Tokens::android(1.0);
+        let response = mobile_ui::sheet(
+            ctx,
+            safe,
+            progress,
+            active,
+            theme::visuals_with_tokens(night, tokens),
+            tokens,
+            self.sheet_detent,
+            |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                let tabs = self.reader.is_open()
+                    && matches!(
+                        tab,
+                        Drawer::Contents | Drawer::Bookmarks | Drawer::Search | Drawer::Settings
+                    );
+                let mut close = false;
+                ui.horizontal(|ui| {
+                    if tabs {
+                        let width = ((ui.available_width() - 4.0 * ui.spacing().item_spacing.x)
+                            / 5.0)
+                            .max(1.0);
+                        for (candidate, title) in [
+                            (Drawer::Contents, "目录"),
+                            (Drawer::Bookmarks, "书签"),
+                            (Drawer::Search, "搜索"),
+                            (Drawer::Settings, "设置"),
+                        ] {
+                            let active = candidate == tab;
+                            let text = RichText::new(title).size(14.0).color(if active {
+                                p.accent
+                            } else {
+                                p.ink
+                            });
+                            let button = if active {
+                                egui::Button::new(text.strong())
+                                    .fill(p.accent_weak)
+                                    .stroke(egui::Stroke::NONE)
+                            } else {
+                                egui::Button::new(text).frame(false)
+                            };
+                            if ui.add_sized([width, 46.0], button).clicked() {
+                                self.set_drawer(candidate);
+                            }
                         }
-                    }
-                    close = ui
-                        .add_sized(
-                            [width, 46.0],
-                            egui::Button::new(RichText::new("完成").size(14.0).color(p.accent))
-                                .frame(false),
-                        )
-                        .clicked();
-                } else {
-                    let title = match tab {
-                        Drawer::Models => "模型池",
-                        Drawer::Assistant => "阅读 AI",
-                        Drawer::Annotation => "批注",
-                        Drawer::Marks => "本章批注与高亮",
-                        Drawer::ShelfFilters => "筛选与排序",
-                        Drawer::ManageBook => "书籍管理",
-                        Drawer::ModelLibrary => "模型库",
-                        Drawer::Prompt => "提示词",
-                        Drawer::Memory => "长期记忆",
-                        Drawer::Translation => "翻译服务",
-                        Drawer::WebSearch => "联网搜索",
-                        Drawer::Network => "局域网同步",
-                        Drawer::Manga => "漫画与画风",
-                        Drawer::AutomaticManga => "自动漫画",
-                        _ => "设置",
-                    };
-                    ui.label(RichText::new(title).size(21.0).strong().color(p.ink));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let label = if self.drawer_parent.is_some() {
-                            "返回"
-                        } else {
-                            "完成"
-                        };
                         close = ui
                             .add_sized(
-                                [64.0, 46.0],
-                                egui::Button::new(RichText::new(label).color(p.accent))
+                                [width, 46.0],
+                                egui::Button::new(RichText::new("完成").size(14.0).color(p.accent))
                                     .frame(false),
                             )
                             .clicked();
-                    });
+                    } else {
+                        let title = match tab {
+                            Drawer::Models => "模型池",
+                            Drawer::Assistant => "阅读 AI",
+                            Drawer::Annotation => "批注",
+                            Drawer::Marks => "本章批注与高亮",
+                            Drawer::ShelfFilters => "筛选与排序",
+                            Drawer::ManageBook => "书籍管理",
+                            Drawer::ModelLibrary => "模型库",
+                            Drawer::Prompt => "提示词",
+                            Drawer::Memory => "长期记忆",
+                            Drawer::Translation => "翻译服务",
+                            Drawer::WebSearch => "联网搜索",
+                            Drawer::Network => "局域网同步",
+                            Drawer::Manga => "漫画与画风",
+                            Drawer::AutomaticManga => "自动漫画项目",
+                            Drawer::ChapterAnalysis => "章节分析",
+                            Drawer::Plugins => "插件",
+                            _ => "设置",
+                        };
+                        ui.label(RichText::new(title).size(21.0).strong().color(p.ink));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if self.drawer_parent.is_some() {
+                                "返回"
+                            } else {
+                                "完成"
+                            };
+                            close = ui
+                                .add_sized(
+                                    [64.0, 46.0],
+                                    egui::Button::new(RichText::new(label).color(p.accent))
+                                        .frame(false),
+                                )
+                                .clicked();
+                        });
+                    }
+                });
+                ui.separator();
+                if tab == Drawer::Contents {
+                    self.contents(ui);
+                } else if tab == Drawer::Marks {
+                    self.marks(ui);
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("drawer-body", tab))
+                        .max_height(ui.available_height().max(0.0))
+                        .min_scrolled_height(0.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.drawer_content(ui, tab));
                 }
-            });
-            ui.separator();
-            if tab == Drawer::Contents {
-                self.contents(ui);
-            } else if tab == Drawer::Marks {
-                self.marks(ui);
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt(("drawer-body", tab))
-                    .max_height(ui.available_height().max(0.0))
-                    .min_scrolled_height(0.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.drawer_content(ui, tab));
-            }
-            close
-        });
-        if close {
+                close
+            },
+        );
+        self.sheet_detent = response.detent;
+        if response.close {
             self.dismiss_drawer();
         }
     }
 
     fn contents(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(self.night);
+        let p = theme::palette(ui.visuals().dark_mode);
         let label = if self.filter.trim().is_empty() {
             "筛选目录"
         } else {
@@ -1027,7 +1098,7 @@ impl Library {
     }
 
     fn drawer_content(&mut self, ui: &mut egui::Ui, tab: Drawer) {
-        let p = theme::palette(self.night);
+        let p = theme::palette(ui.visuals().dark_mode);
         match tab {
             Drawer::Contents => self.contents(ui),
             Drawer::Bookmarks => {
@@ -1142,7 +1213,38 @@ impl Library {
             Drawer::Memory => self.models.prompt_settings(ui, &self.android, true),
             Drawer::WebSearch => self.models.web_search(ui, &self.android),
             Drawer::Manga => self.models.manga(ui, &self.android),
-            Drawer::AutomaticManga => self.automatic_manga.show(ui, &self.models),
+            Drawer::AutomaticManga => {
+                let (layout, style) = self.models.manga_options();
+                self.automatic_manga
+                    .show(ui, layout, style, || self.models.manga_service());
+            }
+            Drawer::ChapterAnalysis => {
+                if let Some((book, loc)) = self.analysis.content(ui, || self.models.service()) {
+                    if self.reader.book_id() == Some(book.as_str()) {
+                        self.drawer_parent = None;
+                        self.dismiss_drawer();
+                        self.jump(loc);
+                    }
+                }
+            }
+            Drawer::Plugins => match crate::plugins::show(
+                ui,
+                &mut self.plugins,
+                &self.data_dir,
+                ui.visuals().dark_mode,
+            ) {
+                Some(crate::plugins::PluginAction::Toggle(id, enabled)) => {
+                    if let Err(error) = self.plugins.set_enabled(&self.data_dir, &id, enabled) {
+                        self.notice = Some(error);
+                    }
+                }
+                Some(crate::plugins::PluginAction::Remove(id)) => {
+                    if let Err(error) = self.plugins.remove(&self.data_dir, &id) {
+                        self.notice = Some(error);
+                    }
+                }
+                None => {}
+            },
             Drawer::Network => self.peers.show(ui, &self.android),
             Drawer::Assistant => {
                 if self.models.assistant(ui) {
@@ -1158,7 +1260,7 @@ impl Library {
     }
 
     fn reader_settings(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(self.night);
+        let p = theme::palette(ui.visuals().dark_mode);
         let mode = if self.night {
             "界面主题 · 夜间"
         } else {
@@ -1166,71 +1268,39 @@ impl Library {
         };
         if mobile_ui::list_row(ui, "night", mode, p.ink, p.surface2).clicked() {
             self.night = !self.night;
-            theme::apply(ui.ctx(), self.night);
+            theme::apply_with_tokens(ui.ctx(), self.night, theme::Tokens::android(1.0));
+            let font = self.reader.preferences().0;
+            self.reader.apply_preferences(font, None);
         }
         if self.reader.is_open() {
-            let (mut font, mut paper) = self.reader.preferences();
+            let (mut font, paper) = self.reader.preferences();
+            let mut paper = paper.map(str::to_owned);
             ui.add_space(12.0);
-            ui.label(
-                RichText::new(format!("字号  {:.0}", font))
-                    .strong()
-                    .color(p.ink),
-            );
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                if ui.add_sized([48.0, 48.0], egui::Button::new("−")).clicked() {
-                    font -= 1.0;
-                    changed = true;
+            match crate::reading_preferences::show(
+                ui,
+                self.night,
+                true,
+                &mut font,
+                &mut paper,
+                &mut self.page_style,
+                &mut self.comic_fit_width,
+            ) {
+                Some(crate::reading_preferences::Action::Font(font)) => {
+                    self.reader.apply_preferences(font, paper.as_deref());
                 }
-                let width = (ui.available_width() - 52.0).max(1.0);
-                ui.spacing_mut().slider_width = width;
-                changed |= ui
-                    .add_sized(
-                        [width, 48.0],
-                        egui::Slider::new(&mut font, 12.0..=48.0)
-                            .step_by(1.0)
-                            .show_value(false)
-                            .trailing_fill(true),
-                    )
-                    .changed();
-                if ui
-                    .add_sized([48.0, 48.0], egui::Button::new("＋"))
-                    .clicked()
-                {
-                    font += 1.0;
-                    changed = true;
+                Some(crate::reading_preferences::Action::Paper(paper)) => {
+                    self.night = paper == "dark";
+                    theme::apply_with_tokens(ui.ctx(), self.night, theme::Tokens::android(1.0));
+                    self.reader.apply_preferences(font, Some(&paper));
                 }
-            });
-            ui.add_space(8.0);
-            ui.label(RichText::new("阅读纸色").strong().color(p.ink));
-            let old = paper;
-            ui.horizontal(|ui| {
-                let width =
-                    ((ui.available_width() - 3.0 * ui.spacing().item_spacing.x) / 4.0).max(1.0);
-                for (value, label) in [
-                    (None, "自动"),
-                    (Some("paper"), "暖纸"),
-                    (Some("light"), "浅色"),
-                    (Some("dark"), "深色"),
-                ] {
-                    let selected = paper == value;
-                    let fill = if selected { p.accent_weak } else { p.surface2 };
-                    let tint = if selected { p.accent } else { p.ink };
-                    if ui
-                        .add_sized(
-                            [width, 48.0],
-                            egui::Button::new(RichText::new(label).color(tint))
-                                .fill(fill)
-                                .stroke(egui::Stroke::NONE),
-                        )
-                        .clicked()
-                    {
-                        paper = value;
-                    }
+                Some(crate::reading_preferences::Action::PageStyle(style)) => {
+                    self.page_style = style
                 }
-            });
-            if changed || old != paper {
-                self.reader.apply_preferences(font, paper);
+                Some(crate::reading_preferences::Action::FitWidth(fit)) => {
+                    self.comic_fit_width = fit;
+                    self.comic.set_fit_width(fit);
+                }
+                None => {}
             }
         }
         ui.add_space(12.0);
@@ -1248,7 +1318,9 @@ impl Library {
             (
                 "扩展功能",
                 &[
-                    ("自动漫画", Drawer::AutomaticManga),
+                    ("章节分析", Drawer::ChapterAnalysis),
+                    ("插件", Drawer::Plugins),
+                    ("自动漫画项目", Drawer::AutomaticManga),
                     ("漫画与画风", Drawer::Manga),
                     ("翻译服务", Drawer::Translation),
                     ("联网搜索", Drawer::WebSearch),
@@ -1256,9 +1328,29 @@ impl Library {
             ),
             ("系统与网络", &[("局域网同步", Drawer::Network)][..]),
         ] {
-            ui.label(RichText::new(label).strong().color(p.ink));
+            crate::ui::section_header(ui, p, label, None);
             for &(name, tab) in entries {
                 if mobile_ui::list_row(ui, name, name, p.ink, p.surface2).clicked() {
+                    if tab == Drawer::ChapterAnalysis {
+                        let Some(book) = self.reader.book_id() else {
+                            self.notice = Some("请先打开一本小说。".into());
+                            return;
+                        };
+                        let index = self.reader.chapter_index();
+                        let title = self
+                            .reader
+                            .toc()
+                            .get(index as usize)
+                            .map_or("", String::as_str);
+                        self.analysis.prepare(
+                            book,
+                            self.reader.loc().unwrap_or(Loc {
+                                chapter: index,
+                                ..Loc::default()
+                            }),
+                            title,
+                        );
+                    }
                     if tab == Drawer::AutomaticManga {
                         if let Some(book_id) = self.reader.book_id() {
                             if !self.automatic_manga.open(
@@ -1299,7 +1391,9 @@ impl Library {
         let Some(anchor) = self.reader.selection_anchor() else {
             return;
         };
-        let p = theme::palette(self.night);
+        let night = self.reader_chrome_is_dark();
+        let p = theme::palette(night);
+        let tokens = theme::Tokens::android(1.0);
         let Some(rect) = mobile_ui::selection_menu_rect(bounds, anchor) else {
             return;
         };
@@ -1312,15 +1406,16 @@ impl Library {
             .fade_in(false);
         let result = area
             .show(root.ctx(), |ui| {
+                *ui.visuals_mut() = theme::visuals_with_tokens(night, tokens);
                 egui::Frame::new()
                     .fill(p.surface)
                     .stroke(egui::Stroke::new(1.0_f32, p.line))
-                    .corner_radius(12)
+                    .corner_radius(tokens.radius_md)
                     .shadow(egui::epaint::Shadow {
                         offset: [0, 4],
                         blur: 12,
                         spread: 0,
-                        color: egui::Color32::from_black_alpha(36),
+                        color: egui::Color32::from_black_alpha(tokens.shadow_alpha),
                     })
                     .inner_margin(3)
                     .show(ui, |ui| {
@@ -1332,7 +1427,7 @@ impl Library {
                             {
                                 if ui
                                     .add_sized(
-                                        [(width - 8.0) / 4.0, 42.0],
+                                        [(width - 8.0) / 4.0, tokens.touch_min.max(44.0)],
                                         egui::Button::new(
                                             RichText::new(label).size(14.0).color(p.ink),
                                         )
@@ -1410,7 +1505,7 @@ impl Library {
     }
 
     fn marks(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(self.night);
+        let p = theme::palette(ui.visuals().dark_mode);
         if self.reader.annotations.is_empty() {
             ui.label(RichText::new("这一章还没有批注或高亮").color(p.muted));
         }
@@ -1439,7 +1534,7 @@ impl Library {
     }
 
     fn annotation(&mut self, ui: &mut egui::Ui) {
-        let p = theme::palette(self.night);
+        let p = theme::palette(ui.visuals().dark_mode);
         let Some(mark) = &mut self.mark else {
             return;
         };
@@ -1522,21 +1617,26 @@ impl Library {
     }
 
     fn reader_controls(&mut self, root: &mut egui::Ui, bounds: egui::Rect, opacity: f32) {
-        let p = theme::palette(self.night);
+        let night = self.reader_chrome_is_dark();
+        let p = theme::palette(night);
+        let tokens = theme::Tokens::android(1.0);
         let mut top = bounds;
         top.max.y = (top.min.y + TOP_BAR_HEIGHT).min(top.max.y);
         let mut bottom = bounds;
         bottom.min.y = (bottom.max.y - BOTTOM_BAR_HEIGHT).max(bottom.min.y);
         let mut back = false;
+        let mut comic_flip = None;
         for (is_top, rect) in [(true, top), (false, bottom)] {
             let mut ui = root.new_child(
                 egui::UiBuilder::new()
                     .id_salt(("reader-actions", is_top))
                     .max_rect(rect.shrink2(egui::vec2(8.0, 3.0))),
             );
+            *ui.visuals_mut() = theme::visuals_with_tokens(night, tokens);
             ui.set_clip_rect(rect);
             ui.set_opacity(opacity);
             if !self.controls || self.drawer.is_some() || self.drawn_drawer.is_some() {
+                ui.visuals_mut().disabled_alpha = 1.0;
                 ui.disable();
             }
             let painter = ui.painter();
@@ -1550,15 +1650,41 @@ impl Library {
                     back = ui
                         .add_sized([70.0, 48.0], egui::Button::new("‹ 书架").frame(false))
                         .clicked();
-                    let title = if self.reader.is_open() {
-                        self.reader.book_title()
-                    } else {
-                        self.comic.title()
-                    };
-                    ui.add(
-                        egui::Label::new(RichText::new(title).size(17.0).strong().color(p.ink))
+                    if self.reader.is_open() {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(self.reader.book_title())
+                                    .size(17.0)
+                                    .strong()
+                                    .color(p.ink),
+                            )
                             .truncate(),
-                    );
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "第 {} / {} 页",
+                                self.comic.page_index() + 1,
+                                self.comic.page_count()
+                            ))
+                            .size(13.0)
+                            .color(p.muted),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .selectable_value(&mut self.comic_fit_width, false, "适页")
+                                .changed()
+                            {
+                                self.comic.set_fit_width(false);
+                            }
+                            if ui
+                                .selectable_value(&mut self.comic_fit_width, true, "适宽")
+                                .changed()
+                            {
+                                self.comic.set_fit_width(true);
+                            }
+                        });
+                    }
                 });
             } else {
                 painter.line_segment(
@@ -1590,17 +1716,48 @@ impl Library {
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        if ui
-                            .add_sized(
-                                [84.0, 48.0],
-                                egui::Button::new(self.comic.fit_mode_label()).frame(false),
-                            )
-                            .clicked()
-                        {
-                            self.comic.toggle_fit_mode();
+                        let current = self.comic.page_index();
+                        let total = self.comic.page_count();
+                        let start = current.saturating_sub(1).min(total.saturating_sub(4));
+                        let width = ((ui.available_width() - 64.0) / 4.0).clamp(48.0, 92.0);
+                        for index in start..start.saturating_add(4).min(total) {
+                            let selected = index == current;
+                            let (rect, response) = ui
+                                .allocate_exact_size(egui::vec2(width, 48.0), egui::Sense::click());
+                            ui.painter().rect_filled(
+                                rect,
+                                7,
+                                if selected { p.accent_weak } else { p.surface2 },
+                            );
+                            ui.painter().rect_stroke(
+                                rect,
+                                7,
+                                egui::Stroke::new(
+                                    if selected { 2.0_f32 } else { 1.0_f32 },
+                                    if selected { p.accent } else { p.line },
+                                ),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.painter().line_segment(
+                                [
+                                    rect.min + egui::vec2(10.0, 14.0),
+                                    rect.max - egui::vec2(10.0, 14.0),
+                                ],
+                                egui::Stroke::new(1.0_f32, p.muted),
+                            );
+                            ui.painter().text(
+                                rect.center_bottom() - egui::vec2(0.0, 4.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                (index + 1).to_string(),
+                                egui::FontId::proportional(10.0),
+                                p.muted,
+                            );
+                            if response.clicked() && !selected {
+                                comic_flip = self.comic.request_page(index);
+                            }
                         }
                         if ui
-                            .add_sized([72.0, 48.0], egui::Button::new("设置").frame(false))
+                            .add_sized([56.0, 48.0], egui::Button::new("设置").frame(false))
                             .clicked()
                         {
                             self.set_drawer(Drawer::Settings);
@@ -1610,7 +1767,14 @@ impl Library {
             }
         }
         if back {
-            self.close_reader();
+            self.return_to_shelf(root.ctx());
+        } else if let Some((book_id, page_index)) = comic_flip {
+            if !self.send(Command::ReadComicPage {
+                book_id,
+                page_index,
+            }) {
+                self.comic.reset_load();
+            }
         }
     }
 
@@ -1717,10 +1881,12 @@ impl eframe::App for Library {
         self.poll_field(ctx);
         self.models.poll(ctx, &self.android);
         self.automatic_manga.poll();
+        self.analysis.poll();
         if self.importing.is_none() {
             if let Some(comic) = self
                 .automatic_manga
                 .take_export()
+                .map(|export| export.file)
                 .or_else(|| self.models.take_comic())
             {
                 let path = comic.to_path_buf();
@@ -1791,14 +1957,20 @@ impl eframe::App for Library {
                 ctx.request_repaint_after(Duration::from_millis(35));
             }
         }
-        if self.handles_back && saf::take_reader_back(&self.android).unwrap_or_default() {
+        let system_back =
+            self.handles_back && saf::take_reader_back(&self.android).unwrap_or_default();
+        // Winit consumes legacy KEYCODE_BACK from NativeActivity before Java receives it.
+        let native_back = ctx.input(|input| input.key_released(egui::Key::BrowserBack));
+        if system_back || native_back {
             if self.drawer.is_some() {
                 self.dismiss_drawer();
             } else if !self.reader.clear_selection() {
                 if self.controls {
                     self.controls = false;
+                } else if self.reading() || self.opening.is_some() {
+                    self.return_to_shelf(ctx);
                 } else {
-                    self.close_reader();
+                    let _ = saf::background_task(&self.android);
                 }
             }
         }
@@ -1819,7 +1991,8 @@ impl eframe::App for Library {
         let ready = self.reader.ready() || self.comic.ready();
         let preparing = self.reading() && !ready;
         let reveal = Opening::frame(&mut self.opening, ctx, ready, safe);
-        let library_visible = !self.reading() || preparing || reveal.is_some();
+        let returning = self.returning.is_some();
+        let library_visible = !self.reading() || preparing || reveal.is_some() || returning;
         let p = theme::palette(self.night);
         let background = if !library_visible && self.reader.is_open() {
             self.reader.paper_color(self.night)
@@ -1838,22 +2011,39 @@ impl eframe::App for Library {
         }
         if safe.is_positive() {
             if library_visible {
-                let mut ui =
-                    opening::scene(ctx, egui::Id::new("shelf-scene"), reveal.is_none(), safe);
+                let mut ui = opening::scene(
+                    ctx,
+                    egui::Id::new("shelf-scene"),
+                    reveal.is_none() && !returning,
+                    safe,
+                );
                 self.show_scene(&mut ui, false);
+            }
+            let return_frame = self
+                .returning
+                .as_mut()
+                .and_then(|motion| motion.frame(ctx, safe));
+            if returning && return_frame.is_none() {
+                self.close_reader();
+                ctx.request_repaint();
             }
             if self.reading() {
                 let mut ui = opening::scene(
                     ctx,
                     egui::Id::new("reader-scene"),
-                    !preparing && reveal.is_none(),
+                    !preparing && reveal.is_none() && !returning,
                     safe,
                 );
                 if preparing {
                     ui.set_invisible();
                 }
-                if let Some(reveal) = reveal {
-                    reveal.paint(&mut ui, p.bg, |ui| self.show_scene(ui, true));
+                if let Some(reveal) = reveal.or(return_frame) {
+                    let page = if self.reader.is_open() {
+                        self.reader.paper_color(self.night)
+                    } else {
+                        p.bg
+                    };
+                    reveal.paint(&mut ui, page, |ui| self.show_scene(ui, true));
                 } else {
                     self.show_scene(&mut ui, true);
                 }

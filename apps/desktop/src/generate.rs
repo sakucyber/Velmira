@@ -11,22 +11,24 @@ use crossbeam_channel::{bounded, Receiver, TryRecvError};
 use eframe::egui;
 use vm_ai::{
     manga::{Draft, Layout, Page, Project},
+    pool::Config,
     route::Strategy,
-    service::{ComicService, Connection},
+    service::ComicService,
     Storyboard,
 };
 
 use crate::{
     model_settings::{
-        read_settings, write_settings, ConnectionSettings, Settings, MAX_CONNECTIONS,
+        read_settings, show_status, write_settings, ConnectionSettings, Profile, Settings,
+        SharedPool, MAX_CONNECTIONS,
     },
-    ImportRequest,
+    ui, ImportRequest,
 };
 
 const MAX_SOURCE: usize = 12_000;
 
 enum Output {
-    Loaded(Settings),
+    Loaded(Profile),
     Project {
         pages: Vec<Page>,
         selection: Option<i64>,
@@ -87,6 +89,8 @@ pub struct Generator {
     settings_path: PathBuf,
     project_path: PathBuf,
     settings: Settings,
+    profile: Option<Config>,
+    pool: Arc<SharedPool>,
     loaded: bool,
     keys: Vec<String>,
     service: Option<Arc<ComicService>>,
@@ -100,18 +104,21 @@ pub struct Generator {
     truncated: bool,
     reload_project: bool,
     confirm_remove: bool,
+    config_open: bool,
     status: String,
     result: Option<Receiver<Outcome>>,
     pause_render: Option<Arc<AtomicBool>>,
 }
 
 impl Generator {
-    pub fn new(data_dir: &Path) -> Self {
+    pub fn new(data_dir: &Path, pool: Arc<SharedPool>) -> Self {
         Self {
             open: false,
             settings_path: data_dir.join("ai-model-pool.json"),
             project_path: data_dir.join("manga-projects.db"),
             settings: Settings::default(),
+            profile: None,
+            pool,
             loaded: false,
             keys: vec![String::new()],
             service: None,
@@ -125,10 +132,16 @@ impl Generator {
             truncated: false,
             reload_project: false,
             confirm_remove: false,
+            config_open: false,
             status: String::new(),
             result: None,
             pause_render: None,
         }
+    }
+
+    pub fn open_config(&mut self) {
+        self.open = true;
+        self.config_open = true;
     }
 
     pub fn prepare(&mut self, book_id: String, chapter: u32, source: String) {
@@ -171,12 +184,13 @@ impl Generator {
         self.reader_source = source.chars().take(MAX_SOURCE).collect();
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<ImportRequest> {
+    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ImportRequest> {
+        let ctx = ui.ctx().clone();
         let mut import = None;
         if self.open && !self.loaded && self.result.is_none() {
             self.loaded = true;
             let path = self.settings_path.clone();
-            self.spawn(ctx, "正在读取模型池…", move || Outcome {
+            self.spawn(&ctx, "正在读取模型池…", move || Outcome {
                 service: None,
                 output: read_settings(&path).map(Output::Loaded),
             });
@@ -190,9 +204,15 @@ impl Generator {
                         self.service = service;
                     }
                     match output {
-                        Ok(Output::Loaded(settings)) => {
-                            self.keys = vec![String::new(); settings.connections.len()];
-                            self.settings = settings;
+                        Ok(Output::Loaded(profile)) => {
+                            match profile {
+                                Profile::Legacy(settings) => {
+                                    self.keys = vec![String::new(); settings.connections.len()];
+                                    self.settings = settings;
+                                    self.profile = None;
+                                }
+                                Profile::Pools(config) => self.profile = Some(config),
+                            }
                             self.status.clear();
                         }
                         Ok(Output::Project {
@@ -245,48 +265,87 @@ impl Generator {
         }
         if self.open && self.loaded && self.reload_project && self.result.is_none() {
             self.reload_project = false;
-            self.start(ctx, Action::Open);
+            self.start(&ctx, Action::Open);
         }
 
-        let mut open = self.open;
+        let mut close = false;
         let mut action = None;
         let busy = self.result.is_some();
-        egui::Window::new("小说转漫画")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(630.0)
-            .max_height(ctx.screen_rect().height() * 0.85)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_enabled_ui(!busy, |ui| {
-                        egui::CollapsingHeader::new("模型池")
-                            .default_open(self.settings.connections[0].endpoint.is_empty())
-                            .show(ui, |ui| self.edit_connections(ui));
-                        action = self.show_project(ui);
-                    });
-                    if busy {
-                        ui.spinner();
-                    }
-                    if self.pending_reader.is_some() {
-                        ui.label("当前任务完成后会打开所选书籍或章节。");
-                    }
-                    if let Some(pause) = &self.pause_render {
-                        let paused = pause.load(Ordering::Relaxed);
-                        if ui
-                            .add_enabled(!paused, egui::Button::new("当前页完成后暂停"))
-                            .clicked()
-                        {
-                            pause.store(true, Ordering::Relaxed);
-                        }
-                    }
-                    if !self.status.is_empty() {
-                        ui.label(&self.status);
-                    }
-                });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("漫画项目").strong().size(18.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("关闭").clicked() {
+                    close = true;
+                }
             });
-        self.open = open;
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            show_status(ui, &self.pool);
+            ui.add_enabled_ui(!busy, |ui| {
+                ui::disclosure(
+                    ui,
+                    "模型池",
+                    self.settings.connections[0].endpoint.is_empty(),
+                    |ui| {
+                        let connections = self
+                            .profile
+                            .as_ref()
+                            .map_or(self.settings.connections.len(), |config| {
+                                config.providers.len()
+                            });
+                        ui.horizontal(|ui| {
+                            ui.label(format!("模型池：已加载 {connections} 个连接"));
+                            if ui.button("打开配置").clicked() {
+                                self.config_open = !self.config_open;
+                            }
+                        });
+                        if self.config_open {
+                            ui.separator();
+                            if let Some(config) = &self.profile {
+                                for (name, provider) in &config.providers {
+                                    ui.label(format!("{name} · {}", provider.base_url));
+                                }
+                                for (task, binding) in &config.task_bindings {
+                                    ui.small(format!("{task} → {}", binding.pool));
+                                }
+                            } else {
+                                self.edit_connections(ui);
+                            }
+                            if ui.button("重新读取配置").clicked() {
+                                self.loaded = false;
+                                self.config_open = false;
+                                ctx.request_repaint();
+                            }
+                        }
+                    },
+                );
+                action = self.show_project(ui);
+            });
+            if busy {
+                ui.spinner();
+            }
+            if self.pending_reader.is_some() {
+                ui.label("当前任务完成后会打开所选书籍或章节。");
+            }
+            if let Some(pause) = &self.pause_render {
+                let paused = pause.load(Ordering::Relaxed);
+                if ui
+                    .add_enabled(!paused, egui::Button::new("当前页完成后暂停"))
+                    .clicked()
+                {
+                    pause.store(true, Ordering::Relaxed);
+                }
+            }
+            if !self.status.is_empty() {
+                ui.label(&self.status);
+            }
+        });
+        if close {
+            self.open = false;
+        }
         if let Some(action) = action {
-            self.start(ctx, action);
+            self.start(&ctx, action);
         }
         None
     }
@@ -501,6 +560,13 @@ impl Generator {
     }
 
     fn model_ready(&self, image: bool) -> bool {
+        if let Some(config) = &self.profile {
+            return config.task_bindings.contains_key(if image {
+                "manga_image"
+            } else {
+                "planner"
+            });
+        }
         let connections = &self.settings.connections;
         connections.iter().all(|connection| {
             !connection.endpoint.trim().is_empty()
@@ -640,6 +706,8 @@ impl Generator {
         let settings = self.settings.clone();
         let path = self.settings_path.clone();
         let keys = self.keys.clone();
+        let profile = self.profile.clone();
+        let pool = Arc::clone(&self.pool);
         let mut service = self.service.clone();
         let project_path = self.project_path.clone();
         let book_id = self.book_id.clone();
@@ -663,30 +731,31 @@ impl Generator {
                     action,
                     Action::Storyboard | Action::Render | Action::RenderPending
                 );
-                if needs_model && service.is_none() {
-                    let connections = settings
-                        .connections
-                        .iter()
-                        .zip(keys)
-                        .map(|(connection, key)| Connection {
-                            endpoint: connection.endpoint.clone(),
-                            key,
-                            text_model: connection.text_model.clone(),
-                            image_model: connection.image_model.clone(),
-                            rpm: connection.rpm,
-                            concurrency: connection.concurrency.unwrap_or(1),
-                        })
-                        .collect();
-                    service = Some(Arc::new(
-                        ComicService::new(connections, settings.strategy)
-                            .map_err(|error| error.to_string())?,
-                    ));
-                }
                 if needs_model {
-                    write_settings(&path, &settings)?;
+                    service = Some(if let Some(config) = &profile {
+                        pool.configured_from_file(&path, config)?
+                    } else {
+                        let service = pool.legacy(&settings, |index| keys[index].clone(), true)?;
+                        write_settings(&path, &settings)?;
+                        service
+                    });
                 }
                 let mut project =
                     Project::open(&project_path, &book_id).map_err(|error| error.to_string())?;
+                let continuity = if matches!(action, Action::Storyboard) {
+                    if let (Some(parent), Some(draft)) = (path.parent(), edit.as_ref()) {
+                        vm_ai::analysis::prior_continuity(
+                            &parent.join("ai-chapter-analysis.db"),
+                            &book_id,
+                            draft.chapter,
+                        )
+                        .unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
                 project_action(
                     &mut project,
                     action,
@@ -694,6 +763,7 @@ impl Generator {
                     edit,
                     service.as_deref(),
                     pause.as_deref(),
+                    &continuity,
                 )
             })();
             Outcome { service, output }
@@ -785,6 +855,7 @@ fn project_action(
     edit: Option<Draft>,
     service: Option<&ComicService>,
     pause: Option<&AtomicBool>,
+    continuity: &str,
 ) -> Result<Output, String> {
     let mut selection = saved.as_ref().map(|page| page.id);
     let status = match action {
@@ -802,7 +873,7 @@ fn project_action(
                 draft.storyboard = Some(
                     service
                         .ok_or("模型池不可用。")?
-                        .storyboard(&draft.source)
+                        .storyboard_with_continuity(&draft.source, continuity)
                         .map_err(|error| error.to_string())?,
                 );
             }

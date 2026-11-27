@@ -83,6 +83,14 @@ impl<R: Read + Seek> CbzReader<R> {
         &self.pages
     }
 
+    /// Optional navigation metadata never prevents opening an otherwise valid comic.
+    pub fn source(&mut self) -> Option<vm_core::ComicSource> {
+        let entry = self.archive.by_name(vm_core::COMIC_SOURCE_ENTRY).ok()?;
+        let bytes = read_member(entry, 32 * 1024).ok()?;
+        let info: vm_core::ComicSource = serde_json::from_slice(&bytes).ok()?;
+        info.valid_for(self.pages.len()).then_some(info)
+    }
+
     pub fn read_page(&mut self, index: usize) -> Result<Vec<u8>, FormatError> {
         let page = self
             .pages

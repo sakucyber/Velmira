@@ -3,7 +3,13 @@ use std::io;
 #[cfg(not(target_os = "android"))]
 use std::io::{BufRead, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+#[cfg(not(target_os = "android"))]
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::Path;
+#[cfg(not(target_os = "android"))]
+use std::sync::mpsc::{self, Receiver};
+#[cfg(not(target_os = "android"))]
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
@@ -15,6 +21,8 @@ mod sync_cli;
 
 #[cfg(not(target_os = "android"))]
 const INVITATION_LIFETIME: Duration = Duration::from_secs(120);
+#[cfg(not(target_os = "android"))]
+const UI_INVITATION_LIFETIME: Duration = Duration::from_secs(300);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -28,6 +36,20 @@ pub enum Command {
     Revoke(String),
     SyncListen(SocketAddr, String),
     SyncConnect(SocketAddr, String),
+}
+
+#[cfg(not(target_os = "android"))]
+pub struct Invitation {
+    pub payload: String,
+    pub expires: Instant,
+    result: Receiver<std::result::Result<String, String>>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl Invitation {
+    pub fn poll(&self) -> Option<std::result::Result<String, String>> {
+        self.result.try_recv().ok()
+    }
 }
 
 #[cfg(windows)]
@@ -81,13 +103,82 @@ pub fn run(command: Command, data_dir: &Path) -> Result<()> {
             );
         }
         Command::List => TrustStore::open(data_dir)?.list()?,
-        Command::Revoke(text) => TrustStore::open(data_dir)?.revoke(parse_id(&text)?)?,
+        Command::Revoke(text) => {
+            let id = parse_id(&text)?;
+            TrustStore::open(data_dir)?.revoke(id)?;
+            println!("Revoked device {}", display_id(id));
+        }
         Command::SyncListen(address, id) => sync_cli::run(address, &id, data_dir, Role::Responder)?,
         Command::SyncConnect(address, id) => {
             sync_cli::run(address, &id, data_dir, Role::Initiator)?
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn invite(data_dir: &Path) -> Result<Invitation> {
+    let ip = local_ip()?;
+    let listener = TcpListener::bind(SocketAddr::new(ip, 0))?;
+    let address = listener.local_addr()?;
+    let mut store = TrustStore::open(data_dir)?;
+    let identity = store.identity()?;
+    let code = PairingCode::generate()?;
+    let host = match address.ip() {
+        IpAddr::V6(ip) => format!("[{ip}]"),
+        IpAddr::V4(ip) => ip.to_string(),
+    };
+    let payload = format!(
+        "velmira-pair:v1:{host}:{}:{}",
+        address.port(),
+        code.digits()
+    );
+    let expires = Instant::now() + UI_INVITATION_LIFETIME;
+    let (send, result) = mpsc::channel();
+    thread::Builder::new()
+        .name("velmira-pairing-invite".into())
+        .spawn(move || {
+            let outcome: std::result::Result<String, Box<dyn std::error::Error>> = (|| {
+                let stream = accept_until(listener, expires)?;
+                let remaining = expires.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "pairing invitation expired",
+                    )
+                    .into());
+                }
+                let peer = pair(
+                    stream,
+                    Role::Responder,
+                    &identity.private,
+                    code,
+                    remaining.min(HANDSHAKE_TIMEOUT),
+                )?;
+                let id = display_id(peer.device_id);
+                store.enroll(&identity, peer)?;
+                Ok(id)
+            })();
+            let _ = send.send(outcome.map_err(|error| error.to_string()));
+        })?;
+    Ok(Invitation {
+        payload,
+        expires,
+        result,
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+fn local_ip() -> Result<IpAddr> {
+    let socket = UdpSocket::bind((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
+    if socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).is_ok() {
+        if let IpAddr::V4(ip) = socket.local_addr()?.ip() {
+            if !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast() {
+                return Ok(IpAddr::V4(ip));
+            }
+        }
+    }
+    Ok(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
 pub fn connect(address: SocketAddr, code: PairingCode, data_dir: &Path) -> Result<String> {
@@ -110,12 +201,10 @@ pub fn connect(address: SocketAddr, code: PairingCode, data_dir: &Path) -> Resul
     Ok(id)
 }
 
-#[cfg(target_os = "android")]
 pub fn devices(data_dir: &Path) -> Result<Vec<String>> {
     TrustStore::open(data_dir)?.devices()
 }
 
-#[cfg(target_os = "android")]
 pub fn revoke(data_dir: &Path, id: &str) -> Result<()> {
     TrustStore::open(data_dir)?.revoke(parse_id(id)?)
 }
@@ -315,7 +404,6 @@ impl TrustStore {
         if changed == 0 {
             return Err("paired device not found".into());
         }
-        println!("Revoked device {}", display_id(peer));
         Ok(())
     }
 }
@@ -413,7 +501,7 @@ fn open_identity(mut sealed: Zeroizing<Vec<u8>>) -> Result<Zeroizing<[u8; 32]>> 
 }
 
 #[cfg(windows)]
-mod dpapi {
+pub(crate) mod dpapi {
     use std::{io, ptr, slice};
 
     use windows_sys::Win32::{

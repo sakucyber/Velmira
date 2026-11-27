@@ -143,14 +143,6 @@ impl<E> Failure<E> {
         self
     }
 
-    pub(crate) fn map_error<T>(self, map: impl FnOnce(E) -> T) -> Failure<T> {
-        Failure {
-            error: map(self.error),
-            disposition: self.disposition,
-            retry_after: self.retry_after,
-        }
-    }
-
     fn new(error: E, disposition: Disposition) -> Self {
         Self {
             error,
@@ -179,7 +171,7 @@ struct State {
     cursors: HashMap<u32, u64>,
 }
 
-struct Connection {
+pub(crate) struct Connection {
     limits: Limits,
     starts: VecDeque<Instant>,
     active: u16,
@@ -187,7 +179,27 @@ struct Connection {
 }
 
 impl Connection {
-    fn available(&mut self, now: Instant) -> Availability {
+    pub(crate) fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            starts: VecDeque::new(),
+            active: 0,
+            cooldown_until: None,
+        }
+    }
+
+    pub(crate) fn reserve(&mut self, now: Instant) {
+        self.active += 1;
+        if self.limits.rpm != 0 {
+            self.starts.push_back(now);
+        }
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.active -= 1;
+    }
+
+    pub(crate) fn available(&mut self, now: Instant) -> Availability {
         if let Some(until) = self.cooldown_until {
             if now < until {
                 return Availability::Cooldown;
@@ -211,7 +223,7 @@ impl Connection {
     }
 }
 
-enum Availability {
+pub(crate) enum Availability {
     Ready,
     Busy(Option<Instant>),
     Cooldown,
@@ -243,7 +255,7 @@ impl Permit<'_> {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        self.router.state().connections[self.connection].active -= 1;
+        self.router.state().connections[self.connection].release();
         self.router.changed.notify_all();
     }
 }
@@ -294,10 +306,7 @@ impl RouterInner {
                 let slot = &mut state.connections[connection];
                 match slot.available(now) {
                     Availability::Ready => {
-                        slot.active += 1;
-                        if slot.limits.rpm != 0 {
-                            slot.starts.push_back(now);
-                        }
+                        slot.reserve(now);
                         connection_attempts[connection] += 1;
                         return Next::Invoke(
                             work,
@@ -364,12 +373,7 @@ impl Router {
                 .entry(candidate.connection.clone())
                 .or_insert_with(|| {
                     let id = connections.len();
-                    connections.push(Connection {
-                        limits: candidate.limits,
-                        starts: VecDeque::new(),
-                        active: 0,
-                        cooldown_until: None,
-                    });
+                    connections.push(Connection::new(candidate.limits));
                     id
                 });
             let limits = &mut connections[id].limits;

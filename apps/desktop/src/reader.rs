@@ -69,14 +69,14 @@ struct TouchGesture {
     tap: Option<egui::Pos2>,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 #[derive(Default)]
 struct SelectionGesture {
     press: Option<(egui::Pos2, f64)>,
     selecting: bool,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 impl SelectionGesture {
     const HOLD: f64 = 0.38;
 
@@ -154,16 +154,16 @@ impl Theme {
     fn colors(self) -> (Color32, Color32) {
         match self {
             Self::Paper => (
-                Color32::from_rgb(248, 241, 223),
-                Color32::from_rgb(53, 47, 38),
+                Color32::from_rgb(247, 244, 238),
+                Color32::from_rgb(28, 27, 25),
             ),
             Self::White => (
-                Color32::from_rgb(255, 255, 253),
-                Color32::from_rgb(34, 35, 33),
+                Color32::from_rgb(255, 253, 249),
+                Color32::from_rgb(28, 27, 25),
             ),
             Self::Night => (
-                Color32::from_rgb(36, 42, 45),
-                Color32::from_rgb(231, 224, 210),
+                Color32::from_rgb(20, 22, 26),
+                Color32::from_rgb(236, 234, 228),
             ),
         }
     }
@@ -235,15 +235,12 @@ pub struct Reader {
     layout: Option<Arc<PageLayout>>,
     pub annotations: Vec<Annotation>,
     selection: Option<(Loc, Loc)>,
-    #[cfg(not(target_os = "android"))]
-    mark: Option<(Loc, u32)>,
     search_highlight: Option<(Loc, String)>,
     inline: InlineImages,
     inline_decode: Option<InlineDecode>,
     touch: TouchGesture,
     #[cfg(target_os = "android")]
     selection_gesture: SelectionGesture,
-    #[cfg(target_os = "android")]
     selection_anchor: Option<egui::Rect>,
     #[cfg(target_os = "android")]
     tapped_annotation: Option<Annotation>,
@@ -293,15 +290,12 @@ impl Reader {
             layout: None,
             annotations: Vec::new(),
             selection: None,
-            #[cfg(not(target_os = "android"))]
-            mark: None,
             search_highlight: None,
             inline: InlineImages::default(),
             inline_decode: None,
             touch: TouchGesture::default(),
             #[cfg(target_os = "android")]
             selection_gesture: SelectionGesture::default(),
-            #[cfg(target_os = "android")]
             selection_anchor: None,
             #[cfg(target_os = "android")]
             tapped_annotation: None,
@@ -335,7 +329,6 @@ impl Reader {
         std::mem::take(&mut self.tools_requested)
     }
 
-    #[cfg(target_os = "android")]
     pub fn book_title(&self) -> &str {
         self.book
             .as_ref()
@@ -344,23 +337,23 @@ impl Reader {
 
     #[cfg(target_os = "android")]
     pub fn paper_color(&self, night: bool) -> Color32 {
+        self.effective_theme(night).colors().0
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn uses_dark_paper(&self, night: bool) -> bool {
+        self.effective_theme(night) == Theme::Night
+    }
+
+    fn effective_theme(&self, night: bool) -> Theme {
         self.theme
             .unwrap_or(if night { Theme::Night } else { Theme::Paper })
-            .colors()
-            .0
     }
 
-    #[cfg(not(target_os = "android"))]
-    pub fn take_mark(&mut self) -> Option<(Loc, u32)> {
-        self.mark.take()
-    }
-
-    #[cfg(target_os = "android")]
     pub fn selection_anchor(&self) -> Option<egui::Rect> {
-        self.selection_anchor
+        self.selection.and(self.selection_anchor)
     }
 
-    #[cfg(target_os = "android")]
     pub fn selection_ranges(&self) -> Vec<(Loc, u32)> {
         let Some((a, b)) = self.selection else {
             return Vec::new();
@@ -369,6 +362,9 @@ impl Reader {
             return Vec::new();
         };
         let (start, end) = (a.min(b), a.max(b));
+        if start.chapter != book.chapter || end.chapter != book.chapter {
+            return Vec::new();
+        }
         (start.para..=end.para)
             .filter_map(|para| {
                 let text = book.paragraphs.get(para as usize)?;
@@ -390,7 +386,6 @@ impl Reader {
             .collect()
     }
 
-    #[cfg(target_os = "android")]
     pub fn clear_selection(&mut self) -> bool {
         self.selection_anchor = None;
         self.selection.take().is_some()
@@ -655,6 +650,22 @@ impl Reader {
         self.texture.is_some()
     }
 
+    #[cfg(not(target_os = "android"))]
+    pub fn advance_automatically(&mut self) -> (bool, Option<(u32, bool)>) {
+        if self.pending.is_some() || self.running.is_some() || self.chapter_request.is_some() {
+            return (true, None);
+        }
+        let Some(book) = self.book.as_ref() else {
+            return (false, None);
+        };
+        let has_next =
+            self.page + 1 < self.page_count || book.chapter + 1 < book.summary.chapter_count;
+        let step = has_next
+            .then(|| self.request_navigation(Navigation::Page(1)))
+            .flatten();
+        (has_next, step)
+    }
+
     pub fn close(&mut self) {
         self.book = None;
         self.texture = None;
@@ -670,14 +681,9 @@ impl Reader {
         self.missing_glyphs = 0;
         self.layout = None;
         self.annotations.clear();
-        self.selection = None;
-        #[cfg(not(target_os = "android"))]
-        {
-            self.mark = None;
-        }
+        self.clear_selection();
         #[cfg(target_os = "android")]
         {
-            self.selection_anchor = None;
             self.tapped_annotation = None;
             self.selection_gesture = SelectionGesture::default();
         }
@@ -929,6 +935,7 @@ impl Reader {
         chinese: bool,
         resizing: bool,
         dialog_open: bool,
+        #[cfg(not(target_os = "android"))] keyboard_enabled: bool,
         #[cfg(target_os = "android")] tap_area: egui::Rect,
         #[cfg(target_os = "android")] selection_menu: Option<egui::Rect>,
     ) -> Option<(u32, bool)> {
@@ -936,8 +943,6 @@ impl Reader {
         let book = self.book.as_ref()?;
         let night = ui.visuals().dark_mode;
         let p = crate::theme::palette(night);
-        #[cfg(not(target_os = "android"))]
-        let has_selection = self.selection.is_some_and(|(a, b)| a != b);
         let chapter_count = book.summary.chapter_count.max(1);
         let current_chapter = book.chapter;
         #[cfg(not(target_os = "android"))]
@@ -961,32 +966,33 @@ impl Reader {
             ui.label(egui::RichText::new(position).size(13.0).color(p.muted));
         });
         let mut navigation = None;
-        let mut copy_requested = false;
+        #[cfg(target_os = "android")]
+        let keyboard_enabled = true;
         let mobile = cfg!(target_os = "android");
         #[cfg(not(target_os = "android"))]
         {
-            ui.horizontal_wrapped(|ui| {
-                if let Some((a, b)) = self.selection {
-                    let (start, end) = (a.min(b), a.max(b));
-                    if start.para == end.para
-                        && end.off > start.off
-                        && ui.button(tr("添加批注", "Add note")).clicked()
-                    {
-                        self.mark = Some((start, end.off));
-                    }
-                }
-                copy_requested =
-                    has_selection && ui.button(tr("复制选中文字", "Copy selection")).clicked();
-                #[cfg(not(target_os = "android"))]
-                {
+            let tokens = crate::theme::Tokens::desktop();
+            crate::ui::card(ui, p, tokens, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(tr("字号", "Font"));
+                    let mut step = ((self.font_px - 12.0) * 10.0).round().clamp(0.0, 360.0) as i32;
                     let changed = ui
-                        .add(
-                            egui::Slider::new(&mut self.font_px, 12.0..=48.0)
-                                .text(tr("字号", "Font"))
-                                .step_by(0.1)
-                                .fixed_decimals(1),
+                        .add_sized(
+                            [180.0, 30.0],
+                            egui::Slider::new(&mut step, 0..=360)
+                                .step_by(1.0)
+                                .show_value(false),
                         )
                         .changed();
+                    if changed {
+                        self.font_px = 12.0 + step as f32 / 10.0;
+                    }
+                    let value = if (self.font_px - self.font_px.round()).abs() < 0.05 {
+                        format!("{:.0} px", self.font_px.round())
+                    } else {
+                        format!("{:.1} px", self.font_px)
+                    };
+                    ui.label(egui::RichText::new(value).color(p.muted));
                     let reset = ui
                         .add_enabled(
                             (self.font_px - DEFAULT_FONT_SIZE).abs() > 0.01,
@@ -1028,7 +1034,7 @@ impl Reader {
                                 tr("深色", "Dark"),
                             );
                         });
-                }
+                });
             });
         }
         if !mobile && self.missing_glyphs > 0 {
@@ -1055,9 +1061,7 @@ impl Reader {
             self.layout_dirty = true;
             self.turn = None;
         }
-        let theme = self
-            .theme
-            .unwrap_or(if night { Theme::Night } else { Theme::Paper });
+        let theme = self.effective_theme(night);
         let displayed_theme = self.texture.as_ref().map_or(theme, |(_, theme)| *theme);
         if !resizing
             && (self.layout_dirty || displayed_theme != theme)
@@ -1120,7 +1124,9 @@ impl Reader {
 
         let mut tap = None;
         if !blocked {
-            if !ui.ctx().wants_keyboard_input() || self.navigation_has_focus(ui.ctx()) {
+            if keyboard_enabled
+                && (!ui.ctx().wants_keyboard_input() || self.navigation_has_focus(ui.ctx()))
+            {
                 navigation = ui.input(|input| keyboard_navigation(input).or(navigation));
             }
             if let Some(action) = touch_page {
@@ -1144,18 +1150,24 @@ impl Reader {
                 tap = None;
             }
         }
+        #[cfg(not(target_os = "android"))]
+        if tap.is_some() && self.clear_selection() {
+            navigation = None;
+            tap = None;
+        }
         if navigation.is_some_and(|action| action != Navigation::Tools) && tap.is_none() {
             self.selection = None;
         }
-        if !blocked && (self.navigation_has_focus(ui.ctx()) || !ui.ctx().wants_keyboard_input()) {
-            copy_requested |= ui.input(|input| {
+        let copy_requested = !blocked
+            && keyboard_enabled
+            && (self.navigation_has_focus(ui.ctx()) || !ui.ctx().wants_keyboard_input())
+            && ui.input(|input| {
                 input
                     .events
                     .iter()
                     .any(|event| matches!(event, egui::Event::Copy))
             });
-        }
-        if !blocked && copy_requested {
+        if copy_requested {
             if let Some(text) = self.selected_text() {
                 ui.ctx().copy_text(text);
             }
@@ -1244,9 +1256,9 @@ impl Reader {
                         Color32::from_rgba_unmultiplied(247, 155, 34, 155),
                     );
                 }
+                self.selection_anchor = None;
                 #[cfg(target_os = "android")]
                 {
-                    self.selection_anchor = None;
                     let to_loc = |point: egui::Pos2| {
                         let point = (point - visible.min) * scale;
                         layout.hit_test(self.page, point.x, point.y)
@@ -1315,6 +1327,18 @@ impl Reader {
                             {
                                 self.selection = Some((anchor, caret));
                             }
+                        }
+                    }
+                    if !blocked
+                        && self.turn.is_none()
+                        && !response.dragged_by(PointerButton::Primary)
+                    {
+                        if let Some((a, b)) = self.selection {
+                            self.selection_anchor = layout
+                                .range_rects(self.page, (a.min(b), a.max(b)))
+                                .into_iter()
+                                .map(|rect| illustration_rect(rect, visible.min, scale))
+                                .reduce(egui::Rect::union);
                         }
                     }
                 }
@@ -1586,7 +1610,7 @@ impl TouchGesture {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 fn initial_selection(text: &str, loc: Loc) -> (Loc, Loc) {
     let chars: Vec<_> = text.chars().collect();
     if chars.is_empty() {

@@ -1,5 +1,7 @@
 #![cfg(target_os = "android")]
 
+#[path = "../../desktop/src/chapter_analysis.rs"]
+mod chapter_analysis;
 #[path = "../../desktop/src/comic.rs"]
 mod comic;
 #[path = "../../desktop/src/covers.rs"]
@@ -10,12 +12,18 @@ mod model_settings;
 mod opening;
 #[path = "../../desktop/src/pairing_cli.rs"]
 mod pairing_cli;
+#[path = "../../desktop/src/plugins.rs"]
+mod plugins;
 #[path = "../../desktop/src/preferences.rs"]
 mod preferences;
 #[path = "../../desktop/src/reader.rs"]
 mod reader;
+#[path = "../../desktop/src/reading_preferences.rs"]
+mod reading_preferences;
 #[path = "../../desktop/src/theme.rs"]
 mod theme;
+#[path = "../../desktop/src/ui.rs"]
+mod ui;
 #[path = "../../desktop/src/workers.rs"]
 mod workers;
 

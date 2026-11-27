@@ -108,6 +108,9 @@ pub enum Command {
         offset: u32,
         filter: ShelfFilter,
     },
+    ListComics {
+        offset: u32,
+    },
     RenameBook {
         book_id: BookId,
         title: String,
@@ -143,6 +146,10 @@ pub enum Command {
         ordinal: u32,
     },
     OpenBook {
+        book_id: BookId,
+    },
+    OpenCompanion {
+        novel_id: BookId,
         book_id: BookId,
     },
     ReadChapter {
@@ -214,6 +221,7 @@ impl Command {
     fn operation(&self) -> &'static str {
         match self {
             Self::ListBooks { .. } | Self::ListShelf { .. } => "list_books",
+            Self::ListComics { .. } => "list_comics",
             Self::RenameBook { .. } => "rename_book",
             Self::SetBookStatus { .. } => "set_book_status",
             Self::InsertBook { .. }
@@ -224,6 +232,7 @@ impl Command {
             Self::ListIllustrations { .. } => "list_illustrations",
             Self::ReadIllustration { .. } => "read_illustration",
             Self::OpenBook { .. } => "open_book",
+            Self::OpenCompanion { .. } => "open_companion",
             Self::ReadChapter { .. } => "read_chapter",
             Self::ReadComicPage { .. } => "read_comic_page",
             Self::SaveProgress { .. } => "save_progress",
@@ -251,6 +260,11 @@ pub enum Event {
     Shelf {
         offset: u32,
         filter: ShelfFilter,
+        books: Vec<BookSummary>,
+        has_more: bool,
+    },
+    Comics {
+        offset: u32,
         books: Vec<BookSummary>,
         has_more: bool,
     },
@@ -287,6 +301,12 @@ pub enum Event {
     ComicOpened {
         book: BookSummary,
         page: ComicPage,
+    },
+    CompanionOpened {
+        novel_id: BookId,
+        book: BookSummary,
+        page: ComicPage,
+        source: Option<vm_core::ComicSource>,
     },
     ChapterRead {
         book_id: BookId,
@@ -445,6 +465,18 @@ fn handle(
                 has_more,
             }
         }
+        Command::ListComics { offset } => {
+            let filter = ShelfFilter {
+                format: Some(BookFormat::Cbz),
+                ..ShelfFilter::default()
+            };
+            let (books, has_more) = database::list_shelf(db, offset, &filter)?;
+            Event::Comics {
+                offset,
+                books,
+                has_more,
+            }
+        }
         Command::RenameBook { book_id, title } => {
             let (book, status) = database::rename_book(db, &book_id, &title)?;
             Event::BookUpdated { book, status }
@@ -521,6 +553,25 @@ fn handle(
                 book_id,
                 chapter_index: chapter,
                 chapter: body,
+            }
+        }
+        Command::OpenCompanion { novel_id, book_id } => {
+            let book = database::summary(db, &book_id)?;
+            if book.format != BookFormat::Cbz {
+                return Err(Error::Invalid(
+                    "parallel reading requires a CBZ comic".into(),
+                ));
+            }
+            let index = book.progress.as_ref().map_or(0, |loc| loc.chapter);
+            let page = comics.read_page(db, blobs, &book_id, index)?;
+            let source = comics
+                .source(db, blobs, &book_id)?
+                .filter(|source| source.novel_id == novel_id);
+            Event::CompanionOpened {
+                novel_id,
+                book,
+                page,
+                source,
             }
         }
         Command::ReadComicPage {

@@ -13,12 +13,12 @@ use crate::{image_extension, ComicPage, Storyboard, MAX_CHAPTER_CHARS};
 
 pub mod automatic;
 
-
 const MAX_PAGES: u32 = 128;
 const MAX_CBZ_BYTES: i64 = 512 * 1024 * 1024;
 // The reader applies its limit to the entire ZIP file, including its entry headers and directory.
 const CBZ_HEADER_RESERVE: i64 = 16 * 1024;
-const MAX_PROJECT_IMAGE_BYTES: i64 = MAX_CBZ_BYTES - CBZ_HEADER_RESERVE;
+const CBZ_SOURCE_RESERVE: i64 = 2048;
+const MAX_PROJECT_IMAGE_BYTES: i64 = MAX_CBZ_BYTES - CBZ_HEADER_RESERVE - CBZ_SOURCE_RESERVE;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -145,8 +145,13 @@ impl Project {
     }
 
     pub fn add(&mut self, draft: Draft) -> Result<Page, ProjectError> {
-        draft.validate()?;
-        let raw = serde_json::to_string(&draft)?;
+        self.add_all(vec![draft]).map(|mut pages| pages.remove(0))
+    }
+
+    pub(super) fn add_all(&mut self, drafts: Vec<Draft>) -> Result<Vec<Page>, ProjectError> {
+        for draft in &drafts {
+            draft.validate()?;
+        }
         let write = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -155,22 +160,27 @@ impl Project {
             [&self.book_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if count >= MAX_PAGES {
+        if drafts.len() > (MAX_PAGES - count.min(MAX_PAGES)) as usize {
             return Err(ProjectError::TooManyPages);
         }
-        let (id, revision) = write.query_row(
-            "INSERT INTO manga_page(book_id, position, draft) VALUES (?1, ?2, ?3)
-             RETURNING id, revision",
-            params![self.book_id, position, raw],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let mut pages = Vec::with_capacity(drafts.len());
+        for (index, draft) in drafts.into_iter().enumerate() {
+            let raw = serde_json::to_string(&draft)?;
+            let (id, revision) = write.query_row(
+                "INSERT INTO manga_page(book_id, position, draft) VALUES (?1, ?2, ?3)
+                 RETURNING id, revision",
+                params![self.book_id, position + index as i64, raw],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            pages.push(Page {
+                id,
+                revision,
+                draft,
+                rendered: false,
+            });
+        }
         write.commit()?;
-        Ok(Page {
-            id,
-            revision,
-            draft,
-            rendered: false,
-        })
+        Ok(pages)
     }
 
     pub fn save(&mut self, mut page: Page) -> Result<Page, ProjectError> {
@@ -297,6 +307,15 @@ impl Project {
     }
 
     pub fn export_cbz(&mut self, output: impl Write + Seek) -> Result<u32, ProjectError> {
+        let novel_id = self.book_id.clone();
+        self.export_for_novel(output, &novel_id)
+    }
+
+    fn export_for_novel(
+        &mut self,
+        output: impl Write + Seek,
+        novel_id: &str,
+    ) -> Result<u32, ProjectError> {
         let read = self.db.transaction()?;
         let (total, rendered, bytes): (u32, u32, i64) = read.query_row(
             "SELECT COUNT(*), COUNT(image), COALESCE(SUM(LENGTH(image)), 0)
@@ -313,6 +332,25 @@ impl Project {
         let mut archive = zip::ZipWriter::new(output);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let chapter_list = {
+            let mut statement =
+                read.prepare("SELECT draft FROM manga_page WHERE book_id = ?1 ORDER BY position")?;
+            let rows = statement.query_map([&self.book_id], |row| row.get::<_, String>(0))?;
+            rows.map(|row| {
+                let draft: Draft = serde_json::from_str(&row?)?;
+                Ok(draft.chapter)
+            })
+            .collect::<Result<Vec<_>, ProjectError>>()?
+        };
+        let source = vm_core::ComicSource {
+            version: 1,
+            novel_id: novel_id.to_owned(),
+            chapters: chapter_list,
+        };
+        if source.valid_for(total as usize) {
+            archive.start_file(vm_core::COMIC_SOURCE_ENTRY, options)?;
+            serde_json::to_writer(&mut archive, &source)?;
+        }
         let mut statement =
             read.prepare("SELECT image FROM manga_page WHERE book_id = ?1 ORDER BY position")?;
         let images = statement.query_map([&self.book_id], |row| row.get::<_, Vec<u8>>(0))?;

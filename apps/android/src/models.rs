@@ -12,14 +12,15 @@ use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use vm_ai::{
     manga::Layout,
+    pool::Config,
     reading::{self, Action, Language, Source, MAX_QUERY_CHARS, MAX_SOURCE_CHARS},
     route::Strategy,
-    service::{ComicService, Connection},
+    service::{legacy_config, ComicService, SessionKeys},
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    model_settings::{self, ConnectionSettings, Settings, MAX_CONNECTIONS},
+    model_settings::{self, ConnectionSettings, Profile, Settings, SharedPool, MAX_CONNECTIONS},
     saf, theme,
 };
 
@@ -35,6 +36,8 @@ enum Field {
     Memory,
     MangaSource,
     ArtStyle,
+    PoolConfig,
+    PoolKey,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -53,7 +56,7 @@ enum ExtensionResult {
 }
 
 type Reply = Result<(String, String), String>;
-type Task = (Option<Arc<ComicService>>, String, Reply);
+type Task = (String, Reply);
 
 pub struct Models {
     path: PathBuf,
@@ -68,10 +71,12 @@ pub struct Models {
     comic: Option<tempfile::TempPath>,
     memory_book: Option<String>,
     settings: Settings,
+    profile: Option<Config>,
+    pool_keys: SessionKeys,
+    pool: SharedPool,
     keys: Vec<Zeroizing<String>>,
     selected: usize,
     editing: Option<(usize, Field)>,
-    service: Option<Arc<ComicService>>,
     result: Option<Receiver<Task>>,
     settings_status: String,
     action: Action,
@@ -83,9 +88,10 @@ pub struct Models {
 impl Models {
     pub fn new(data: &Path) -> Self {
         let path = data.join("ai-model-pool.json");
-        let (settings, settings_status) = match model_settings::read_settings(&path) {
-            Ok(settings) => (settings, String::new()),
-            Err(error) => (Settings::default(), format!("读取配置失败：{error}")),
+        let (settings, profile, settings_status) = match model_settings::read_settings(&path) {
+            Ok(Profile::Legacy(settings)) => (settings, None, String::new()),
+            Ok(Profile::Pools(config)) => (Settings::default(), Some(config), String::new()),
+            Err(error) => (Settings::default(), None, format!("读取配置失败：{error}")),
         };
         let keys = vec![Zeroizing::new(String::new()); settings.connections.len()];
         let extras_path = data.join("ai-reading-options.json");
@@ -113,10 +119,12 @@ impl Models {
             comic: None,
             memory_book: None,
             settings,
+            profile,
+            pool_keys: SessionKeys::new(),
+            pool: SharedPool::default(),
             keys,
             selected: 0,
             editing: None,
-            service: None,
             result: None,
             settings_status,
             action: Action::Explain,
@@ -194,12 +202,22 @@ impl Models {
                                 self.extras.art_style = value;
                                 self.save_extras();
                             }
+                            Field::PoolConfig => self.apply_config(&value),
+                            Field::PoolKey => {
+                                if let Some(reference) = self.session_refs().get(index).cloned() {
+                                    if value.is_empty() {
+                                        self.pool_keys.remove(&reference);
+                                    } else {
+                                        self.pool_keys.insert(reference, Zeroizing::new(value));
+                                    }
+                                    self.settings_status = self.service().err().unwrap_or_default();
+                                }
+                            }
                         }
                         if matches!(
                             field,
                             Field::Endpoint | Field::Model | Field::Image | Field::Key
                         ) {
-                            self.service = None;
                             self.settings_status.clear();
                         }
                     }
@@ -212,8 +230,7 @@ impl Models {
         }
         if let Some(receiver) = &self.result {
             match receiver.try_recv() {
-                Ok((service, excerpt, result)) => {
-                    self.service = service;
+                Ok((excerpt, result)) => {
                     if excerpt == self.excerpt {
                         self.reply = Some(result);
                     }
@@ -437,14 +454,12 @@ impl Models {
         (self.extras.layout, &self.extras.art_style)
     }
 
-    pub fn manga_connections(&self) -> Result<(Vec<Connection>, Strategy), String> {
-        let connections = self.connections()?;
-        if !connections.iter().any(|c| !c.text_model.is_empty())
-            || !connections.iter().any(|c| !c.image_model.is_empty())
-        {
+    pub fn manga_service(&self) -> Result<Arc<ComicService>, String> {
+        let service = self.service()?;
+        if !service.pool().has_task("planner") || !service.pool().has_task("manga_image") {
             return Err("请在模型库配置文本模型和图像模型。".into());
         }
-        Ok((connections, self.settings.strategy))
+        Ok(service)
     }
 
     pub fn manga(&mut self, ui: &mut egui::Ui, app: &AndroidApp) {
@@ -499,19 +514,13 @@ impl Models {
                     )
                     .clicked()
                 {
-                    let connections = match self.connections() {
-                        Ok(connections)
-                            if connections.iter().any(|c| !c.image_model.is_empty())
-                                && connections.iter().any(|c| !c.text_model.is_empty()) =>
-                        {
-                            connections
-                        }
-                        _ => {
-                            self.extension_status = "请在模型库配置文本模型与图像模型".into();
+                    let service = match self.manga_service() {
+                        Ok(service) => service,
+                        Err(error) => {
+                            self.extension_status = error;
                             return;
                         }
                     };
-                    let strategy = self.settings.strategy;
                     let layout = self.extras.layout;
                     let style = self.extras.art_style.clone();
                     let source = self.manga_source.clone();
@@ -521,8 +530,6 @@ impl Models {
                         .expect("settings has a parent")
                         .to_owned();
                     self.start_extension(ui.ctx(), move || {
-                        let service = ComicService::new(connections, strategy)
-                            .map_err(|error| error.to_string())?;
                         let board = service
                             .storyboard(&source)
                             .map_err(|error| error.to_string())?;
@@ -581,18 +588,73 @@ impl Models {
     pub fn configure(&mut self, ui: &mut egui::Ui, android: &AndroidApp, library: bool) {
         let p = theme::palette(ui.visuals().dark_mode);
         let working = self.result.is_some() || self.editing.is_some();
+        if !library || self.profile.is_some() {
+            if ui
+                .add_enabled(
+                    !working,
+                    egui::Button::new("编辑模型池 JSON").min_size(egui::vec2(120.0, 46.0)),
+                )
+                .clicked()
+            {
+                let value = self
+                    .profile
+                    .as_ref()
+                    .and_then(|config| serde_json::to_string_pretty(config).ok())
+                    .or_else(|| {
+                        let (config, _) = legacy_config(
+                            self.settings.connections(|_| String::new()),
+                            self.settings.strategy,
+                        );
+                        config.validate().ok()?;
+                        serde_json::to_string_pretty(&config).ok()
+                    })
+                    .unwrap_or_default();
+                self.edit_extra(
+                    android,
+                    Field::PoolConfig,
+                    "模型池 JSON",
+                    &value,
+                    3,
+                    1_048_576,
+                );
+            }
+            model_settings::show_status(ui, &self.pool);
+        }
+        if self.profile.is_some() {
+            ui.add_enabled_ui(!working, |ui| {
+                for (index, reference) in self.session_refs().into_iter().enumerate() {
+                    if mobile_ui_key(ui, &reference, self.pool_keys.contains_key(&reference))
+                        .clicked()
+                    {
+                        let secret = self
+                            .pool_keys
+                            .get(&reference)
+                            .map_or("", |key| key.as_str());
+                        match saf::edit_field(android, &reference, secret, 2, 2048) {
+                            Ok(()) => self.editing = Some((index, Field::PoolKey)),
+                            Err(error) => self.settings_status = error,
+                        }
+                    }
+                }
+                if ui.button("刷新池状态").clicked() {
+                    self.settings_status = self.service().err().unwrap_or_default();
+                }
+            });
+            if !self.settings_status.is_empty() {
+                ui.label(&self.settings_status);
+            }
+            return;
+        }
         ui.add_enabled_ui(!working, |ui| {
             if !library {
                 ui.label(RichText::new("路由方式").strong().color(p.ink));
-                let previous = self.settings.strategy;
+
                 ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut self.settings.strategy, Strategy::Ordered, "按顺序");
                     ui.selectable_value(&mut self.settings.strategy, Strategy::RoundRobin, "轮询");
                     ui.selectable_value(&mut self.settings.strategy, Strategy::Random, "随机");
                 });
-                if previous != self.settings.strategy {
-                    self.service = None;
-                }
+
                 let mut move_to = None;
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -615,25 +677,18 @@ impl Models {
                     self.settings.connections.swap(self.selected, next);
                     self.keys.swap(self.selected, next);
                     self.selected = next;
-                    self.service = None;
                 }
                 let config = &mut self.settings.connections[self.selected];
                 let mut concurrency = config.concurrency.unwrap_or(1);
                 ui.horizontal_wrapped(|ui| {
                     ui.label("每分钟请求数");
-                    if ui
-                        .add(egui::DragValue::new(&mut config.rpm).range(0..=100_000))
-                        .changed()
-                    {
-                        self.service = None;
-                    }
+                    ui.add(egui::DragValue::new(&mut config.rpm).range(0..=10_000));
                     ui.label("并发");
                     if ui
                         .add(egui::DragValue::new(&mut concurrency).range(1..=64))
                         .changed()
                     {
                         config.concurrency = Some(concurrency);
-                        self.service = None;
                     }
                 });
                 ui.label(
@@ -661,7 +716,6 @@ impl Models {
                         .push(ConnectionSettings::default());
                     self.keys.push(Zeroizing::new(String::new()));
                     self.selected = self.settings.connections.len() - 1;
-                    self.service = None;
                 }
             });
             let current = &self.settings.connections[self.selected];
@@ -731,7 +785,7 @@ impl Models {
                     .clicked()
                 {
                     self.settings_status = match self
-                        .connections()
+                        .service()
                         .and_then(|_| model_settings::write_settings(&self.path, &self.settings))
                     {
                         Ok(()) => "已保存模型池。".into(),
@@ -749,7 +803,6 @@ impl Models {
                     self.keys.remove(self.selected);
                     self.selected = self.selected.min(self.settings.connections.len() - 1);
                     self.settings_status.clear();
-                    self.service = None;
                 }
             });
         });
@@ -797,7 +850,7 @@ impl Models {
                         .id_salt("ai-excerpt")
                         .max_height(112.0)
                         .show(ui, |ui| {
-                            ui.label(&self.excerpt);
+                            ui.label(RichText::new(&self.excerpt).color(p.ink));
                         });
                 });
             ui.add_space(8.0);
@@ -823,7 +876,7 @@ impl Models {
             Some(Ok((model, reply))) => {
                 ui.separator();
                 ui.label(RichText::new(model).color(p.muted).size(12.0));
-                ui.label(reply);
+                ui.label(RichText::new(reply).color(p.ink));
             }
             Some(Err(error)) => {
                 ui.label(RichText::new(error).color(p.danger));
@@ -833,56 +886,75 @@ impl Models {
         settings
     }
 
-    fn connections(&self) -> Result<Vec<Connection>, String> {
-        self.settings
-            .connections
-            .iter()
-            .zip(&self.keys)
-            .enumerate()
-            .map(|(index, (item, key))| {
-                if item.endpoint.trim().is_empty()
-                    || (item.text_model.trim().is_empty() && item.image_model.trim().is_empty())
-                {
-                    return Err(format!(
-                        "请填写连接 {} 的服务地址和至少一种模型。",
-                        index + 1
-                    ));
-                }
-                vm_ai::validate_endpoint(&item.endpoint)
-                    .map_err(|error| format!("连接 {}：{error}", index + 1))?;
-                Ok(Connection {
-                    endpoint: item.endpoint.clone(),
-                    key: key.to_string(),
-                    text_model: item.text_model.clone(),
-                    image_model: item.image_model.clone(),
-                    rpm: item.rpm,
-                    concurrency: item.concurrency.unwrap_or(1),
-                })
-            })
+    pub fn service(&self) -> Result<Arc<ComicService>, String> {
+        match &self.profile {
+            Some(config) => self.pool.configured(config, &self.pool_keys),
+            None => self
+                .pool
+                .legacy(&self.settings, |index| self.keys[index].to_string(), false),
+        }
+    }
+
+    fn session_refs(&self) -> Vec<String> {
+        self.profile
+            .as_ref()
+            .into_iter()
+            .flat_map(|config| config.providers.values())
+            .flat_map(|provider| &provider.keys)
+            .filter(|reference| reference.starts_with("session:"))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect()
     }
 
-    fn send(&mut self, ctx: &egui::Context) {
-        let configuration = if let Some(service) = &self.service {
-            Ok(service.clone())
-        } else {
-            match self.connections() {
-                Ok(connections) => Err(connections),
-                Err(error) => {
-                    self.reply = Some(Err(error));
-                    return;
+    fn apply_config(&mut self, value: &str) {
+        self.settings_status =
+            match model_settings::parse_config(value.as_bytes()).and_then(|config| {
+                model_settings::write_config(&self.path, &config)?;
+                if self.profile.as_ref() != Some(&config) {
+                    self.pool_keys.clear();
                 }
+                self.profile = Some(config);
+                self.service()?;
+                Ok(())
+            }) {
+                Ok(()) => "已保存模型池配置。".into(),
+                Err(error) => error,
+            };
+    }
+
+    fn send(&mut self, ctx: &egui::Context) {
+        let service = match self.service() {
+            Ok(service) => service,
+            Err(error) => {
+                self.reply = Some(Err(error));
+                return;
             }
         };
         let (send, receive) = bounded(1);
-        let strategy = self.settings.strategy;
         let action = self.action;
         let language = if action == Action::Translate {
             self.language
         } else {
             Language::Chinese
         };
-        let mut prompt = self.extras.prompt.clone();
+        let plugin_prompt = match crate::plugins::Registry::load(
+            self.path.parent().unwrap_or_else(|| Path::new(".")),
+        ) {
+            Ok(registry) => registry.prompt_for(action),
+            Err(error) => {
+                self.reply = Some(Err(error));
+                return;
+            }
+        };
+        let mut prompt = plugin_prompt;
+        if !self.extras.prompt.trim().is_empty() {
+            if !prompt.is_empty() {
+                prompt.push('\n');
+            }
+            prompt.push_str(self.extras.prompt.trim());
+        }
         if action != Action::Translate {
             if let Some(memory) = self
                 .memory_book
@@ -898,18 +970,10 @@ impl Models {
         match thread::Builder::new()
             .name("velmira-model-pool".into())
             .spawn(move || {
-                let service = configuration
-                    .or_else(|config| ComicService::new(config, strategy).map(Arc::new));
-                let outcome = match service {
-                    Ok(service) => {
-                        let reply = service
-                            .read_excerpt_with_prompt(action, language, &excerpt, &prompt)
-                            .map_err(|error| error.to_string());
-                        (Some(service), reply)
-                    }
-                    Err(error) => (None, Err(error.to_string())),
-                };
-                let _ = send.send((outcome.0, excerpt, outcome.1));
+                let reply = service
+                    .read_excerpt_with_prompt(action, language, &excerpt, &prompt)
+                    .map_err(|error| error.to_string());
+                let _ = send.send((excerpt, reply));
                 ctx.request_repaint();
             }) {
             Ok(_) => {
@@ -919,4 +983,18 @@ impl Models {
             Err(error) => self.reply = Some(Err(error.to_string())),
         }
     }
+}
+
+fn mobile_ui_key(ui: &mut egui::Ui, reference: &str, configured: bool) -> egui::Response {
+    let p = theme::palette(ui.visuals().dark_mode);
+    let label = format!(
+        "{} · {}",
+        reference,
+        if configured {
+            "已填写"
+        } else {
+            "填写密钥"
+        }
+    );
+    crate::mobile_ui::list_row(ui, reference, &label, p.ink, p.surface2)
 }

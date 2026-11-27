@@ -191,7 +191,11 @@ public final class MainActivity extends NativeActivity {
             textResult = "cancel";
             return;
         }
-        EditText field = new EditText(this);
+        int dialogTheme = lightTheme
+            ? android.R.style.Theme_Material_Light_Dialog_Alert
+            : android.R.style.Theme_Material_Dialog_Alert;
+        AlertDialog.Builder builder = new AlertDialog.Builder(this, dialogTheme);
+        EditText field = new EditText(builder.getContext());
         int type = InputType.TYPE_CLASS_TEXT;
         if (kind == 1) {
             type |= InputType.TYPE_TEXT_VARIATION_URI;
@@ -205,15 +209,12 @@ public final class MainActivity extends NativeActivity {
         field.setFilters(new InputFilter[] { new InputFilter.LengthFilter(limit) });
         field.setText(value);
         field.setSelection(field.length());
-        FrameLayout container = new FrameLayout(this);
+        FrameLayout container = new FrameLayout(builder.getContext());
         int padding = Math.round(24 * getResources().getDisplayMetrics().density);
         container.setPadding(padding, 0, padding, 0);
         container.addView(field, new FrameLayout.LayoutParams(-1, -2));
         String[] reply = { "cancel" };
-        int dialogTheme = lightTheme
-            ? android.R.style.Theme_Material_Light_Dialog_Alert
-            : android.R.style.Theme_Material_Dialog_Alert;
-        textDialog = new AlertDialog.Builder(this, dialogTheme)
+        textDialog = builder
             .setTitle(title)
             .setView(container)
             .setNegativeButton("取消", null)
@@ -267,7 +268,16 @@ public final class MainActivity extends NativeActivity {
             }
         }
         // The native event loop belongs to this activity for the lifetime of the process.
-        moveTaskToBack(true);
+        backgroundTask();
+    }
+
+    public void backgroundTask() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                moveTaskToBack(true);
+            }
+        });
     }
 
     public void beginBookImport() {

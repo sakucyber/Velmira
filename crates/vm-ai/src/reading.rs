@@ -260,8 +260,21 @@ impl Provider {
         prompt: &str,
         timeout: Duration,
     ) -> Result<String, ReadingError> {
+        self.read_with_usage(action, language, excerpt, prompt, &self.text_model, timeout)
+            .map(|(text, _)| text)
+    }
+
+    pub(crate) fn read_with_usage(
+        &self,
+        action: Action,
+        language: Language,
+        excerpt: &str,
+        prompt: &str,
+        model: &str,
+        timeout: Duration,
+    ) -> Result<(String, Option<crate::pool::Usage>), ReadingError> {
         let excerpt = checked_excerpt(excerpt)?;
-        if self.text_model.trim().is_empty() {
+        if model.trim().is_empty() {
             return Err(Error::Model.into());
         }
         let task = match action {
@@ -280,7 +293,7 @@ impl Provider {
         let response: ChatCompletion = self.post(
             "chat/completions",
             json!({
-                "model": self.text_model,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": excerpt}
@@ -301,6 +314,6 @@ impl Provider {
         {
             return Err(ReadingError::Output);
         }
-        Ok(result.to_owned())
+        Ok((result.to_owned(), response.usage))
     }
 }

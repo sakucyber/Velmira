@@ -73,6 +73,33 @@ impl Comic {
         self.texture.is_some()
     }
 
+    pub fn page_index(&self) -> u32 {
+        self.page
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn page_count(&self) -> u32 {
+        self.summary.as_ref().map_or(0, |book| book.chapter_count)
+    }
+
+    pub fn set_fit_width(&mut self, fit_width: bool) {
+        self.fit_width = fit_width;
+    }
+
+    pub fn request_page(&mut self, index: u32) -> Option<(String, u32)> {
+        let book = self.summary.as_ref()?;
+        if index == self.page
+            || index >= book.chapter_count
+            || self.pending.is_some()
+            || self.pending_page.is_some()
+            || self.decoding.is_some()
+        {
+            return None;
+        }
+        self.pending = Some(index);
+        Some((book.id.clone(), index))
+    }
+
     pub fn open(&mut self, book: BookSummary, page: ComicPage) {
         self.close();
         self.summary = Some(book);
@@ -160,33 +187,15 @@ impl Comic {
     }
 
     #[cfg(target_os = "android")]
-    pub fn title(&self) -> &str {
-        self.summary.as_ref().map_or("", |book| &book.title)
-    }
-
-    #[cfg(target_os = "android")]
     pub fn take_tools_request(&mut self) -> bool {
         std::mem::take(&mut self.tools_requested)
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn fit_mode_label(&self) -> &'static str {
-        if self.fit_width {
-            "适页"
-        } else {
-            "适宽"
-        }
-    }
-
-    #[cfg(target_os = "android")]
-    pub fn toggle_fit_mode(&mut self) {
-        self.fit_width = !self.fit_width;
     }
 
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         chinese: bool,
+        #[cfg(not(target_os = "android"))] keyboard_enabled: bool,
         #[cfg(target_os = "android")] blocked: bool,
         #[cfg(target_os = "android")] tap_area: Rect,
     ) -> Option<(String, u32)> {
@@ -198,27 +207,40 @@ impl Comic {
         let busy = self.pending.is_some() || self.decoding.is_some() || self.pending_page.is_some();
         let (mut previous, mut next) = (false, false);
         #[cfg(not(target_os = "android"))]
-        ui.horizontal_wrapped(|ui| {
-            previous = ui
-                .add_enabled(
-                    !busy && self.page > 0,
-                    egui::Button::new(tr("上一页", "Previous")),
-                )
-                .clicked();
-            ui.label(format!("{} / {total_pages}", self.page + 1));
-            next = ui
-                .add_enabled(
-                    !busy && self.page + 1 < total_pages,
-                    egui::Button::new(tr("下一页", "Next")),
-                )
-                .clicked();
-            ui.separator();
-            ui.selectable_value(&mut self.fit_width, false, tr("适页", "Fit page"));
-            ui.selectable_value(&mut self.fit_width, true, tr("适宽", "Fit width"));
-        });
+        {
+            let palette = crate::theme::palette(ui.visuals().dark_mode);
+            let tokens = crate::theme::Tokens::desktop();
+            crate::ui::card(ui, palette, tokens, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    previous = ui
+                        .add_enabled(
+                            !busy && self.page > 0,
+                            egui::Button::new(tr("上一页", "Previous")),
+                        )
+                        .clicked();
+                    ui.label(format!("{} / {total_pages}", self.page + 1));
+                    next = ui
+                        .add_enabled(
+                            !busy && self.page + 1 < total_pages,
+                            egui::Button::new(tr("下一页", "Next")),
+                        )
+                        .clicked();
+                    ui.separator();
+                    ui.selectable_value(&mut self.fit_width, false, tr("适页", "Fit page"));
+                    ui.selectable_value(&mut self.fit_width, true, tr("适宽", "Fit width"));
+                });
+            });
+        }
         #[cfg(not(target_os = "android"))]
         let blocked = false;
-        if ui.is_enabled() && !blocked && !busy && !ui.ctx().wants_keyboard_input() {
+        #[cfg(target_os = "android")]
+        let keyboard_enabled = true;
+        if keyboard_enabled
+            && ui.is_enabled()
+            && !blocked
+            && !busy
+            && !ui.ctx().wants_keyboard_input()
+        {
             (previous, next) = ui.input(|state| {
                 (
                     previous

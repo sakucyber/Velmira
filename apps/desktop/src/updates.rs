@@ -34,6 +34,25 @@ pub struct Updates {
 }
 
 impl Updates {
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+        self.etag = None;
+        self.release = None;
+        self.last_status.clear();
+    }
+
+    pub fn automatic(&self) -> bool {
+        self.automatic
+    }
+
+    pub fn set_automatic(&mut self, automatic: bool) {
+        self.automatic = automatic;
+    }
+
     pub fn new(start: Instant, automatic: bool) -> Self {
         Self {
             open: false,

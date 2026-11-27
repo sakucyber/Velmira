@@ -2791,6 +2791,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4094,7 +4100,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velmira-android"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "android-activity",
  "crossbeam-channel",
@@ -4121,6 +4127,7 @@ dependencies = [
  "crossbeam-channel",
  "directories",
  "eframe",
+ "qrcode",
  "rfd",
  "rusqlite",
  "serde",
@@ -4149,12 +4156,17 @@ name = "vm-ai"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "blake3",
+ "log",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
+ "vm-core",
  "vm-media",
+ "zeroize",
  "zip",
 ]
 
@@ -4174,6 +4186,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "roxmltree",
+ "serde_json",
  "thiserror 2.0.21",
  "vm-core",
  "zip",
